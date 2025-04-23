@@ -34,6 +34,22 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **🔄 Error Handling**: Robust error handling with informative messages and toast notifications.
 
+## 📸 Screenshots
+
+### Text Printing
+![Text Printing](doc/images/Screenshot_01_text_print.png)
+
+### Image Printing
+![Image Printing](doc/images/Screenshot_03_Image_print.png)
+
+
+### QR Code
+![QR Code](doc/images/Screenshot_04_QR_Code.png)
+
+### Text and QR Code
+![Text and QR Code](doc/images/Screenshot_05_Text_QR.png)
+
+
 ## 🏗️ Architecture
 
 The application follows a modern, API-first approach with clear separation of concerns:
