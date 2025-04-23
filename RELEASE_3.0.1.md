@@ -18,18 +18,16 @@ This release includes the following security updates:
   - CVE-2024-6221 (CVSS 8.7 - High): A vulnerability in the CORS handling
   - CVE-2024-1681 (CVSS 5.3 - Medium): A vulnerability in the request processing
 
-- **werkzeug**: Updated to 3.0.6+ to fix:
-  - CVE-2024-34069 (CVSS 7.5 - High): A vulnerability in the request handling
-  - CVE-2024-49767 (CVSS 6.9 - Medium): A vulnerability in the HTTP server
-  - CVE-2024-49766 (CVSS 6.3 - Medium): A vulnerability in the request processing
-  - CVE-2023-46136 (CVSS 5.7 - Medium): A vulnerability in the URL handling
-
 - **pip**: Updated to 23.3+ to fix:
   - CVE-2023-5752 (CVSS 6.8 - Medium): A vulnerability in the package installation
 
 - **setuptools**: Updated to 70.0.0+ to fix:
   - CVE-2022-40897 (CVSS 8.7 - High): A vulnerability in the package installation
   - CVE-2024-6345 (CVSS 7.5 - High): A vulnerability in the package handling
+
+## Known Issues
+
+- **werkzeug**: Due to compatibility constraints with connexion 2.14.2, we cannot update werkzeug to version 3.0.6+ which would fix several vulnerabilities (CVE-2024-34069, CVE-2024-49767, CVE-2024-49766, CVE-2023-46136). This will be addressed in a future release by updating connexion.
 
 ## Installation
 

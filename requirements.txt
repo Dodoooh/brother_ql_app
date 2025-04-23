@@ -1,11 +1,12 @@
 # Core dependencies
-Flask>=2.0.0,<3.0.0
+Flask>=2.0.0,<2.3.0
 connexion[swagger-ui]==2.14.2
 python-dotenv==1.0.0
 marshmallow==3.20.1
 pydantic==2.4.2
 flask-cors==4.0.2
-werkzeug>=3.0.6
+# Note: We can't use werkzeug>=3.0.6 due to compatibility with connexion 2.14.2
+# Instead, we'll need to update connexion in a future release
 
 # Printer communication
 brother-ql==0.9.4
