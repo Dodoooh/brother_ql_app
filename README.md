@@ -1,11 +1,11 @@
 # Brother QL Printer App
 
-![Docker Pulls](https://img.shields.io/docker/pulls/dodoooh/brother_ql_app)
-![GitHub Release](https://img.shields.io/github/v/release/dodoooh/brother_ql_app)
-![GitHub Issues](https://img.shields.io/github/issues/dodoooh/brother_ql_app)
-![Version](https://img.shields.io/badge/version-4.0.0-blue)
+[![Docker Pulls](https://img.shields.io/docker/pulls/dodoooh/brother_ql_app)](https://hub.docker.com/r/dodoooh/brother_ql_app)
+[![GitHub Release](https://img.shields.io/github/v/release/dodoooh/brother_ql_app)](https://github.com/dodoooh/brother_ql_app/releases)
+[![GitHub Issues](https://img.shields.io/github/issues/dodoooh/brother_ql_app)](https://github.com/dodoooh/brother_ql_app/issues)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue)](https://github.com/dodoooh/brother_ql_app/blob/main/changelog.md)
 
-A modern web application to control Brother QL printers, enabling customizable text and image printing with ease.
+A modern web application to control Brother QL printers, enabling customizable text, image, and QR code printing with ease.
 
 ## 🚀 Features
 
@@ -13,11 +13,18 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **🖼 Image Printing**: Upload and print images effortlessly to create visually appealing labels.
 
+- **📱 QR Code Generation**: Create and print QR codes for URLs, contact information, or any text data.
+
+- **🔀 Combined Layouts**: Print text and QR codes together with customizable positioning.
+- **👁️ Live Preview**: See how your labels will look before printing for all label types.
+
 - **⚙️ Custom Settings**: Fine-tune font size, label size, and text alignment to match your specific needs.
 
 - **🔗 API Support**: Seamlessly integrate with external systems like Home Assistant ❤️ via a comprehensive, documented API.
 
 - **🖨 Multiple Printer Support**: Control multiple printers simultaneously via the API, enabling the use of different label sizes and configurations for various tasks.
+
+- **🔄 Printer Keep Alive**: Prevent your printer from shutting down with the keep alive feature.
 
 - **📱 Responsive Design**: Enjoy a smooth user experience on desktop, tablet, and smartphone devices.
 
@@ -25,29 +32,26 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **📚 Swagger Documentation**: Explore and test the API using the built-in Swagger UI documentation.
 
-- **🔄 Error Handling**: Robust error handling with informative messages for troubleshooting.
+- **🔄 Error Handling**: Robust error handling with informative messages and toast notifications.
 
 ## 🏗️ Architecture
 
 The application follows a modern, API-first approach with clear separation of concerns:
 
-- **Frontend**: Responsive web interface built with HTML5, CSS3, and JavaScript with Bootstrap 5
+- **Frontend**: Responsive web interface built with HTML5, CSS3, and JavaScript with Bootstrap 5 and Bootstrap Icons
 - **Backend**: Python Flask application with Connexion for OpenAPI/Swagger integration
-- **API**: RESTful API with comprehensive documentation
-- **Services**: Modular services for printer communication, settings management, etc.
+- **API**: RESTful API with comprehensive documentation and structured error responses
+- **Services**: Modular services for printer communication, settings management, QR code generation, etc.
 
 ## 🐳 Installation with Docker
 
-### Docker Images
+### Docker Image
 
-The application is available as Docker images from both GitHub Container Registry and DockerHub:
+The application is available as a Docker image from DockerHub:
 
 ```bash
-# GitHub Container Registry
-docker pull ghcr.io/dodoooh/brother_ql_app:latest  # or specific version: ghcr.io/dodoooh/brother_ql_app:v4.0.0
-
 # DockerHub
-docker pull dodoooh/brother_ql_app:latest  # or specific version: dodoooh/brother_ql_app:v4.0.0
+docker pull dodoooh/brother_ql_app:latest  # or specific version: dodoooh/brother_ql_app:v3.0.0
 ```
 
 ### Using Docker Compose
@@ -59,7 +63,7 @@ version: '3.8'
 
 services:
   brother_ql_app:
-    image: dodoooh/brother_ql_app:latest  # or ghcr.io/dodoooh/brother_ql_app:latest
+    image: dodoooh/brother_ql_app:latest
     container_name: brother_ql_app
     ports:
       - "5000:5000"
@@ -87,7 +91,7 @@ docker run -d \
   -v ./data:/app/data \
   -v ./src/config:/app/src/config \
   -v ./uploads:/app/uploads \
-  dodoooh/brother_ql_app:latest  # or ghcr.io/dodoooh/brother_ql_app:latest
+  dodoooh/brother_ql_app:latest
 ```
 
 ### Access the Application
@@ -134,6 +138,9 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 - **POST /api/v1/printers/status**: Check printer status
 - **POST /api/v1/text/print**: Print text on a label
 - **POST /api/v1/image/print**: Print image on a label
+- **POST /api/v1/qrcode/print**: Print QR code on a label
+- **POST /api/v1/label/text-qrcode**: Print combined text and QR code on a label
+- **POST /api/v1/printers/keep-alive**: Control the printer keep alive feature
 
 ## 📤 Example API Usage
 
@@ -146,15 +153,17 @@ import requests
 
 url = 'http://localhost:5000/api/v1/text/print'
 payload = {
-    "text": "Hello World!\nThis is a test print.",
+    "text": {
+        "content": "Hello World!\nThis is a test print.",
+        "font_size": 40,
+        "alignment": "center"
+    },
     "settings": {
         "printer_uri": "tcp://192.168.1.100",
         "printer_model": "QL-800",
         "label_size": "62",
-        "font_size": 40,
-        "alignment": "center",
         "rotate": 90,
-        "threshold": 80.0,
+        "threshold": 70.0,
         "dither": True,
         "compress": True,
         "red": False
@@ -180,14 +189,16 @@ import json
 url = 'http://localhost:5000/api/v1/image/print'
 image_path = '/path/to/image.jpg'  # Replace with the path to your image
 settings = {
-    "printer_uri": "tcp://192.168.1.100",
-    "printer_model": "QL-800",
-    "label_size": "62",
-    "rotate": 180,
-    "threshold": 75.0,
-    "dither": False,
-    "compress": False,
-    "red": True
+    "settings": {
+        "printer_uri": "tcp://192.168.1.100",
+        "printer_model": "QL-800",
+        "label_size": "62",
+        "rotate": 180,
+        "threshold": 70.0,
+        "dither": False,
+        "compress": False,
+        "red": True
+    }
 }
 
 with open(image_path, 'rb') as img_file:
@@ -195,9 +206,136 @@ with open(image_path, 'rb') as img_file:
         'image': img_file
     }
     data = {
-        'settings': json.dumps(settings)
+        'settings': json.dumps(settings["settings"])
     }
     response = requests.post(url, files=files, data=data)
+
+if response.status_code == 200:
+    print("Success:", response.json())
+else:
+    print("Error:", response.status_code, response.json())
+```
+
+### **QR Code Printing**
+
+Use the `/api/v1/qrcode/print` endpoint to generate and print a QR code.
+
+```python
+import requests
+
+url = 'http://localhost:5000/api/v1/qrcode/print'
+payload = {
+    "qr": {
+        "data": "https://github.com/dodoooh/brother_ql_app",
+        "box_size": 10,
+        "border": 4,
+        "error_correction": "M",
+        "version": 1,
+        "size": 400
+    },
+    "settings": {
+        "printer_uri": "tcp://192.168.1.100",
+        "printer_model": "QL-800",
+        "label_size": "62",
+        "rotate": 0,
+        "threshold": 70.0,
+        "dither": False,
+        "compress": False,
+        "red": False
+    }
+}
+
+response = requests.post(url, json=payload)
+
+if response.status_code == 200:
+    print("Success:", response.json())
+else:
+    print("Error:", response.status_code, response.json())
+```
+
+### **Combined Text and QR Code**
+
+Use the `/api/v1/label/text-qrcode` endpoint to print text and QR code together.
+
+```python
+import requests
+
+url = 'http://localhost:5000/api/v1/label/text-qrcode'
+payload = {
+    "text": {
+        "content": "Product: Widget XYZ\nSKU: 12345\nPrice: $19.99",
+        "font_size": 30,
+        "alignment": "left"
+    },
+    "qr": {
+        "data": "https://github.com/dodoooh/brother_ql_app",
+        "box_size": 10,
+        "border": 4,
+        "error_correction": "M",
+        "position": "right",
+        "size": 400,
+        "version": 1
+    },
+    "settings": {
+        "printer_uri": "tcp://192.168.1.100",
+        "printer_model": "QL-800",
+        "label_size": "62",
+        "rotate": 0,
+        "threshold": 70.0,
+        "dither": False,
+        "compress": False,
+        "red": False
+    }
+}
+
+response = requests.post(url, json=payload)
+
+if response.status_code == 200:
+    print("Success:", response.json())
+else:
+    print("Error:", response.status_code, response.json())
+```
+
+### **Printer Keep Alive**
+
+Use the `/api/v1/printers/keep-alive` endpoint to control the printer keep alive feature.
+
+```python
+import requests
+
+url = 'http://localhost:5000/api/v1/printers/keep-alive'
+
+# Enable keep alive feature
+payload = {
+    "settings": {
+        "printer_uri": "tcp://192.168.1.100",
+        "printer_model": "QL-800"
+    },
+    "keep_alive": {
+        "enabled": True,
+        "interval": 300  # Interval in seconds (5 minutes)
+    }
+}
+
+response = requests.post(url, json=payload)
+
+if response.status_code == 200:
+    print("Success:", response.json())
+else:
+    print("Error:", response.status_code, response.json())
+
+# Disable keep alive feature
+payload = {
+    "settings": {
+        "printer_uri": "tcp://192.168.1.100",
+        "printer_model": "QL-800"
+    },
+    "keep_alive": {
+        "enabled": False
+    }
+}
+
+response = requests.post(url, json=payload)
 
 if response.status_code == 200:
     print("Success:", response.json())
