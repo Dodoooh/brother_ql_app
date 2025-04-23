@@ -29,6 +29,9 @@ structlog.configure(
     cache_logger_on_first_use=True,
 )
 
+# Set root logger level to DEBUG to capture all messages
+#logging.basicConfig(level=logging.DEBUG, format='%(message)s') # Basic config for root logger
+
 # Create logger
 logger = structlog.get_logger()
 
@@ -86,18 +89,45 @@ def register_routes(app):
         return app.send_static_file(f'js/{filename}')
 
 def init_config():
-    """Initialize configuration directories and files."""
-    config_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config")
-    os.makedirs(config_dir, exist_ok=True)
+    """Initialize configuration directories and files if needed."""
+    # Check if initialization should be skipped (set by docker-entrypoint.sh)
+    if os.environ.get('SKIP_INIT_CONFIG') == 'true':
+        logger.info("SKIP_INIT_CONFIG is set, assuming entrypoint handled initialization.")
+        
+        # Verify the initialization flag exists in the correct data directory
+        data_dir = "/app/data" # Consistent with entrypoint and settings_service
+        init_flag_file = os.path.join(data_dir, ".initialized")
+        
+        if os.path.exists(init_flag_file):
+            logger.info("Initialization flag found in data directory.")
+        else:
+            # This case should ideally not happen if the entrypoint runs correctly.
+            logger.warning("SKIP_INIT_CONFIG is true, but initialization flag not found in data directory. Entrypoint might have failed.")
+            # Optionally, create the flag here as a fallback, though it indicates an issue.
+            # try:
+            #     os.makedirs(data_dir, exist_ok=True)
+            #     with open(init_flag_file, 'w') as f: f.write('')
+            #     os.chmod(init_flag_file, 0o666)
+            #     logger.info("Created missing initialization flag in data directory as fallback.")
+            # except Exception as e:
+            #     logger.error(f"Failed to create fallback initialization flag: {str(e)}")
+        return # Skip the rest of the function
+
+    # --- Fallback Logic (Should NOT run in standard Docker deployment) ---
+    # This part is now largely redundant due to docker-entrypoint.sh handling
+    # the creation of the initial settings.json in the /app/data volume.
+    # Keeping it minimal or removing it entirely might be cleaner.
+    # For now, just log a warning if this path is reached unexpectedly.
+    logger.warning("Running fallback init_config logic. This should not happen in standard Docker deployment.")
     
-    # Ensure settings file exists
-    settings_file = os.path.join(config_dir, "settings.json")
-    if not os.path.exists(settings_file):
-        import json
-        from src.config.default_settings import DEFAULT_SETTINGS
-        with open(settings_file, 'w') as f:
-            json.dump(DEFAULT_SETTINGS, f, indent=4)
-        logger.info(f"Created default settings file at {settings_file}")
+    # Example: Ensure data directory exists (though entrypoint should create it)
+    data_dir = "/app/data"
+    if not os.path.exists(data_dir):
+        try:
+            os.makedirs(data_dir, exist_ok=True)
+            logger.info(f"Created data directory at {data_dir} (fallback).")
+        except Exception as e:
+            logger.error(f"Failed to create data directory (fallback): {str(e)}")
 
 def init_keep_alive():
     """Initialize keep alive feature based on settings."""
@@ -141,4 +171,10 @@ if __name__ == '__main__':
     # Initialize keep alive feature
     init_keep_alive()
     
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # Use Flask's debug setting, which might influence logging levels too
+    # Determine debug mode based on environment variables
+    debug_mode = os.environ.get('FLASK_ENV') == 'development' or os.environ.get('FLASK_DEBUG') == '1'
+    # Disable the reloader explicitly to prevent state issues with singletons during development
+    use_reloader = False
+    logger.info("Starting Flask app", debug_mode=debug_mode, use_reloader=use_reloader)
+    app.run(host='0.0.0.0', port=5000, debug=debug_mode, use_reloader=use_reloader)

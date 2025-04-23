@@ -1,12 +1,11 @@
 services:
   brother_ql_app:
-    image: dodoooh/brother_ql_app:latest
+    image: dodoooh/brother_ql_app:dev
     container_name: brother_ql_app
     ports:
       - "5055:5000"
     volumes:
       - ./data:/app/data
-      - ./src/config:/app/src/config
       - ./uploads:/app/uploads
     restart: unless-stopped
     environment:

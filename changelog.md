@@ -12,16 +12,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Restructured project layout for better maintainability
 - Simplified to English-only interface
 
-### Security
-- Updated Pillow from 10.0.1 to 10.3.0+ to fix CVE-2023-50447 and CVE-2024-28219
-- Updated pip to 23.3+ to fix CVE-2023-5752
-- Updated setuptools to 70.0.0+ to fix CVE-2022-40897 and CVE-2024-6345
-
-### Known Issues
-- Could not update werkzeug to fix CVE-2024-34069, CVE-2024-49767, CVE-2024-49766, and CVE-2023-46136 due to compatibility constraints with connexion 2.14.2
-- Updated flask-cors to 4.0.2, but CVE-2024-6221 is still present as no fix is available yet
-- Debian package krb5@1.20.1-2 contains vulnerability CVE-2025-3576 with no fix available yet
-
 ### Added
 - OpenAPI/Swagger specification for all API endpoints
 - Comprehensive API documentation with Swagger UI

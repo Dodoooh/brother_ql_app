@@ -115,13 +115,20 @@ def update_keep_alive(body: Dict[str, Any]) -> Dict[str, Any]:
         
         if interval < 10:
             raise ValidationError("interval must be at least 10 seconds", "interval")
-        
-        # Update settings
-        settings = settings_service.get_settings()
-        settings["keep_alive_enabled"] = enabled
-        settings["keep_alive_interval"] = interval
-        settings_service.save_settings(settings)
-        
+
+        # Prepare the specific settings to update
+        keep_alive_update = {
+            "keep_alive_enabled": enabled,
+            "keep_alive_interval": interval
+        }
+
+        # Use update_settings to merge changes correctly and save
+        success = settings_service.update_settings(keep_alive_update)
+
+        if not success:
+             logger.error("Failed to save keep-alive settings via update_settings")
+             raise PrinterError("Failed to save keep-alive settings")
+
         # Start or stop keep alive thread
         if enabled:
             # Use the updated start_keep_alive method without parameters
