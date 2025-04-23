@@ -1,24 +1,39 @@
-# Basis-Image mit Python 3.10
-FROM python:3.10-slim
+FROM python:3.9-slim
 
-# Arbeitsverzeichnis setzen
+# Set working directory
 WORKDIR /app
 
-# Systemabhängigkeiten installieren (für Pillow und Fonts)
-RUN apt-get update && apt-get install -y \
-    libfreetype6 libjpeg62-turbo zlib1g-dev \
-    fonts-dejavu-core && \
-    rm -rf /var/lib/apt/lists/*
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
 
-# Anforderungen kopieren und Python-Abhängigkeiten installieren
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libffi-dev \
+    libssl-dev \
+    fonts-dejavu \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements file
 COPY requirements.txt .
+
+# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Anwendungscode kopieren
+# Create necessary directories
+RUN mkdir -p /app/uploads /app/src/config
+
+# Copy application code
 COPY . .
 
-# Sicherstellen, dass settings.json existiert
-RUN touch settings.json
+# Set permissions
+RUN chmod -R 755 /app
 
-# Flask-Anwendung starten
-CMD ["python", "app.py"]
+# Expose port
+EXPOSE 5000
+
+# Set the entrypoint
+CMD ["python", "src/app.py"]

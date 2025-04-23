@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Brother QL Label Printer</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="css/styles.css">
+</head>
+<body>
+    <!-- Top Navigation Bar -->
+    <nav class="navbar navbar-expand-lg sticky-top">
+        <div class="container-fluid">
+            <a class="navbar-brand" href="#">
+                <i class="bi bi-printer-fill"></i> Brother QL Web App
+            </a>
+            
+            <div class="navbar-nav ms-auto d-flex flex-row align-items-center">
+                <!-- Printer Status -->
+
+                
+                <div class="nav-item me-3">
+                    <button id="navbar-check-status" class="btn status-btn" title="Printer Status">
+                        <i class="bi bi-printer-fill me-1"></i>
+                        <span id="status-indicator">Status</span>
+                    </button>
+                </div>
+                
+                <div class="nav-item me-3">
+                    <a href="/api/v1/ui/" class="btn api-btn" title="API Documentation">
+                        <i class="bi bi-code-slash"></i> API
+                    </a>
+                </div>
+                
+                <!-- API Link -->
+                <div class="nav-item me-3">
+                    <a href="/api/v1/ui/" class="btn api-btn" title="API Documentation">
+                        <i class="bi bi-code-slash"></i> API
+                    </a>
+                </div>
+                
+                <!-- Theme Toggle -->
+                <div class="nav-item">
+                    <button id="theme-toggle" class="btn theme-btn" aria-label="Toggle dark mode">
+                        <i class="bi bi-moon-fill"></i>
+                    </button>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <div class="app-container">
+        <div class="container mt-4">
+            <!-- Main Content Area -->
+            <div class="row">
+                <!-- Left Column: Controls -->
+                <div class="col-lg-5">
+                    <!-- Tabs for different print options -->
+                    <div class="print-options mb-4">
+                        <ul class="nav nav-tabs" id="printTabs" role="tablist">
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link active" id="text-tab" data-bs-toggle="tab" data-bs-target="#text-panel" type="button" role="tab" aria-controls="text-panel" aria-selected="true">
+                                    <i class="bi bi-type"></i> Text
+                                </button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="image-tab" data-bs-toggle="tab" data-bs-target="#image-panel" type="button" role="tab" aria-controls="image-panel" aria-selected="false">
+                                    <i class="bi bi-image"></i> Image
+                                </button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="qrcode-tab" data-bs-toggle="tab" data-bs-target="#qrcode-panel" type="button" role="tab" aria-controls="qrcode-panel" aria-selected="false">
+                                    <i class="bi bi-qr-code"></i> QR Code
+                                </button>
+                            </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="label-tab" data-bs-toggle="tab" data-bs-target="#label-panel" type="button" role="tab" aria-controls="label-panel" aria-selected="false">
+                                    <i class="bi bi-layout-text-sidebar"></i> Text+QR
+                                </button>
+                            </li>
+                        </ul>
+                        
+                        <div class="tab-content p-3 border border-top-0 rounded-bottom" id="printTabsContent">
+                            <!-- Text Panel -->
+                            <div class="tab-pane fade show active" id="text-panel" role="tabpanel" aria-labelledby="text-tab">
+                                <form id="text-form">
+                                    <div class="mb-3">
+                                        <label for="text-input" class="form-label">Text Content</label>
+                                        <textarea id="text-input" class="form-control" rows="4" placeholder="Enter text to print..."></textarea>
+                                        <div class="form-text">Use **bold** or *italic* for formatting</div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="text-font-size" class="form-label">Font Size</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-fonts"></i></span>
+                                                <input type="number" id="text-font-size" class="form-control" value="50" min="10" max="100">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="text-alignment" class="form-label">Alignment</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-text-left"></i></span>
+                                                <select id="text-alignment" class="form-select">
+                                                    <option value="left">Left</option>
+                                                    <option value="center">Center</option>
+                                                    <option value="right">Right</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <button type="submit" class="btn btn-primary w-100">
+                                        <i class="bi bi-printer-fill me-2"></i>Print Text
+                                    </button>
+                                </form>
+                            </div>
+                            
+                            <!-- Image Panel -->
+                            <div class="tab-pane fade" id="image-panel" role="tabpanel" aria-labelledby="image-tab">
+                                <form id="image-form">
+                                    <div class="mb-3">
+                                        <label for="image-input" class="form-label">Select Image</label>
+                                        <div class="input-group">
+                                            <span class="input-group-text"><i class="bi bi-file-image"></i></span>
+                                            <input type="file" id="image-input" class="form-control" accept="image/*">
+                                        </div>
+                                        <div class="form-text">Supported formats: JPG, PNG, GIF, BMP</div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="image-mode" class="form-label">Image Mode</label>
+                                        <select id="image-mode" class="form-select">
+                                            <option value="color">Color (Original)</option>
+                                            <option value="bw">Black & White</option>
+                                            <option value="bw-dither">Black & White with Dithering</option>
+                                        </select>
+                                        <div class="form-text">Preview how the image will be printed</div>
+                                    </div>
+                                    
+                                    <button type="submit" class="btn btn-primary w-100">
+                                        <i class="bi bi-printer-fill me-2"></i>Print Image
+                                    </button>
+                                </form>
+                            </div>
+                            
+                            <!-- QR Code Panel -->
+                            <div class="tab-pane fade" id="qrcode-panel" role="tabpanel" aria-labelledby="qrcode-tab">
+                                <form id="qrcode-form">
+                                    <div class="mb-3">
+                                        <label for="qr-data" class="form-label">QR Code Data</label>
+                                        <input type="text" id="qr-data" class="form-control" placeholder="Enter URL or text for QR code">
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="qr-size" class="form-label">QR Size</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-arrows-angle-expand"></i></span>
+                                                <input type="number" id="qr-size" class="form-control" value="400" min="100" max="600">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="qr-error-correction" class="form-label">Error Correction</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-shield-check"></i></span>
+                                                <select id="qr-error-correction" class="form-select">
+                                                    <option value="L">Low (7%)</option>
+                                                    <option value="M" selected>Medium (15%)</option>
+                                                    <option value="Q">Quartile (25%)</option>
+                                                    <option value="H">High (30%)</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" id="qr-show-text" checked>
+                                            <label class="form-check-label" for="qr-show-text">Show Text with QR Code</label>
+                                        </div>
+                                    </div>
+                                    
+                                    <div id="qr-text-options">
+                                        <div class="mb-3">
+                                            <label for="qr-text-content" class="form-label">Text</label>
+                                            <input type="text" id="qr-text-content" class="form-control" placeholder="Text to display with QR code">
+                                        </div>
+                                        
+                                        <div class="row mb-3">
+                                            <div class="col-md-4">
+                                                <label for="qr-text-position" class="form-label">Position</label>
+                                                <select id="qr-text-position" class="form-select">
+                                                    <option value="bottom" selected>Bottom</option>
+                                                    <option value="top">Top</option>
+                                                </select>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label for="qr-text-font-size" class="form-label">Font Size</label>
+                                                <input type="number" id="qr-text-font-size" class="form-control" value="30" min="10" max="100">
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label for="qr-text-alignment" class="form-label">Alignment</label>
+                                                <select id="qr-text-alignment" class="form-select">
+                                                    <option value="left">Left</option>
+                                                    <option value="center" selected>Center</option>
+                                                    <option value="right">Right</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <button type="submit" class="btn btn-primary w-100">
+                                        <i class="bi bi-printer-fill me-2"></i>Print QR Code
+                                    </button>
+                                </form>
+                            </div>
+                            
+                            <!-- Label (Text + QR) Panel -->
+                            <div class="tab-pane fade" id="label-panel" role="tabpanel" aria-labelledby="label-tab">
+                                <form id="label-form">
+                                    <div class="row mb-3">
+                                        <div class="col-md-8">
+                                            <label for="label-qr-data" class="form-label">QR Code Data</label>
+                                            <input type="text" id="label-qr-data" class="form-control" placeholder="Enter URL or text for QR code">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label for="label-qr-position" class="form-label">QR Position</label>
+                                            <select id="label-qr-position" class="form-select">
+                                                <option value="right" selected>Right</option>
+                                                <option value="left">Left</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="label-qr-error-correction" class="form-label">Error Correction</label>
+                                        <select id="label-qr-error-correction" class="form-select">
+                                            <option value="L">Low (7%)</option>
+                                            <option value="M" selected>Medium (15%)</option>
+                                            <option value="Q">Quartile (25%)</option>
+                                            <option value="H">High (30%)</option>
+                                        </select>
+                                    </div>
+                                    
+                                    <div class="mb-3">
+                                        <label for="label-text-content" class="form-label">Text Content</label>
+                                        <textarea id="label-text-content" class="form-control" rows="4" placeholder="Enter text to display next to QR code"></textarea>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="label-text-font-size" class="form-label">Font Size</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-fonts"></i></span>
+                                                <input type="number" id="label-text-font-size" class="form-control" value="30" min="10" max="100">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="label-text-alignment" class="form-label">Text Alignment</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-text-left"></i></span>
+                                                <select id="label-text-alignment" class="form-select">
+                                                    <option value="left" selected>Left</option>
+                                                    <option value="center">Center</option>
+                                                    <option value="right">Right</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <button type="submit" class="btn btn-primary w-100">
+                                        <i class="bi bi-printer-fill me-2"></i>Print Label
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Settings Card -->
+                    <div class="card settings-card mb-4">
+                        <div class="card-header" data-bs-toggle="collapse" data-bs-target="#settingsBody" aria-expanded="false">
+                            <h5 class="mb-0 d-flex align-items-center">
+                                <i class="bi bi-gear-fill me-2"></i>
+                                Printer Settings
+                                <i class="bi bi-chevron-down ms-auto"></i>
+                            </h5>
+                        </div>
+                        <div class="collapse" id="settingsBody">
+                            <div class="card-body">
+                                <form id="settings-form">
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="printer-uri" class="form-label">Printer URI</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-link-45deg"></i></span>
+                                                <input type="text" id="printer-uri" class="form-control" placeholder="tcp://192.168.1.100">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="printer-model" class="form-label">Printer Model</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-printer"></i></span>
+                                                <input type="text" id="printer-model" class="form-control" placeholder="QL-800">
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="label-size" class="form-label">Label Size</label>
+                                            <select id="label-size" class="form-select">
+                                                <option value="62">62 mm</option>
+                                                <option value="29">29 mm</option>
+                                                <option value="12">12 mm</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="rotate" class="form-label">Rotation</label>
+                                            <select id="rotate" class="form-select">
+                                                <option value="0">0°</option>
+                                                <option value="90">90°</option>
+                                                <option value="180">180°</option>
+                                                <option value="270">270°</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-4">
+                                            <label for="threshold" class="form-label">Threshold</label>
+                                            <input type="number" id="threshold" class="form-control" value="70" min="0" max="100">
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label for="dither" class="form-label">Dithering</label>
+                                            <select id="dither" class="form-select">
+                                                <option value="false">Disabled</option>
+                                                <option value="true">Enabled</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label for="red" class="form-label">Red Ink</label>
+                                            <select id="red" class="form-select">
+                                                <option value="false">Disabled</option>
+                                                <option value="true">Enabled</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="keep-alive-enabled" class="form-label">Keep Alive</label>
+                                            <select id="keep-alive-enabled" class="form-select">
+                                                <option value="false">Disabled</option>
+                                                <option value="true">Enabled</option>
+                                            </select>
+                                            <div class="form-text">Prevents printer from shutting down</div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="keep-alive-interval" class="form-label">Interval (seconds)</label>
+                                            <input type="number" id="keep-alive-interval" class="form-control" value="60" min="10" max="3600">
+                                            <div class="form-text">Time between pings (min 10s)</div>
+                                        </div>
+                                    </div>
+                                    
+                                    <button type="submit" class="btn btn-primary">
+                                        <i class="bi bi-save me-2"></i>Save Settings
+                                    </button>
+                                    
+                                    <button type="button" id="check-status" class="btn btn-outline-primary ms-2">
+                                        <i class="bi bi-check-circle me-2"></i>Check Status
+                                    </button>
+                                </form>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Right Column: Preview -->
+                <div class="col-lg-7">
+                    <div class="card preview-card mb-4">
+                        <div class="card-header">
+                            <h5 class="mb-0">
+                                <i class="bi bi-eye-fill me-2"></i>
+                                Live Preview
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="preview-container">
+                                <!-- Text Preview -->
+                                <div id="preview-text" class="preview-text d-none"></div>
+                                
+                                <!-- Image Preview -->
+                                <img id="preview-image" class="preview-image d-none" src="" alt="Image Preview">
+                                
+                                <!-- QR Code Preview -->
+                                <div id="preview-qrcode" class="preview-qrcode d-none"></div>
+                                
+                                <!-- Label Preview -->
+                                <div id="preview-label" class="preview-label d-none"></div>
+                                
+                                <!-- Placeholder when no preview is available -->
+                                <div id="preview-placeholder" class="preview-placeholder">
+                                    <i class="bi bi-card-image"></i>
+                                    <p>Enter content in the form to see a live preview</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Status Modal -->
+                    <div class="modal fade" id="statusModal" tabindex="-1" aria-labelledby="statusModalLabel" aria-hidden="true">
+                        <div class="modal-dialog">
+                            <div class="modal-content">
+                                <div class="modal-header">
+                                    <h5 class="modal-title" id="statusModalLabel">Printer Status</h5>
+                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                                </div>
+                                <div class="modal-body">
+                                    <div id="status-result">
+                                        <p>Checking printer status...</p>
+                                    </div>
+                                </div>
+                                <div class="modal-footer">
+                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <!-- Notifications Container -->
+    <div id="notifications" class="notifications"></div>
+    
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="js/utils.js"></script>
+    <script src="js/preview.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/core.js"></script>
+</body>
+</html>

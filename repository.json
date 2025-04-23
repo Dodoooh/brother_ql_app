@@ -1,4 +1,12 @@
 {
-    "name": "My Add-ons Repository",
-    "url": "https://github.com/Dodoooh/brother_ql_app"
-  }
+  "name": "Brother QL Printer App",
+  "url": "https://github.com/Dodoooh/brother_ql_app",
+  "description": "A modern web application to control Brother QL printers with API-first approach",
+  "version": "3.0.0",
+  "maintainer": "Dodoooh",
+  "containerized": true,
+  "container_registry": "ghcr.io/dodoooh/brother_ql_app",
+  "documentation": "https://github.com/Dodoooh/brother_ql_app#readme",
+  "issues": "https://github.com/Dodoooh/brother_ql_app/issues",
+  "license": "Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International Public License"
+}
