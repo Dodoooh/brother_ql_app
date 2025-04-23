@@ -21,7 +21,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt .
 
 # Update pip and setuptools to secure versions
-RUN pip install --no-cache-dir --upgrade pip>=23.3 setuptools>=70.0.0
+RUN pip install --no-cache-dir --upgrade pip setuptools && \
+    pip install --no-cache-dir pip>=23.3 setuptools>=70.0.0
 
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
