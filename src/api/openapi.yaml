@@ -639,6 +639,29 @@ components:
           description: Use red ink (for compatible printers)
           example: false
           default: false
+        copies:
+          type: integer
+          description: Number of identical labels to print
+          example: 1
+          default: 1
+          minimum: 1
+          maximum: 100
+        cut_mode:
+          type: string
+          description: When to cut - after each label, only at the end of the run, or never
+          example: "each"
+          default: "each"
+          enum: ["each", "end", "none"]
+        dpi_600:
+          type: boolean
+          description: Print at 600 dpi (higher density) where supported
+          example: false
+          default: false
+        hq:
+          type: boolean
+          description: High quality printing
+          example: true
+          default: true
       required:
         - printer_uri
         - printer_model
@@ -706,6 +729,29 @@ components:
           description: Default red ink setting
           example: false
           default: false
+        copies:
+          type: integer
+          description: Default number of identical labels to print
+          example: 1
+          default: 1
+          minimum: 1
+          maximum: 100
+        cut_mode:
+          type: string
+          description: Default cut behaviour (each label, end of run, or never)
+          example: "each"
+          default: "each"
+          enum: ["each", "end", "none"]
+        dpi_600:
+          type: boolean
+          description: Default 600 dpi setting
+          example: false
+          default: false
+        hq:
+          type: boolean
+          description: Default high quality setting
+          example: true
+          default: true
         keep_alive_enabled:
           type: boolean
           description: Whether keep alive is enabled

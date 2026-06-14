@@ -22,6 +22,9 @@ async function loadSettings() {
         document.getElementById('threshold').value = settings.threshold || '70';
         document.getElementById('dither').value = settings.dither ? 'true' : 'false';
         document.getElementById('red').value = settings.red ? 'true' : 'false';
+        document.getElementById('copies').value = settings.copies || 1;
+        document.getElementById('cut-mode').value = settings.cut_mode || 'each';
+        document.getElementById('dpi-600').value = settings.dpi_600 ? 'true' : 'false';
         document.getElementById('keep-alive-enabled').value = settings.keep_alive_enabled ? 'true' : 'false';
         document.getElementById('keep-alive-interval').value = settings.keep_alive_interval || '60';
         
@@ -250,22 +253,25 @@ async function handleTextPrint(event) {
                     rotate: parseInt(rotate),
                     threshold: parseFloat(threshold),
                     dither: dither,
-                    red: red
+                    red: red,
+                    copies: parseInt(document.getElementById('copies').value) || 1,
+                    cut_mode: document.getElementById('cut-mode').value,
+                    dpi_600: document.getElementById('dpi-600').value === 'true'
                 }
             })
         });
-        
+
         // Reset button state
         submitBtn.disabled = false;
         submitBtn.innerHTML = originalBtnText;
-        
+
         if (!response.ok) {
             const errorData = await response.json();
             throw new Error(errorData.message || `Error: ${response.status}`);
         }
-        
+
         const data = await response.json();
-        
+
         showNotification('Text printed successfully', 'success');
         console.log('Print result:', data);
     } catch (error) {
@@ -326,6 +332,9 @@ async function handleImagePrint(event) {
             threshold: parseFloat(threshold),
             dither: dither,
             red: red,
+            copies: parseInt(document.getElementById('copies').value) || 1,
+            cut_mode: document.getElementById('cut-mode').value,
+            dpi_600: document.getElementById('dpi-600').value === 'true',
             image_mode: imageMode.value
         }));
         
@@ -410,10 +419,13 @@ async function handleQRCodePrint(event) {
                 rotate: parseInt(rotate),
                 threshold: parseFloat(threshold),
                 dither: dither,
-                red: red
+                red: red,
+                copies: parseInt(document.getElementById('copies').value) || 1,
+                cut_mode: document.getElementById('cut-mode').value,
+                dpi_600: document.getElementById('dpi-600').value === 'true'
             }
         };
-        
+
         // Add text settings if needed
         if (qrShowText && qrTextContent) {
             requestBody.text = {
@@ -516,10 +528,13 @@ async function handleLabelPrint(event) {
                 rotate: parseInt(rotate),
                 threshold: parseFloat(threshold),
                 dither: dither,
-                red: red
+                red: red,
+                copies: parseInt(document.getElementById('copies').value) || 1,
+                cut_mode: document.getElementById('cut-mode').value,
+                dpi_600: document.getElementById('dpi-600').value === 'true'
             }
         };
-        
+
         const response = await fetch('/api/v1/label/text-qrcode', {
             method: 'POST',
             headers: {
@@ -564,6 +579,9 @@ async function handleSaveSettings(event) {
         const threshold = document.getElementById('threshold').value;
         const dither = document.getElementById('dither').value === 'true';
         const red = document.getElementById('red').value === 'true';
+        const copies = parseInt(document.getElementById('copies').value) || 1;
+        const cutMode = document.getElementById('cut-mode').value;
+        const dpi600 = document.getElementById('dpi-600').value === 'true';
         const keepAliveEnabled = document.getElementById('keep-alive-enabled').value === 'true';
         const keepAliveInterval = parseInt(document.getElementById('keep-alive-interval').value);
         
@@ -596,6 +614,9 @@ async function handleSaveSettings(event) {
                 threshold: parseFloat(threshold),
                 dither: dither,
                 red: red,
+                copies: copies,
+                cut_mode: cutMode,
+                dpi_600: dpi600,
                 keep_alive_enabled: keepAliveEnabled,
                 keep_alive_interval: keepAliveInterval
             })

@@ -61,6 +61,21 @@
                 <div class="col-lg-5">
                     <!-- Tabs for different print options -->
                     <div class="print-options mb-4">
+                        <div class="row g-2 align-items-end mb-3">
+                            <div class="col">
+                                <label for="copies" class="form-label">Copies</label>
+                                <input type="number" id="copies" class="form-control" value="1" min="1" max="100">
+                            </div>
+                            <div class="col">
+                                <label for="cut-mode" class="form-label">Cut</label>
+                                <select id="cut-mode" class="form-select">
+                                    <option value="each">Cut after each label</option>
+                                    <option value="end">Cut only at end</option>
+                                    <option value="none">No cut</option>
+                                </select>
+                            </div>
+                        </div>
+
                         <ul class="nav nav-tabs" id="printTabs" role="tablist">
                             <li class="nav-item" role="presentation">
                                 <button class="nav-link active" id="text-tab" data-bs-toggle="tab" data-bs-target="#text-panel" type="button" role="tab" aria-controls="text-panel" aria-selected="true">
@@ -400,7 +415,17 @@
                                             </select>
                                         </div>
                                     </div>
-                                    
+
+                                    <div class="row mb-3">
+                                        <div class="col-md-4">
+                                            <label for="dpi-600" class="form-label">600 dpi</label>
+                                            <select id="dpi-600" class="form-select">
+                                                <option value="false">Disabled</option>
+                                                <option value="true">Enabled</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
                                     <div class="row mb-3">
                                         <div class="col-md-6">
                                             <label for="keep-alive-enabled" class="form-label">Keep Alive</label>

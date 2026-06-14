@@ -36,6 +36,24 @@ from src.utils.uri_validation import validate_printer_uri
 
 logger = structlog.get_logger()
 
+
+class _CutAtEndRaster(BrotherQLRaster):
+    """BrotherQLRaster that forces "auto-cut every N labels".
+
+    brother_ql's ``convert(cut=True)`` always calls ``add_cut_every(1)`` (cut
+    after every label). To cut only once at the end of a multi-label job we
+    override ``add_cut_every`` so it uses a fixed N (the total label count),
+    making the printer cut a single time after the last label.
+    """
+
+    def __init__(self, model, cut_every_n):
+        super().__init__(model)
+        self._cut_every_n = max(1, int(cut_every_n))
+
+    def add_cut_every(self, n=1):
+        return super().add_cut_every(self._cut_every_n)
+
+
 class PrinterService:
     """Service for managing Brother QL printer operations."""
     
@@ -501,6 +519,10 @@ class PrinterService:
         dither = settings.get("dither", False)
         compress = settings.get("compress", False)
         red = settings.get("red", False)
+        copies = settings.get("copies", 1)
+        cut_mode = settings.get("cut_mode", "each")
+        dpi_600 = settings.get("dpi_600", False)
+        hq = settings.get("hq", True)
 
         # --- Input/validation phase (-> ValidationError -> 400) ---
         # Bad/missing settings and disallowed/SSRF URIs are caller mistakes,
@@ -521,26 +543,49 @@ class PrinterService:
             # lpt://, ...) and SSRF/metadata targets even if settings validation
             # was bypassed. Private/LAN IPs and hostnames stay valid.
             validate_printer_uri(printer_uri)
+
+            # Copies and cut mode.
+            try:
+                copies = int(copies)
+            except (TypeError, ValueError):
+                raise ValueError("copies must be an integer")
+            if copies < 1 or copies > 100:
+                raise ValueError("copies must be between 1 and 100")
+            if cut_mode not in ("each", "end", "none"):
+                raise ValueError("cut_mode must be one of: each, end, none")
         except (ValidationError, ValueError) as e:
             logger.warning("Invalid print settings", error=str(e))
             raise ValidationError(f"Invalid print settings: {str(e)}") from e
 
         # --- Printer/IO phase (-> PrinterError -> 500) ---
         try:
-            # Create rasterizer
-            qlr = BrotherQLRaster(printer_model)
+            # One image per copy; the cut mode decides how the rasterizer cuts.
+            images = [image_path] * copies
+            if cut_mode == "none":
+                qlr = BrotherQLRaster(printer_model)
+                cut = False
+            elif cut_mode == "end" and copies > 1:
+                # Cut a single time after the last of the N labels.
+                qlr = _CutAtEndRaster(printer_model, copies)
+                cut = True
+            else:  # "each" (and "end" with a single label, where they coincide)
+                qlr = BrotherQLRaster(printer_model)
+                cut = True
             qlr.exception_on_warning = True
 
-            # Convert image to printer instructions
+            # Convert image(s) to printer instructions
             instructions = convert(
                 qlr=qlr,
-                images=[image_path],
+                images=images,
                 label=label_size,
                 rotate=rotate,
                 threshold=threshold,
                 dither=dither,
                 compress=compress,
                 red=red,
+                cut=cut,
+                dpi_600=dpi_600,
+                hq=hq,
             )
 
             # Send to printer (serialized against the keep-alive heartbeat).
@@ -552,7 +597,9 @@ class PrinterService:
             logger.info("Print job sent to printer",
                        printer_uri=printer_uri,
                        printer_model=printer_model,
-                       label_size=label_size)
+                       label_size=label_size,
+                       copies=copies,
+                       cut_mode=cut_mode)
         except Exception as e:
             logger.error("Error sending to printer", error=str(e), exc_info=True)
             raise PrinterError(f"Error sending to printer: {str(e)}") from e

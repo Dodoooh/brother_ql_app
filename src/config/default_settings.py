@@ -14,6 +14,10 @@ DEFAULT_SETTINGS = {
     "dither": False,
     "compress": False,
     "red": False,
+    "copies": 1,
+    "cut_mode": "each",  # each | end | none
+    "dpi_600": False,
+    "hq": True,
     "keep_alive_enabled": False,
     "keep_alive_interval": 60,  # seconds
     "ipp_port": 631,  # IPP port for network status/keep-alive (IANA standard)

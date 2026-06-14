@@ -103,6 +103,7 @@ class SettingsService:
             "threshold": (int, float), "dither": bool, "compress": bool, "red": bool,
             "keep_alive_enabled": bool, "keep_alive_interval": (int, float),
             "ipp_port": int,
+            "copies": int, "cut_mode": str, "dpi_600": bool, "hq": bool,
             "printers": list
         }
         for field, expected_type in type_checks.items():
@@ -135,6 +136,12 @@ class SettingsService:
 
         if "threshold" in settings_to_validate and not (0 <= settings_to_validate["threshold"] <= 100):
              raise ValueError(f"Invalid threshold value: {settings_to_validate['threshold']}. Must be between 0 and 100.")
+
+        if "copies" in settings_to_validate and not (1 <= settings_to_validate["copies"] <= 100):
+             raise ValueError(f"Invalid copies value: {settings_to_validate['copies']}. Must be between 1 and 100.")
+
+        if "cut_mode" in settings_to_validate and settings_to_validate["cut_mode"] not in ["each", "end", "none"]:
+             raise ValueError(f"Invalid cut_mode value: {settings_to_validate['cut_mode']}. Must be each, end, or none.")
 
         if "ipp_port" in settings_to_validate and not (1 <= settings_to_validate["ipp_port"] <= 65535):
              raise ValueError(f"Invalid ipp_port value: {settings_to_validate['ipp_port']}. Must be between 1 and 65535.")
