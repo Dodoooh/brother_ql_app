@@ -5,8 +5,8 @@ Controller for text printing API endpoints.
 import structlog
 from typing import Dict, Any
 
-from services.printer_service import printer_service
-from utils.exceptions import ValidationError, PrinterError, ResourceNotFoundError
+from src.services.printer_service import printer_service
+from src.utils.exceptions import ValidationError, PrinterError, ResourceNotFoundError
 
 logger = structlog.get_logger()
 
@@ -51,6 +51,11 @@ def print_text(body: Dict[str, Any]) -> Dict[str, Any]:
     except ResourceNotFoundError as e:
         logger.error("Resource not found", error=str(e), exc_info=True)
         raise
+    except ValueError as e:
+        # Pure input/validation errors from the service layer must map to
+        # HTTP 400, not 500.
+        logger.warning("Validation error", error=str(e), exc_info=True)
+        raise ValidationError(str(e), "settings")
     except Exception as e:
         logger.error("Error printing text", error=str(e), exc_info=True)
         raise PrinterError(f"Error printing text: {str(e)}")

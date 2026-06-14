@@ -7,7 +7,7 @@ from typing import Dict, Any, Tuple
 from werkzeug.exceptions import HTTPException
 from connexion import ProblemException
 
-from utils.exceptions import (
+from src.utils.exceptions import (
     AppError,
     ValidationError,
     ResourceNotFoundError,
@@ -156,12 +156,16 @@ def register_error_handlers(app):
         Returns:
             Tuple of error response and status code.
         """
-        logger.error("Unhandled exception", error=str(error), exc_info=True)
+        # Log the full details (type, message, stack trace) for operators, but
+        # never leak internal exception strings or stack traces to the client.
+        logger.error(
+            "Unhandled exception",
+            error=str(error),
+            error_type=error.__class__.__name__,
+            exc_info=True,
+        )
         return {
             "code": "INTERNAL_SERVER_ERROR",
-            "message": "An unexpected error occurred",
-            "details": {
-                "error_type": error.__class__.__name__,
-                "error_message": str(error)
-            }
+            "message": "An internal error occurred",
+            "details": {}
         }, 500

@@ -67,6 +67,11 @@ def print_qr_code(body: Dict[str, Any]) -> Dict[str, Any]:
     except PrinterError as e:
         logger.error("Printer error", error=str(e), exc_info=True)
         raise
+    except ValueError as e:
+        # Pure input/validation errors from the service layer must map to
+        # HTTP 400, not 500.
+        logger.warning("Validation error", error=str(e), exc_info=True)
+        raise ValidationError(str(e), "settings")
     except Exception as e:
         logger.error("Error printing QR code", error=str(e), exc_info=True)
         raise PrinterError(f"Error printing QR code: {str(e)}")
