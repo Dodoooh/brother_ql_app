@@ -114,10 +114,10 @@ def _save_uploaded_file(file: FileStorage) -> str:
     extension = os.path.splitext(safe_name)[1]
     filename = f"{uuid.uuid4().hex}{extension}"
 
-    # Get upload folder from app config
-    upload_folder = current_app.config.get('UPLOAD_FOLDER')
-    if not upload_folder:
-        upload_folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads")
+    # Resolve the upload folder from the single source of truth
+    # (printer_service.upload_folder, which honours the UPLOAD_FOLDER env var).
+    # Prefer the app config when available so the two stay consistent.
+    upload_folder = _get_upload_folder()
 
     # Ensure upload folder exists
     os.makedirs(upload_folder, exist_ok=True)
@@ -127,6 +127,26 @@ def _save_uploaded_file(file: FileStorage) -> str:
     file.save(file_path)
 
     return file_path
+
+
+def _get_upload_folder() -> str:
+    """Return the configured upload folder, falling back to the default.
+
+    Resolves from app config first, then printer_service.upload_folder (the
+    single source of truth honouring the UPLOAD_FOLDER env var), then the
+    historical code-relative default as a last resort.
+    """
+    try:
+        upload_folder = current_app.config.get('UPLOAD_FOLDER')
+    except RuntimeError:
+        upload_folder = None
+    if not upload_folder:
+        upload_folder = getattr(printer_service, "upload_folder", None)
+    if not upload_folder:
+        upload_folder = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "uploads"
+        )
+    return upload_folder
 
 
 def _cleanup_uploaded_file(file_path: str) -> None:

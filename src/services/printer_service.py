@@ -72,13 +72,20 @@ class PrinterService:
         # heartbeat never collides with an in-progress print job (the printer
         # accepts only one 9100 connection at a time).
         self._io_lock = threading.Lock()
-        if upload_folder is None:
-            self.upload_folder = os.path.join(
+        # Single source of truth for the upload folder. Precedence:
+        #   1. explicit constructor argument
+        #   2. UPLOAD_FOLDER environment variable (lets operators relocate or
+        #      persist the otherwise-ephemeral scratch directory)
+        #   3. the historical code-relative default (unchanged behaviour when no
+        #      env var is set, so there is no regression).
+        self.upload_folder = (
+            upload_folder
+            or os.environ.get("UPLOAD_FOLDER")
+            or os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                "uploads"
+                "uploads",
             )
-        else:
-            self.upload_folder = upload_folder
+        )
         
         # Ensure upload folder exists
         os.makedirs(self.upload_folder, exist_ok=True)

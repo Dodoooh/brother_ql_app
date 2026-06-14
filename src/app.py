@@ -43,7 +43,14 @@ structlog.configure(
 logger = structlog.get_logger()
 
 # Constants
-UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads")
+# Upload folder resolution mirrors PrinterService: prefer the UPLOAD_FOLDER env
+# var, otherwise fall back to the historical code-relative default so behaviour
+# is unchanged when the env var is unset. Both must agree so app.config and
+# printer_service.upload_folder point at the same place.
+UPLOAD_FOLDER = os.environ.get(
+    "UPLOAD_FOLDER",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "uploads"),
+)
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
 def create_app():

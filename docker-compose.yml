@@ -6,7 +6,13 @@ services:
       - "5000:5000"
     volumes:
       - ./data:/app/data
-      - ./uploads:/app/uploads
+      # Uploads are ephemeral scratch storage (render -> print -> delete, plus a
+      # TTL sweep for shared files) and intentionally not persisted. To keep them,
+      # set the UPLOAD_FOLDER env var below and mount a volume onto that path, e.g.
+      #   environment:
+      #     - UPLOAD_FOLDER=/app/uploads
+      #   volumes:
+      #     - ./uploads:/app/uploads
     restart: unless-stopped
     environment:
       - PYTHONPATH=/app
