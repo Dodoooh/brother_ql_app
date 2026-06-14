@@ -28,6 +28,8 @@ tags:
     description: QR code operations
   - name: label
     description: Combined label layouts
+  - name: preview
+    description: Server-side render-only label previews (no printing)
   - name: settings
     description: Settings management
 
@@ -155,6 +157,34 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /text/preview:
+    post:
+      summary: Render a server-side preview of a text label
+      description: >-
+        Runs the same render pipeline as /text/print (fonts, layout, rotation
+        and 1-bit black/white conversion) but returns the rendered label as a
+        PNG data URL instead of printing it.
+      operationId: api.preview_controller.preview_text
+      tags:
+        - preview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TextPrintRequest'
+      responses:
+        '200':
+          description: Text preview rendered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /image/print:
     post:
       summary: Print image on a label
@@ -193,6 +223,45 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
           
+  /image/preview:
+    post:
+      summary: Render a server-side preview of an image label
+      description: >-
+        Runs the same render pipeline as /image/print (resize to label width,
+        rotation and 1-bit black/white conversion) but returns the rendered
+        label as a PNG data URL instead of printing it.
+      operationId: api.preview_controller.preview_image
+      tags:
+        - preview
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: The image file to preview
+                settings:
+                  type: string
+                  description: JSON string containing print settings
+                  example: '{"printer_uri": "tcp://192.168.1.100", "label_size": "62"}'
+              required:
+                - image
+      responses:
+        '200':
+          description: Image preview rendered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /pdf/print:
     post:
       summary: Print a PDF on labels
@@ -361,6 +430,34 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
           
+  /qrcode/preview:
+    post:
+      summary: Render a server-side preview of a QR code label
+      description: >-
+        Runs the same render pipeline as /qrcode/print (QR generation, optional
+        text composition, rotation and 1-bit black/white conversion) but returns
+        the rendered label as a PNG data URL instead of printing it.
+      operationId: api.preview_controller.preview_qrcode
+      tags:
+        - preview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/QRCodePrintRequest'
+      responses:
+        '200':
+          description: QR code preview rendered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /label/text-qrcode:
     post:
       summary: Print label with text and QR code
@@ -385,6 +482,34 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '404':
           $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /label/preview:
+    post:
+      summary: Render a server-side preview of a text + QR code label
+      description: >-
+        Runs the same render pipeline as /label/text-qrcode (side-by-side text
+        and QR composition, rotation and 1-bit black/white conversion) but
+        returns the rendered label as a PNG data URL instead of printing it.
+      operationId: api.preview_controller.preview_label
+      tags:
+        - preview
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TextQRCodeLabelRequest'
+      responses:
+        '200':
+          description: Label preview rendered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -939,6 +1064,18 @@ components:
           type: string
           description: Success message
           example: "Print job submitted successfully"
+
+    PreviewResponse:
+      type: object
+      properties:
+        image:
+          type: string
+          description: >-
+            The rendered label, exactly as it would be printed (1-bit
+            black/white), encoded as a PNG data URL.
+          example: "data:image/png;base64,iVBORw0KGgo..."
+      required:
+        - image
 
     PdfPreview:
       type: object
