@@ -20,6 +20,7 @@ setup(
         "pysnmp==4.4.12",
         "pyasn1==0.4.8",
         "qrcode==7.4.2",
+        "pypdfium2==4.30.0",
         # Logging
         "structlog==23.1.0",
     ],

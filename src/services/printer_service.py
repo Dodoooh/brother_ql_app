@@ -31,6 +31,7 @@ except ImportError:
 
 from src.services.settings_service import settings_service
 from src.services.ipp_client import get_printer_attributes
+from src.services.pdf_renderer import render_pdf, parse_page_range
 from src.utils.exceptions import PrinterError, ImageProcessingError, ValidationError
 from src.utils.uri_validation import validate_printer_uri
 
@@ -339,7 +340,117 @@ class PrinterService:
             raise PrinterError(f"Error printing image: {str(e)}") from e
         finally:
             self._cleanup_temp_files(temp_files)
-    
+
+    def print_pdf(self, pdf_path: str, settings: Dict[str, Any],
+                  pages=None, scale_mode: str = "fit") -> Dict[str, Any]:
+        """
+        Render a PDF and print each selected page on its own label.
+
+        Each page is rasterised to a PIL image (300 DPI by default, 600 DPI when
+        ``settings['dpi_600']`` is set), saved as a temporary grayscale PNG and
+        then fed through the *existing* image print pipeline
+        (``_resize_image`` -> optional rotation -> ``_send_to_printer``). As a
+        result every page automatically inherits the standard print settings:
+        copies, cut_mode, dpi_600, red, rotate, threshold and dither.
+
+        Args:
+            pdf_path: Path to the PDF file to print.
+            settings: Dict of print settings (same shape as ``print_image``).
+            pages: 1-based page-range spec (e.g. ``"1-3,5"``); empty/``None``/
+                ``"all"`` prints every page. Validated via ``parse_page_range``.
+            scale_mode: ``"fit"`` (default) or ``"fill"``. NOTE: scaling is
+                currently delegated entirely to ``_resize_image`` (fit-to-width),
+                so ``"fill"`` is accepted and validated but behaves like
+                ``"fit"`` for now -- it is a pass-through parameter until a
+                die-cut-aware fill path is implemented.
+
+        Returns:
+            Dict with ``success``, ``job_id``, ``message`` and ``pages_printed``.
+
+        Raises:
+            ValidationError: For invalid ``scale_mode`` / page spec (-> 400).
+            PrinterError: For render/IO/printer failures (-> 500).
+        """
+        # Only artifacts generated *here* (temporary PNGs and their
+        # resized_/rotated_ derivatives) are tracked for cleanup. The original
+        # ``pdf_path`` is owned by the caller and intentionally not deleted.
+        temp_files: List[str] = []
+        job_id = f"pdf_{uuid.uuid4().hex[:8]}"
+        try:
+            # --- Input/validation phase (-> ValidationError -> 400) ---
+            try:
+                if scale_mode not in ("fit", "fill"):
+                    raise ValueError("scale_mode must be one of: fit, fill")
+
+                dpi = 600 if settings.get("dpi_600") else 300
+
+                # Render the requested pages. parse_page_range (invoked inside
+                # render_pdf) raises ValueError for a bad page spec; an unreadable
+                # / non-PDF file also raises ValueError -- both are caller input
+                # problems and surface as a 400.
+                images = render_pdf(pdf_path, pages, dpi=dpi)
+            except ValueError as e:
+                logger.warning("Invalid input for PDF print", job_id=job_id, error=str(e))
+                raise ValidationError(f"Error printing PDF: {str(e)}") from e
+
+            logger.info("Processing PDF print request",
+                        job_id=job_id,
+                        pdf_path=pdf_path,
+                        pages=pages,
+                        dpi=dpi,
+                        scale_mode=scale_mode,
+                        page_count=len(images))
+
+            # --- Render/IO/printer phase (-> PrinterError -> 500) ---
+            rotate = settings.get("rotate", 0)
+            pages_printed = 0
+            for index, page_image in enumerate(images, start=1):
+                # Persist each rendered page as a grayscale PNG so it can flow
+                # through the standard image pipeline.
+                temp_png = os.path.join(
+                    self.upload_folder, f"pdf_page_{uuid.uuid4().hex[:8]}.png"
+                )
+                page_image.convert("L").save(temp_png)
+                temp_files.append(temp_png)
+
+                # Fit the page to the label width (same path as image printing).
+                resized_path = self._resize_image(temp_png)
+                temp_files.append(resized_path)
+
+                # Apply rotation if requested.
+                if rotate != 0:
+                    resized_path = self._apply_rotation(resized_path, rotate)
+                    temp_files.append(resized_path)
+
+                # Send to the printer (inherits copies/cut_mode/dpi/red/etc.).
+                self._send_to_printer(resized_path, settings)
+                pages_printed += 1
+                logger.info("PDF page sent to printer",
+                            job_id=job_id, page=index, total=len(images))
+
+            logger.info("PDF print job completed successfully",
+                        job_id=job_id, pages_printed=pages_printed)
+
+            return {
+                "success": True,
+                "job_id": job_id,
+                "message": f"PDF printed ({pages_printed} page(s))",
+                "pages_printed": pages_printed,
+            }
+        except ValidationError:
+            # Already classified as a client (400) error above.
+            raise
+        except (ValueError, ImageProcessingError) as e:
+            # Render/processing problems surfacing here are real failures.
+            logger.error("Error printing PDF", job_id=job_id, error=str(e), exc_info=True)
+            raise PrinterError(f"Error printing PDF: {str(e)}") from e
+        except Exception as e:
+            logger.error("Error printing PDF", job_id=job_id, error=str(e), exc_info=True)
+            raise PrinterError(f"Error printing PDF: {str(e)}") from e
+        finally:
+            # All tracked files are generated by this service (never the original PDF).
+            self._cleanup_temp_files(temp_files)
+
     def _create_text_label(self, html_text: str, settings: Dict[str, Any]) -> str:
         """
         Create a label image from HTML text.

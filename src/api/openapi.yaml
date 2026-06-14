@@ -20,6 +20,10 @@ tags:
     description: Text printing operations
   - name: image
     description: Image printing operations
+  - name: pdf
+    description: PDF printing operations
+  - name: share
+    description: Generic file sharing from external apps
   - name: qrcode
     description: QR code operations
   - name: label
@@ -189,6 +193,147 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
           
+  /pdf/print:
+    post:
+      summary: Print a PDF on labels
+      description: Prints an uploaded PDF document on labels with specified settings
+      operationId: api.pdf_controller.print_pdf
+      tags:
+        - pdf
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The PDF file to print
+                settings:
+                  type: string
+                  description: JSON string containing print settings
+                  example: '{"printer_uri": "tcp://192.168.1.100", "printer_model": "QL-800", "label_size": "62"}'
+                pages:
+                  type: string
+                  description: Optional page selection (e.g. "1-3,5"); empty means all pages
+                  example: "1-3,5"
+                scale_mode:
+                  type: string
+                  description: How to scale each page onto the label
+                  enum: [fit, fill]
+                  default: fit
+                  example: "fit"
+              required:
+                - file
+      responses:
+        '200':
+          description: PDF printed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrintResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /pdf/preview:
+    post:
+      summary: Render a server-side preview of a PDF
+      description: >-
+        Renders the selected pages of an uploaded PDF as small PNG thumbnails
+        (data URLs) without printing. Uses a low DPI and caps the number of
+        rendered pages so previewing large PDFs stays fast.
+      operationId: api.pdf_controller.preview_pdf
+      tags:
+        - pdf
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The PDF file to preview
+                pages:
+                  type: string
+                  description: Optional page selection (e.g. "1-3,5"); empty means all pages
+                  example: "1-3,5"
+              required:
+                - file
+      responses:
+        '200':
+          description: PDF preview rendered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PdfPreview'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /share:
+    post:
+      summary: Share a file into the app
+      description: >-
+        Accepts a file (PDF or image) shared from another app and stages it for
+        the web UI. Responds with a redirect to the UI, which loads the staged
+        file into the print dialog.
+      operationId: api.share_controller.share
+      tags:
+        - share
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: The shared file (PDF or image)
+              required:
+                - file
+      responses:
+        '302':
+          description: Redirect to UI with staged file
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /share/{token}:
+    get:
+      summary: Retrieve a staged shared file
+      description: Serves a previously staged file by its token
+      operationId: api.share_controller.get_shared
+      tags:
+        - share
+      parameters:
+        - name: token
+          in: path
+          required: true
+          description: Staging token for the shared file (hex, optional extension)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The staged file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /qrcode/print:
     post:
       summary: Print QR code on a label
@@ -794,6 +939,40 @@ components:
           type: string
           description: Success message
           example: "Print job submitted successfully"
+
+    PdfPreview:
+      type: object
+      properties:
+        total_pages:
+          type: integer
+          description: Total number of pages in the PDF document
+          example: 8
+        truncated:
+          type: boolean
+          description: >-
+            Whether the page selection was capped (only the first N pages were
+            rendered)
+          example: false
+        rendered_pages:
+          type: array
+          description: The 1-based page numbers that were actually rendered
+          items:
+            type: integer
+          example: [1, 2, 3]
+        previews:
+          type: array
+          description: One thumbnail per rendered page
+          items:
+            type: object
+            properties:
+              page:
+                type: integer
+                description: 1-based page number
+                example: 1
+              image:
+                type: string
+                description: PNG thumbnail encoded as a data URL
+                example: "data:image/png;base64,iVBORw0KGgo..."
 
     SuccessResponse:
       type: object

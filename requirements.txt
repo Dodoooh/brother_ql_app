@@ -18,6 +18,9 @@ pysnmp==4.4.12
 # pin to a compatible release so the optional SNMP import does not crash.
 pyasn1==0.4.8
 qrcode==7.4.2
+# PDF rendering. pypdfium2 bundles the PDFium binary in its wheel (no system
+# deps), Apache-2.0/BSD licensed and compatible with Python 3.9.
+pypdfium2==4.30.0
 
 # Production WSGI server (py3.9-compatible). Run with --workers 1 so the
 # keep-alive singleton/thread stays in a single process (see docker-entrypoint.sh).
