@@ -97,6 +97,11 @@
                                     <i class="bi bi-layout-text-sidebar"></i> Text+QR
                                 </button>
                             </li>
+                            <li class="nav-item" role="presentation">
+                                <button class="nav-link" id="pdf-tab" data-bs-toggle="tab" data-bs-target="#pdf-panel" type="button" role="tab" aria-controls="pdf-panel" aria-selected="false">
+                                    <i class="bi bi-file-earmark-pdf"></i> PDF
+                                </button>
+                            </li>
                         </ul>
                         
                         <div class="tab-content p-3 border border-top-0 rounded-bottom" id="printTabsContent">
@@ -294,6 +299,44 @@
                                     </button>
                                 </form>
                             </div>
+
+                            <!-- PDF Panel -->
+                            <div class="tab-pane fade" id="pdf-panel" role="tabpanel" aria-labelledby="pdf-tab">
+                                <form id="pdf-form">
+                                    <div class="mb-3">
+                                        <label for="pdf-input" class="form-label">Select PDF</label>
+                                        <div class="input-group">
+                                            <span class="input-group-text"><i class="bi bi-file-earmark-pdf"></i></span>
+                                            <input type="file" id="pdf-input" class="form-control" accept="application/pdf,.pdf">
+                                        </div>
+                                        <div class="form-text">Supported format: PDF</div>
+                                    </div>
+
+                                    <div class="row mb-3">
+                                        <div class="col-md-6">
+                                            <label for="pdf-pages" class="form-label">Pages</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-files"></i></span>
+                                                <input type="text" id="pdf-pages" class="form-control" placeholder="e.g. 1-3,5 (leer = alle)">
+                                            </div>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label for="pdf-scale-mode" class="form-label">Scale Mode</label>
+                                            <div class="input-group">
+                                                <span class="input-group-text"><i class="bi bi-aspect-ratio"></i></span>
+                                                <select id="pdf-scale-mode" class="form-select">
+                                                    <option value="fit" selected>Fit (Ränder)</option>
+                                                    <option value="fill">Fill (zuschneiden)</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <button type="submit" class="btn btn-primary w-100">
+                                        <i class="bi bi-printer-fill me-2"></i>Print PDF
+                                    </button>
+                                </form>
+                            </div>
                         </div>
                     </div>
                     
@@ -477,7 +520,13 @@
                                 
                                 <!-- Label Preview -->
                                 <div id="preview-label" class="preview-label d-none"></div>
-                                
+
+                                <!-- PDF Preview -->
+                                <div id="pdf-preview" class="pdf-preview d-none" style="width: 100%; max-height: 70vh; overflow-y: auto;">
+                                    <div id="pdf-preview-notice" class="text-muted small mb-2 d-none"></div>
+                                    <div id="pdf-preview-pages" class="d-flex flex-column align-items-center gap-3"></div>
+                                </div>
+
                                 <!-- Placeholder when no preview is available -->
                                 <div id="preview-placeholder" class="preview-placeholder">
                                     <i class="bi bi-card-image"></i>

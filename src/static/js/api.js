@@ -363,6 +363,248 @@ async function handleImagePrint(event) {
 }
 
 /**
+ * Handle PDF print form submission
+ * @param {Event} event - Form submit event
+ */
+async function handlePdfPrint(event) {
+    event.preventDefault();
+
+    try {
+        const pdfInput = document.getElementById('pdf-input');
+
+        if (!pdfInput.files || pdfInput.files.length === 0) {
+            throw new Error('No PDF selected');
+        }
+
+        // Get printer settings
+        const printerUri = document.getElementById('printer-uri').value;
+        const printerModel = document.getElementById('printer-model').value;
+        const labelSize = document.getElementById('label-size').value;
+        const rotate = document.getElementById('rotate').value;
+        const threshold = document.getElementById('threshold').value;
+        const dither = document.getElementById('dither').value === 'true';
+        const red = document.getElementById('red').value === 'true';
+
+        if (!printerUri || !printerModel || !labelSize) {
+            throw new Error('Printer settings are incomplete');
+        }
+
+        const pages = document.getElementById('pdf-pages').value;
+        const scaleMode = document.getElementById('pdf-scale-mode').value;
+
+        // Show loading state
+        const submitBtn = event.target.querySelector('button[type="submit"]');
+        const originalBtnText = submitBtn.innerHTML;
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Printing...';
+
+        const formData = new FormData();
+        formData.append('file', pdfInput.files[0]);
+        formData.append('settings', JSON.stringify({
+            printer_uri: printerUri,
+            printer_model: printerModel,
+            label_size: labelSize,
+            rotate: parseInt(rotate),
+            threshold: parseFloat(threshold),
+            dither: dither,
+            red: red,
+            copies: parseInt(document.getElementById('copies').value) || 1,
+            cut_mode: document.getElementById('cut-mode').value,
+            dpi_600: document.getElementById('dpi-600').value === 'true'
+        }));
+        formData.append('pages', pages);
+        formData.append('scale_mode', scaleMode);
+
+        const response = await fetch('/api/v1/pdf/print', {
+            method: 'POST',
+            body: formData
+        });
+
+        // Reset button state
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalBtnText;
+
+        if (!response.ok) {
+            const errorData = await response.json();
+            throw new Error(errorData.message || `Error: ${response.status}`);
+        }
+
+        const data = await response.json();
+
+        showNotification('PDF printed successfully', 'success');
+        console.log('Print result:', data);
+    } catch (error) {
+        console.error('Error printing PDF:', error);
+        showNotification(`Error printing PDF: ${error.message}`, 'error');
+    }
+}
+
+// Holds the AbortController of the in-flight PDF preview request so that
+// rapidly firing triggers (file change + debounced page input) cannot leave
+// stale results on screen.
+let pdfPreviewController = null;
+
+/**
+ * Hide the PDF preview container and clear its contents. Optionally restore the
+ * placeholder if no other preview is currently visible.
+ */
+function clearPdfPreview() {
+    const pdfPreview = document.getElementById('pdf-preview');
+    const pdfPreviewPages = document.getElementById('pdf-preview-pages');
+    const pdfPreviewNotice = document.getElementById('pdf-preview-notice');
+    const previewPlaceholder = document.getElementById('preview-placeholder');
+
+    if (pdfPreviewPages) pdfPreviewPages.innerHTML = '';
+    if (pdfPreviewNotice) {
+        pdfPreviewNotice.textContent = '';
+        pdfPreviewNotice.classList.add('d-none');
+    }
+    if (pdfPreview) pdfPreview.classList.add('d-none');
+
+    // Restore the placeholder if nothing else is shown.
+    if (previewPlaceholder &&
+        typeof areAllPreviewsEmpty === 'function' &&
+        areAllPreviewsEmpty()) {
+        previewPlaceholder.classList.remove('d-none');
+    }
+}
+
+/**
+ * Render a server-side PDF preview for the currently selected file.
+ * Reads the file from #pdf-input and the page selection from #pdf-pages,
+ * POSTs them to /api/v1/pdf/preview and renders the returned thumbnails.
+ */
+async function previewPdf() {
+    const pdfInput = document.getElementById('pdf-input');
+    const pdfPreview = document.getElementById('pdf-preview');
+    const pdfPreviewPages = document.getElementById('pdf-preview-pages');
+    const pdfPreviewNotice = document.getElementById('pdf-preview-notice');
+    const previewPlaceholder = document.getElementById('preview-placeholder');
+
+    if (!pdfInput || !pdfPreview || !pdfPreviewPages) return;
+
+    // No file -> clear and hide the preview.
+    if (!pdfInput.files || pdfInput.files.length === 0) {
+        clearPdfPreview();
+        return;
+    }
+
+    const pages = document.getElementById('pdf-pages')
+        ? document.getElementById('pdf-pages').value
+        : '';
+
+    // Abort any preview request still in flight so its (older) response can be
+    // ignored and never overwrites a newer one.
+    if (pdfPreviewController) {
+        pdfPreviewController.abort();
+    }
+    const controller = new AbortController();
+    pdfPreviewController = controller;
+
+    // Loading state.
+    pdfPreviewPages.innerHTML =
+        '<div class="d-flex justify-content-center py-4">' +
+        '<div class="spinner-border text-primary" role="status">' +
+        '<span class="visually-hidden">Loading...</span></div></div>';
+    if (pdfPreviewNotice) {
+        pdfPreviewNotice.textContent = '';
+        pdfPreviewNotice.classList.add('d-none');
+    }
+    pdfPreview.classList.remove('d-none');
+    if (previewPlaceholder) previewPlaceholder.classList.add('d-none');
+    // Hide the other previews while showing the PDF preview.
+    if (typeof hideOtherPreviews === 'function') {
+        hideOtherPreviews('pdf-preview');
+    }
+
+    try {
+        const formData = new FormData();
+        formData.append('file', pdfInput.files[0]);
+        formData.append('pages', pages || '');
+
+        const response = await fetch('/api/v1/pdf/preview', {
+            method: 'POST',
+            body: formData,
+            signal: controller.signal
+        });
+
+        // A newer request started while this one was running: ignore this result.
+        if (pdfPreviewController !== controller) return;
+
+        if (!response.ok) {
+            let message = `Error: ${response.status}`;
+            try {
+                const errorData = await response.json();
+                message = errorData.message || message;
+            } catch (e) {
+                // Response body was not JSON; keep the generic message.
+            }
+            clearPdfPreview();
+            showNotification(`PDF preview error: ${message}`, 'error');
+            return;
+        }
+
+        const data = await response.json();
+
+        // Render thumbnails.
+        pdfPreviewPages.innerHTML = '';
+
+        const previews = Array.isArray(data.previews) ? data.previews : [];
+        previews.forEach(preview => {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'pdf-preview-page text-center';
+
+            const label = document.createElement('div');
+            label.className = 'pdf-preview-page-label text-muted small mb-1';
+            label.textContent = `Page ${preview.page}`;
+
+            const img = document.createElement('img');
+            img.className = 'pdf-preview-thumb img-fluid border rounded';
+            img.alt = `Page ${preview.page}`;
+            img.src = preview.image;
+            img.style.maxWidth = '100%';
+
+            wrapper.appendChild(label);
+            wrapper.appendChild(img);
+            pdfPreviewPages.appendChild(wrapper);
+        });
+
+        // Truncation notice.
+        if (pdfPreviewNotice) {
+            if (data.truncated) {
+                const shown = previews.length;
+                const total = data.total_pages != null ? data.total_pages : shown;
+                pdfPreviewNotice.textContent =
+                    `Showing first ${shown} of ${total} pages`;
+                pdfPreviewNotice.classList.remove('d-none');
+            } else {
+                pdfPreviewNotice.textContent = '';
+                pdfPreviewNotice.classList.add('d-none');
+            }
+        }
+
+        if (previews.length === 0) {
+            // Nothing to show -> fall back to a clean/hidden state.
+            clearPdfPreview();
+            return;
+        }
+
+        pdfPreview.classList.remove('d-none');
+        if (previewPlaceholder) previewPlaceholder.classList.add('d-none');
+    } catch (error) {
+        // Ignore aborts triggered by a newer request.
+        if (error && error.name === 'AbortError') return;
+        console.error('Error generating PDF preview:', error);
+        clearPdfPreview();
+        showNotification(`PDF preview error: ${error.message}`, 'error');
+    } finally {
+        if (pdfPreviewController === controller) {
+            pdfPreviewController = null;
+        }
+    }
+}
+
+/**
  * Handle QR code print form submission
  * @param {Event} event - Form submit event
  */

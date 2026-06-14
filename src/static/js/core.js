@@ -29,7 +29,10 @@ function initApp() {
     
     // Initialize preview elements
     initPreviewElements();
-    
+
+    // Check for a shared file hand-off (?share=token&type=pdf|image)
+    handleSharedFile();
+
     console.log('Brother QL Printer App initialized');
 }
 
@@ -77,7 +80,14 @@ function setupEventListeners() {
     tabEls.forEach(tabEl => {
         tabEl.addEventListener('shown.bs.tab', event => {
             const targetId = event.target.getAttribute('data-bs-target');
-            
+
+            // When leaving the PDF tab, hide its preview so it does not linger
+            // over the other (text/image/qr/label) previews.
+            if (targetId !== '#pdf-panel') {
+                const pdfPreview = document.getElementById('pdf-preview');
+                if (pdfPreview) pdfPreview.classList.add('d-none');
+            }
+
             // Update the appropriate preview based on the active tab
             if (targetId === '#text-panel') {
                 updateTextPreview();
@@ -87,6 +97,12 @@ function setupEventListeners() {
                 updateQRCodePreview();
             } else if (targetId === '#label-panel') {
                 updateLabelPreview();
+            } else if (targetId === '#pdf-panel') {
+                // Refresh the PDF preview if a file is already selected.
+                const pdfInput = document.getElementById('pdf-input');
+                if (pdfInput && pdfInput.files && pdfInput.files.length > 0) {
+                    previewPdf();
+                }
             }
         });
     });
@@ -212,10 +228,106 @@ function setupEventListeners() {
         }
     }
     
+    // PDF print form
+    const pdfForm = document.getElementById('pdf-form');
+    if (pdfForm) {
+        pdfForm.addEventListener('submit', handlePdfPrint);
+
+        // PDF preview triggers
+        const pdfInput = document.getElementById('pdf-input');
+        const pdfPages = document.getElementById('pdf-pages');
+
+        if (pdfInput) {
+            // New file selected (also fired by the shared-file hand-off) ->
+            // refresh the preview immediately.
+            pdfInput.addEventListener('change', previewPdf);
+        }
+
+        if (pdfPages) {
+            // Debounce the page-range input so we do not POST on every keystroke.
+            let pdfPagesTimer = null;
+            pdfPages.addEventListener('input', () => {
+                clearTimeout(pdfPagesTimer);
+                pdfPagesTimer = setTimeout(previewPdf, 400);
+            });
+        }
+    }
+
     // Settings form
     const settingsForm = document.getElementById('settings-form');
     if (settingsForm) {
         settingsForm.addEventListener('submit', handleSaveSettings);
+    }
+}
+
+/**
+ * Handle a shared file hand-off via URL parameters (?share=token&type=pdf|image).
+ * Fetches the shared file and loads it into the matching file input, then
+ * activates the corresponding tab so the user only needs to press "Print".
+ */
+async function handleSharedFile() {
+    const params = new URLSearchParams(location.search);
+    const token = params.get('share');
+    const type = params.get('type');
+
+    if (!token) {
+        return;
+    }
+
+    try {
+        const response = await fetch('/api/v1/share/' + encodeURIComponent(token));
+        if (!response.ok) {
+            throw new Error(`Failed to load shared file: ${response.status}`);
+        }
+
+        const blob = await response.blob();
+
+        let inputId;
+        let tabId;
+        let fileName;
+
+        if (type === 'pdf') {
+            inputId = 'pdf-input';
+            tabId = 'pdf-tab';
+            fileName = 'shared.pdf';
+        } else {
+            // Default to image hand-off
+            inputId = 'image-input';
+            tabId = 'image-tab';
+            fileName = 'shared-image';
+        }
+
+        const input = document.getElementById(inputId);
+        const tabBtn = document.getElementById(tabId);
+
+        if (input) {
+            const file = new File([blob], fileName, { type: blob.type });
+            const dt = new DataTransfer();
+            dt.items.add(file);
+            input.files = dt.files;
+
+            // Trigger change so any preview logic runs
+            input.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+
+        if (tabBtn) {
+            if (window.bootstrap && bootstrap.Tab) {
+                new bootstrap.Tab(tabBtn).show();
+            } else {
+                tabBtn.click();
+            }
+        }
+    } catch (error) {
+        console.error('Error loading shared file:', error);
+        if (typeof showNotification === 'function') {
+            showNotification(`Error loading shared file: ${error.message}`, 'error');
+        }
+    } finally {
+        // Remove the share params so a reload does not re-trigger the hand-off
+        const url = new URL(location.href);
+        url.searchParams.delete('share');
+        url.searchParams.delete('type');
+        history.replaceState(null, '', url.pathname + url.search + url.hash);
     }
 }
 
