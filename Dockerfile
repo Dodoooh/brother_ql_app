@@ -50,5 +50,10 @@ USER appuser
 # Expose port
 EXPOSE 5000
 
+# Liveness check against the lightweight /health endpoint (no printer access).
+# python -c avoids needing curl/wget in the slim image.
+HEALTHCHECK --interval=30s --timeout=3s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health',timeout=2).status==200 else 1)"
+
 # Set the entrypoint (will run as appuser)
 ENTRYPOINT ["/app/docker-entrypoint.sh"]

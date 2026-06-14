@@ -122,4 +122,31 @@ fi
 # Run the application - SKIP_INIT_CONFIG might still be useful if app.py has overlapping logic
 echo "Starting application with SKIP_INIT_CONFIG=true"
 export SKIP_INIT_CONFIG=true
-exec python /app/src/app.py
+
+# Local development convenience: FLASK_ENV=development keeps the Flask dev server
+# (single-process, easier debugging). Everything else runs the production WSGI
+# server (gunicorn).
+if [ "$FLASK_ENV" = "development" ]; then
+    echo "FLASK_ENV=development -> starting Flask development server"
+    exec python /app/src/app.py
+fi
+
+# Production: gunicorn.
+#   --workers 1  : the keep-alive feature uses a single-process singleton
+#                  (printer_service) that owns a background thread. Multiple
+#                  workers would each start their own keep-alive thread and
+#                  corrupt the singleton state, so we MUST stay at one worker.
+#   --threads 4  : in-process threads handle concurrent requests; they share the
+#                  same singleton, so no extra keep-alive threads are created.
+#   no --preload : create_app() (and thus init_keep_alive) must run inside the
+#                  worker process, otherwise the keep-alive thread would be
+#                  started before the fork and would die.
+echo "Starting application with gunicorn (workers=1, threads=4)"
+exec gunicorn \
+    --workers 1 \
+    --threads 4 \
+    --bind 0.0.0.0:5000 \
+    --timeout 60 \
+    --access-logfile - \
+    --error-logfile - \
+    wsgi:application

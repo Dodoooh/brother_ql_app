@@ -27,6 +27,15 @@ tags:
   - name: settings
     description: Settings management
 
+# Advertise the optional API-key scheme so the Swagger UI shows an "Authorize"
+# button and injects the X-API-Key header into "Try it out" calls. Actual
+# enforcement is the Flask before_request hook (opt-in via the API_KEY env var);
+# when API_KEY is unset the hook allows everything, so this declaration does not
+# gate the API by itself. The hook also keeps the docs page, the OpenAPI spec
+# and the health endpoints reachable without a key.
+security:
+  - ApiKeyAuth: []
+
 paths:
   /printers:
     get:
@@ -276,6 +285,20 @@ paths:
           $ref: '#/components/responses/InternalServerError'
 
 components:
+  # The global `security:` above references this scheme so the Swagger UI shows
+  # an "Authorize" button. Actual enforcement is the Flask before_request hook
+  # (see register_auth in app.py), opt-in via the API_KEY env var; connexion
+  # itself does not enforce it (no x-apikeyInfoFunc), and the hook keeps the UI,
+  # the spec and the health endpoints reachable without a key.
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+      description: >-
+        Optional API key. When the API_KEY environment variable is set on the
+        server, send the matching key in the X-API-Key header for all
+        /api/v1/* requests (UI, Swagger UI and health endpoints are exempt).
   schemas:
     KeepAliveStatus:
       type: object
@@ -695,6 +718,16 @@ components:
           default: 60
           minimum: 10
           maximum: 3600
+        ipp_port:
+          type: integer
+          description: >-
+            IPP port used for network printer status and keep-alive checks.
+            Defaults to the IANA-standard 631, which is the same on virtually
+            all Brother network printers; only change for non-standard setups.
+          example: 631
+          default: 631
+          minimum: 1
+          maximum: 65535
       required:
         - printer_uri
         - printer_model
