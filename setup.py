@@ -2,19 +2,26 @@ from setuptools import setup, find_packages
 
 setup(
     name="brother_ql_app",
-    version="3.0.1",
+    version="3.1.0",
     packages=find_packages(),
     include_package_data=True,
+    # Kept in sync with requirements.txt (the authoritative dependency list).
     install_requires=[
+        # Core
         "Flask<2.3.0,>=2.0.0",
         "connexion[swagger-ui]==2.14.2",
         "python-dotenv==1.0.0",
         "marshmallow==3.20.1",
         "pydantic==2.4.2",
         "flask-cors==4.0.0",
-        "brother-ql==0.9.4",
-        "Pillow==10.0.1",
+        # Printer communication
+        "brother-ql-inventree==1.3",
+        "Pillow==10.4.0",
+        "pysnmp==4.4.12",
+        "pyasn1==0.4.8",
+        "qrcode==7.4.2",
+        # Logging
         "structlog==23.1.0",
     ],
-    python_requires=">=3.8",
+    python_requires=">=3.9",
 )

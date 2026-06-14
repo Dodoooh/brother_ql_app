@@ -1,0 +1,36 @@
+# Tooling configuration only — this does NOT change the build/packaging system
+# (setup.py + setuptools remains authoritative for that).
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+# Common noise from data/runtime dirs is excluded.
+extend-exclude = ["uploads", "data", "build", "dist"]
+
+[tool.ruff.lint]
+# A pragmatic, non-exhaustive rule set:
+#   E/W  pycodestyle errors & warnings
+#   F    pyflakes (unused imports/vars, undefined names)
+#   I    isort (import ordering)
+#   B    flake8-bugbear (likely bugs)
+#   UP   pyupgrade (modernize syntax for the target version)
+#   C4   flake8-comprehensions
+select = ["E", "W", "F", "I", "B", "UP", "C4"]
+# E501 (line length) is handled by the formatter / line-length above; keep it
+# off here so long URLs and strings don't block linting.
+ignore = ["E501"]
+
+[tool.mypy]
+# Soft entry point for static typing: not strict yet, so untyped/3rd-party
+# code doesn't block. Tighten (e.g. disallow_untyped_defs, strict) over time.
+python_version = "3.9"
+ignore_missing_imports = true
+warn_unused_ignores = true
+exclude = ["uploads", "data", "build", "dist"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The project mixes `src.`-style imports with bare `src` package imports,
+# so both the repo root and src/ must be importable.
+pythonpath = [".", "src"]
+addopts = "-q"

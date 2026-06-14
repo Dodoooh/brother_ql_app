@@ -7,8 +7,53 @@ on:
       - dev
 
 jobs:
+  # Run lint, tests and a dependency vulnerability scan before building the
+  # image.
+  #
+  # NOTE on blocking behaviour:
+  #   - ruff and pytest are intentionally still non-blocking (|| true) because
+  #     the codebase is not yet lint-clean and the test suite is still being
+  #     added. To make them block the build later, simply drop the `|| true`
+  #     from the corresponding step.
+  #   - pip-audit IS blocking (no `|| true`): a known vulnerability in the
+  #     pinned/installed requirements must fail the pipeline and stop the build.
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff pytest pytest-cov pip-audit
+
+      # Non-blocking for now (codebase not yet lint-clean) — remove `|| true`
+      # to enforce.
+      - name: Lint (ruff)
+        run: ruff check . || true
+
+      # Non-blocking for now (test suite still being added) — remove `|| true`
+      # to enforce.
+      - name: Run tests (pytest)
+        run: pytest -q || true
+
+      # BLOCKING: audit the pinned requirements. A vulnerability finding fails
+      # this step, fails the `test` job, and (via `needs: test`) prevents the
+      # Docker image from being built and pushed.
+      - name: Dependency vulnerability scan (pip-audit)
+        run: pip-audit -r requirements.txt
+
   build-and-push:
     runs-on: ubuntu-latest
+    needs: test
 
     steps:
       # Checkout des Codes
