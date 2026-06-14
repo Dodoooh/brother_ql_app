@@ -16,6 +16,7 @@ DEFAULT_SETTINGS = {
     "red": False,
     "keep_alive_enabled": False,
     "keep_alive_interval": 60,  # seconds
+    "ipp_port": 631,  # IPP port for network status/keep-alive (IANA standard)
     "printers": [
         {
             "id": "default",

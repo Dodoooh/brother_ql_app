@@ -7,8 +7,11 @@ import os
 import json
 import structlog
 import copy  # For deepcopy
+import threading
 from typing import Dict, Any, Optional
 from brother_ql.backends import guess_backend
+
+from src.utils.uri_validation import validate_printer_uri
 
 # Attempt to import default settings, handle potential import errors during startup phases
 try:
@@ -45,6 +48,12 @@ class SettingsService:
             self.settings_file = os.path.join(data_dir, "settings.json")
         else:
             self.settings_file = settings_file
+
+        # In-memory cache with mtime-based invalidation. Guarded by a lock so
+        # the keep-alive thread can safely read while the API writes.
+        self._cache_lock = threading.Lock()
+        self._cached_settings: Optional[Dict[str, Any]] = None
+        self._cached_mtime: Optional[float] = None
 
         self.settings: Dict[str, Any] = self._load_settings()
         logger.info("SettingsService initialized", initial_settings_source=self.settings_file)
@@ -93,6 +102,7 @@ class SettingsService:
             "font_size": (int, float), "alignment": str, "rotate": (int, float),
             "threshold": (int, float), "dither": bool, "compress": bool, "red": bool,
             "keep_alive_enabled": bool, "keep_alive_interval": (int, float),
+            "ipp_port": int,
             "printers": list
         }
         for field, expected_type in type_checks.items():
@@ -109,6 +119,13 @@ class SettingsService:
             if isinstance(settings_to_validate[field], str) and not settings_to_validate[field].strip():
                 raise ValueError(f"Required setting '{field}' cannot be empty.")
 
+        # --- Printer URI safety check (scheme allowlist + SSRF guard) ---
+        # Reuses the canonical validator so that e.g. file://, lpt:// or
+        # link-local/metadata hosts are rejected. Private/LAN IPs and
+        # hostnames (the normal case) pass through unchanged.
+        if "printer_uri" in settings_to_validate:
+            validate_printer_uri(settings_to_validate["printer_uri"])
+
         # --- Value Checks ---
         if "alignment" in settings_to_validate and settings_to_validate["alignment"] not in ["left", "center", "right"]:
             raise ValueError(f"Invalid alignment value: {settings_to_validate['alignment']}")
@@ -118,6 +135,9 @@ class SettingsService:
 
         if "threshold" in settings_to_validate and not (0 <= settings_to_validate["threshold"] <= 100):
              raise ValueError(f"Invalid threshold value: {settings_to_validate['threshold']}. Must be between 0 and 100.")
+
+        if "ipp_port" in settings_to_validate and not (1 <= settings_to_validate["ipp_port"] <= 65535):
+             raise ValueError(f"Invalid ipp_port value: {settings_to_validate['ipp_port']}. Must be between 1 and 65535.")
 
         if settings_to_validate.get("keep_alive_enabled"):
             interval = settings_to_validate.get("keep_alive_interval")
@@ -144,6 +164,12 @@ class SettingsService:
                         raise ValueError(f"Printer at index {i} missing required field: {field}")
                     if isinstance(printer[field], str) and not printer[field].strip():
                          raise ValueError(f"Required field '{field}' in printer at index {i} cannot be empty.")
+                # Validate each printer's URI with the same allowlist/SSRF rules.
+                if "printer_uri" in printer:
+                    try:
+                        validate_printer_uri(printer["printer_uri"])
+                    except ValueError as ve:
+                        raise ValueError(f"Printer at index {i}: {ve}")
         logger.debug("Settings validation passed")
 
 
@@ -185,7 +211,20 @@ class SettingsService:
             os.replace(temp_file_path, self.settings_file)
             logger.debug("Successfully replaced original file", file=self.settings_file)
 
-            # 5. In-memory state update is removed. State will be re-read from file on next access.
+            # 5. Refresh the in-memory cache so freshly written values are
+            #    immediately visible without another disk read. We re-derive the
+            #    cached object via _load_settings (applying default-key merging)
+            #    and record the new mtime. On any hiccup we simply invalidate.
+            with self._cache_lock:
+                try:
+                    self._cached_settings = self._load_settings()
+                    self._cached_mtime = os.path.getmtime(self.settings_file)
+                    logger.debug("Settings cache refreshed after save", file=self.settings_file, mtime=self._cached_mtime)
+                except OSError as cache_err:
+                    self._cached_settings = None
+                    self._cached_mtime = None
+                    logger.debug("Could not refresh settings cache after save, invalidating", error=str(cache_err))
+
             logger.info("Settings saved successfully to file", file=self.settings_file)
             return True
 
@@ -212,14 +251,36 @@ class SettingsService:
 
     def get_settings(self) -> Dict[str, Any]:
         """
-        Loads and returns the current settings directly from the file.
-        Ensures the freshest state is always returned.
+        Returns the current settings, served from an in-memory cache that is
+        invalidated whenever the settings file's mtime changes.
+
+        The file is only re-read from disk when nothing is cached yet or when
+        the file has been modified since the last load. A deep copy is always
+        returned so callers can never mutate the cached state.
+
+        Thread-safe: the cache is guarded by a lock so the keep-alive thread
+        can read while the API writes.
         """
-        # Always load from file to get the most current state
-        logger.debug("get_settings called, loading from file", file=self.settings_file)
-        # Use _load_settings which handles defaults if file is missing/invalid
-        # Return a deep copy to prevent external modification if needed, though _load_settings already returns a copy
-        return self._load_settings()
+        with self._cache_lock:
+            try:
+                current_mtime = os.path.getmtime(self.settings_file)
+            except OSError:
+                # File missing/unreadable -> fall back to default behaviour and
+                # do not cache (so a later-created file is picked up).
+                logger.debug("Settings file unavailable for mtime check, loading defaults", file=self.settings_file)
+                self._cached_settings = None
+                self._cached_mtime = None
+                return self._load_settings()
+
+            if self._cached_settings is None or self._cached_mtime != current_mtime:
+                logger.debug("Settings cache miss, loading from file", file=self.settings_file, mtime=current_mtime)
+                self._cached_settings = self._load_settings()
+                self._cached_mtime = current_mtime
+            else:
+                logger.debug("Settings cache hit", file=self.settings_file, mtime=current_mtime)
+
+            # Return a deep copy so callers cannot mutate the cached state.
+            return copy.deepcopy(self._cached_settings)
 
     def update_settings(self, settings_update: Dict[str, Any]) -> bool:
         """

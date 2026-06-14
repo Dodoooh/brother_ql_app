@@ -9,6 +9,7 @@ import structlog
 import threading
 import time
 import socket
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional, Tuple
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 import qrcode
@@ -29,7 +30,9 @@ except ImportError:
     logger.warning("pysnmp not available, SNMP-based keep-alive will not work")
 
 from src.services.settings_service import settings_service
-from src.utils.exceptions import PrinterError, ImageProcessingError
+from src.services.ipp_client import get_printer_attributes
+from src.utils.exceptions import PrinterError, ImageProcessingError, ValidationError
+from src.utils.uri_validation import validate_printer_uri
 
 logger = structlog.get_logger()
 
@@ -46,6 +49,10 @@ class PrinterService:
         # Keep alive thread
         self.keep_alive_thread = None
         self.keep_alive_stop_event = threading.Event()
+        # Serializes raw access to the printer's port 9100 so the keep-alive
+        # heartbeat never collides with an in-progress print job (the printer
+        # accepts only one 9100 connection at a time).
+        self._io_lock = threading.Lock()
         if upload_folder is None:
             self.upload_folder = os.path.join(
                 os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -69,6 +76,29 @@ class PrinterService:
                 logger.warning("Matplotlib not available, using default font")
                 self.font_path = None
     
+    def _cleanup_temp_files(self, paths: List[str]) -> None:
+        """
+        Remove intermediate render/resize artifacts produced by this service
+        (e.g. ``text_label_*``, ``resized_*``, ``rotated_*``, ``qrcode_*``).
+
+        This plugs a disk leak: those PNGs accumulated in the uploads folder
+        forever. We only ever pass paths generated *internally* here -- the
+        original uploaded image is never included, so we don't double-delete a
+        file the image controller may own.
+
+        Failures are logged and swallowed so cleanup can never break a print.
+        """
+        for path in paths:
+            if not path:
+                continue
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logger.debug("Removed temporary print artifact", path=path)
+            except OSError as e:
+                logger.warning("Failed to remove temporary print artifact",
+                               path=path, error=str(e))
+
     def get_printers(self) -> List[Dict[str, Any]]:
         """
         Get list of configured printers.
@@ -93,41 +123,89 @@ class PrinterService:
         Raises:
             PrinterError: If there's an error checking the printer status.
         """
+        # Defense in depth: never probe an unvetted URI. This guards against
+        # SSRF (e.g. tcp://169.254.169.254) and disallowed schemes even if a
+        # bad value somehow bypassed settings validation.
         try:
-            # Create a test connection to the printer
-            backend = backend_factory(guess_backend(printer_uri))["backend_class"](printer_uri)
-            
-            # Try to get printer status (implementation depends on printer capabilities)
-            # For now, we just check if we can establish a connection
-            is_available = True
-            status_message = "Printer is ready"
-            
-            # Close the connection
-            backend.dispose()
-            
-            return {
-                "available": is_available,
-                "status": status_message,
-                "details": {
-                    "printer_uri": printer_uri,
-                    "printer_model": printer_model
-                }
-            }
-        except Exception as e:
-            logger.error("Error checking printer status", 
-                        printer_uri=printer_uri, 
-                        printer_model=printer_model,
-                        error=str(e),
-                        exc_info=True)
-            
+            validate_printer_uri(printer_uri)
+        except ValueError as ve:
+            logger.warning("Rejected printer URI before status check",
+                           printer_uri=printer_uri, error=str(ve))
             return {
                 "available": False,
-                "status": f"Printer error: {str(e)}",
+                "status": f"Invalid printer URI: {str(ve)}",
                 "details": {
                     "printer_uri": printer_uri,
                     "printer_model": printer_model,
-                    "error": str(e)
+                    "error": str(ve),
+                },
+            }
+
+        backend_type = guess_backend(printer_uri)
+        details: Dict[str, Any] = {
+            "printer_uri": printer_uri,
+            "printer_model": printer_model,
+            "backend": backend_type,
+        }
+
+        # Network printers: query the real device state via IPP (TCP 631).
+        # This works on Brother QL models where SNMP is disabled and the raw
+        # 9100 port offers no status read-back. A plain TCP connect is used as
+        # a reachability fallback when IPP does not answer.
+        if backend_type == "network":
+            ip_address = self._extract_ip_from_uri(printer_uri)
+            ipp = get_printer_attributes(ip_address, port=self._get_ipp_port())
+            if ipp.get("reachable"):
+                details.update({
+                    "printer_state": ipp.get("printer_state"),
+                    "printer_state_reasons": ipp.get("printer_state_reasons"),
+                    "reported_model": ipp.get("make_and_model"),
+                    "source": "ipp",
+                    "clock": self._build_clock_info(ipp.get("current_time")),
+                })
+                state = ipp.get("printer_state") or "unknown"
+                return {
+                    "available": True,
+                    "status": f"Printer is {state}",
+                    "details": details,
                 }
+            if self._tcp_reachable(ip_address):
+                details["source"] = "tcp"
+                return {
+                    "available": True,
+                    "status": "Printer reachable (no IPP status)",
+                    "details": details,
+                }
+            details["source"] = "tcp"
+            if ipp.get("error"):
+                details["error"] = ipp["error"]
+            return {
+                "available": False,
+                "status": "Printer not reachable",
+                "details": details,
+            }
+
+        # Non-network backends (usb://, file://): constructing the backend is
+        # the available reachability check.
+        try:
+            backend = backend_factory(backend_type)["backend_class"](printer_uri)
+            backend.dispose()
+            return {
+                "available": True,
+                "status": "Printer is ready",
+                "details": details,
+            }
+        except Exception as e:
+            logger.error("Error checking printer status",
+                        printer_uri=printer_uri,
+                        printer_model=printer_model,
+                        error=str(e),
+                        exc_info=True)
+            details["error"] = str(e)
+            return {
+                "available": False,
+                "status": f"Printer error: {str(e)}",
+                "details": details,
             }
     
     def print_text(self, text: str, settings: Dict[str, Any]) -> Dict[str, Any]:
@@ -145,34 +223,46 @@ class PrinterService:
             PrinterError: If there's an error printing the text.
             ValueError: If settings are invalid.
         """
+        # Track intermediate artifacts so they can be cleaned up afterwards.
+        temp_files: List[str] = []
         try:
             # Generate a unique job ID
             job_id = f"text_{uuid.uuid4().hex[:8]}"
-            
+
             logger.info("Processing text print request", job_id=job_id, text_length=len(text))
-            
+
             # Create label image
             image_path = self._create_text_label(text, settings)
+            temp_files.append(image_path)
             logger.info("Text label created", job_id=job_id, image_path=image_path)
-            
+
             # Apply rotation if specified
             rotate = settings.get("rotate", 0)
             if rotate != 0:
                 image_path = self._apply_rotation(image_path, rotate)
+                temp_files.append(image_path)
                 logger.info("Rotation applied", job_id=job_id, rotate=rotate)
-            
+
             # Send to printer
             self._send_to_printer(image_path, settings)
             logger.info("Print job completed successfully", job_id=job_id)
-            
+
             return {
                 "success": True,
                 "job_id": job_id,
                 "message": "Text printed successfully"
             }
+        except (ValidationError, ValueError) as e:
+            # Pure input/validation problems (bad settings, invalid URI, ...)
+            # must surface as a client error (-> 400), not a printer fault.
+            logger.warning("Invalid input for text print", error=str(e))
+            raise ValidationError(f"Error printing text: {str(e)}") from e
         except Exception as e:
             logger.error("Error printing text", error=str(e), exc_info=True)
-            raise PrinterError(f"Error printing text: {str(e)}")
+            raise PrinterError(f"Error printing text: {str(e)}") from e
+        finally:
+            # All tracked files are generated by this service (no original upload).
+            self._cleanup_temp_files(temp_files)
     
     def print_image(self, image_path: str, settings: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -190,34 +280,47 @@ class PrinterService:
             ImageProcessingError: If there's an error processing the image.
             ValueError: If settings are invalid.
         """
+        # Track only the artifacts generated *here* (resized_/rotated_). The
+        # original uploaded ``image_path`` is intentionally NOT tracked so we
+        # don't double-delete a file owned by the image controller.
+        temp_files: List[str] = []
         try:
             # Generate a unique job ID
             job_id = f"image_{uuid.uuid4().hex[:8]}"
-            
+
             logger.info("Processing image print request", job_id=job_id, image_path=image_path)
-            
+
             # Resize image to fit label width
             resized_path = self._resize_image(image_path)
+            temp_files.append(resized_path)
             logger.info("Image resized", job_id=job_id, resized_path=resized_path)
-            
+
             # Apply rotation if specified
             rotate = settings.get("rotate", 0)
             if rotate != 0:
                 resized_path = self._apply_rotation(resized_path, rotate)
+                temp_files.append(resized_path)
                 logger.info("Rotation applied", job_id=job_id, rotate=rotate)
-            
+
             # Send to printer
             self._send_to_printer(resized_path, settings)
             logger.info("Print job completed successfully", job_id=job_id)
-            
+
             return {
                 "success": True,
                 "job_id": job_id,
                 "message": "Image printed successfully"
             }
+        except (ValidationError, ValueError) as e:
+            # Pure input/validation problems (bad settings, invalid URI, ...)
+            # must surface as a client error (-> 400), not a printer fault.
+            logger.warning("Invalid input for image print", error=str(e))
+            raise ValidationError(f"Error printing image: {str(e)}") from e
         except Exception as e:
             logger.error("Error printing image", error=str(e), exc_info=True)
-            raise PrinterError(f"Error printing image: {str(e)}")
+            raise PrinterError(f"Error printing image: {str(e)}") from e
+        finally:
+            self._cleanup_temp_files(temp_files)
     
     def _create_text_label(self, html_text: str, settings: Dict[str, Any]) -> str:
         """
@@ -390,17 +493,21 @@ class PrinterService:
         Raises:
             PrinterError: If there's an error sending to the printer.
         """
+        # Extract settings
+        printer_uri = settings.get("printer_uri")
+        printer_model = settings.get("printer_model")
+        label_size = settings.get("label_size")
+        rotate = settings.get("rotate", 0)
+        dither = settings.get("dither", False)
+        compress = settings.get("compress", False)
+        red = settings.get("red", False)
+
+        # --- Input/validation phase (-> ValidationError -> 400) ---
+        # Bad/missing settings and disallowed/SSRF URIs are caller mistakes,
+        # not printer faults, so they are classified as validation errors.
         try:
-            # Extract settings
-            printer_uri = settings.get("printer_uri")
-            printer_model = settings.get("printer_model")
-            label_size = settings.get("label_size")
-            rotate = settings.get("rotate", 0)
             threshold = float(settings.get("threshold", 70.0))
-            dither = settings.get("dither", False)
-            compress = settings.get("compress", False)
-            red = settings.get("red", False)
-            
+
             # Validate required settings
             if not printer_uri:
                 raise ValueError("printer_uri is required")
@@ -408,11 +515,22 @@ class PrinterService:
                 raise ValueError("printer_model is required")
             if not label_size:
                 raise ValueError("label_size is required")
-            
+
+            # Defense in depth: validate the destination URI immediately before
+            # handing it to the backend. Rejects disallowed schemes (file://,
+            # lpt://, ...) and SSRF/metadata targets even if settings validation
+            # was bypassed. Private/LAN IPs and hostnames stay valid.
+            validate_printer_uri(printer_uri)
+        except (ValidationError, ValueError) as e:
+            logger.warning("Invalid print settings", error=str(e))
+            raise ValidationError(f"Invalid print settings: {str(e)}") from e
+
+        # --- Printer/IO phase (-> PrinterError -> 500) ---
+        try:
             # Create rasterizer
             qlr = BrotherQLRaster(printer_model)
             qlr.exception_on_warning = True
-            
+
             # Convert image to printer instructions
             instructions = convert(
                 qlr=qlr,
@@ -424,19 +542,20 @@ class PrinterService:
                 compress=compress,
                 red=red,
             )
-            
-            # Send to printer
-            backend = backend_factory(guess_backend(printer_uri))["backend_class"](printer_uri)
-            backend.write(instructions)
-            backend.dispose()
-            
-            logger.info("Print job sent to printer", 
-                       printer_uri=printer_uri, 
+
+            # Send to printer (serialized against the keep-alive heartbeat).
+            with self._io_lock:
+                backend = backend_factory(guess_backend(printer_uri))["backend_class"](printer_uri)
+                backend.write(instructions)
+                backend.dispose()
+
+            logger.info("Print job sent to printer",
+                       printer_uri=printer_uri,
                        printer_model=printer_model,
                        label_size=label_size)
         except Exception as e:
             logger.error("Error sending to printer", error=str(e), exc_info=True)
-            raise PrinterError(f"Error sending to printer: {str(e)}")
+            raise PrinterError(f"Error sending to printer: {str(e)}") from e
 
     def start_keep_alive(self, printer_uri: Optional[str] = None, printer_model: Optional[str] = None, interval: int = 60) -> Dict[str, Any]:
         """
@@ -574,34 +693,45 @@ class PrinterService:
             ImageProcessingError: If there's an error generating the QR code.
             ValueError: If settings are invalid.
         """
+        # Track intermediate artifacts so they can be cleaned up afterwards.
+        temp_files: List[str] = []
         try:
             # Generate a unique job ID
             job_id = f"qrcode_{uuid.uuid4().hex[:8]}"
-            
+
             logger.info("Processing QR code print request", job_id=job_id, data_length=len(data))
-            
+
             # Create QR code image
             image_path = self._create_qr_code(data, settings)
+            temp_files.append(image_path)
             logger.info("QR code created", job_id=job_id, image_path=image_path)
-            
+
             # Apply rotation if specified
             rotate = settings.get("rotate", 0)
             if rotate != 0:
                 image_path = self._apply_rotation(image_path, rotate)
+                temp_files.append(image_path)
                 logger.info("Rotation applied", job_id=job_id, rotate=rotate)
-            
+
             # Send to printer
             self._send_to_printer(image_path, settings)
             logger.info("Print job completed successfully", job_id=job_id)
-            
+
             return {
                 "success": True,
                 "job_id": job_id,
                 "message": "QR code printed successfully"
             }
+        except (ValidationError, ValueError) as e:
+            # Pure input/validation problems (bad settings, invalid URI, ...)
+            # must surface as a client error (-> 400), not a printer fault.
+            logger.warning("Invalid input for QR code print", error=str(e))
+            raise ValidationError(f"Error printing QR code: {str(e)}") from e
         except Exception as e:
             logger.error("Error printing QR code", error=str(e), exc_info=True)
-            raise PrinterError(f"Error printing QR code: {str(e)}")
+            raise PrinterError(f"Error printing QR code: {str(e)}") from e
+        finally:
+            self._cleanup_temp_files(temp_files)
     
     def _create_qr_code(self, data: str, settings: Dict[str, Any]) -> str:
         """
@@ -618,213 +748,258 @@ class PrinterService:
             ImageProcessingError: If there's an error creating the QR code.
         """
         try:
-            # Extract QR code settings
-            show_text = settings.get("show_text", False)
-            text = settings.get("text", data)  # Use data as default text if not provided
-            qr_version = settings.get("qr_version", 1)  # QR code version (1-40)
-            qr_box_size = settings.get("qr_box_size", 10)  # Size of each box in pixels
-            qr_border = settings.get("qr_border", 4)  # Border size in boxes
-            error_correction = settings.get("error_correction", "M")  # L, M, Q, H
-            qr_size = settings.get("qr_size", 400)  # Overall QR code size in pixels
-            
-            # Text settings
-            text_position = settings.get("text_position", "bottom")  # Position of text: "top", "bottom", or "none"
-            text_alignment = settings.get("text_alignment", "center")  # Text alignment: "left", "center", or "right"
-            
-            # Layout settings
-            side_by_side = settings.get("side_by_side", False)  # Whether to show text and QR code side by side
-            side_text = settings.get("side_text", "")  # Text to show on the side
-            qr_position = settings.get("qr_position", "right")  # Position of QR code: "left" or "right"
-            
-            # Map error correction string to qrcode constants
-            error_correction_map = {
-                "L": qrcode.constants.ERROR_CORRECT_L,  # 7% error correction
-                "M": qrcode.constants.ERROR_CORRECT_M,  # 15% error correction
-                "Q": qrcode.constants.ERROR_CORRECT_Q,  # 25% error correction
-                "H": qrcode.constants.ERROR_CORRECT_H,  # 30% error correction
-            }
-            ec_level = error_correction_map.get(error_correction, qrcode.constants.ERROR_CORRECT_M)
-            
-            # Create QR code
-            qr = qrcode.QRCode(
-                version=qr_version,
-                error_correction=ec_level,
-                box_size=qr_box_size,
-                border=qr_border,
-            )
-            qr.add_data(data)
-            qr.make(fit=True)
-            
-            # Create image
-            qr_img = qr.make_image(fill_color="black", back_color="white")
-            qr_img = qr_img.convert("RGB")
-            
-            # Resize QR code to desired size if specified
-            qr_size = settings.get("qr_size", 400)  # Default to 400px for better visibility
-            if qr_size:
-                # Get current size
-                current_width, current_height = qr_img.size
-                
-                # Calculate new size while maintaining aspect ratio
-                if current_width != qr_size:
-                    ratio = qr_size / current_width
-                    new_size = (qr_size, int(current_height * ratio))
-                    qr_img = qr_img.resize(new_size, Image.Resampling.LANCZOS)
-                    logger.debug("Resized QR code", 
-                               original_size=(current_width, current_height),
-                               new_size=new_size)
-            
-            # Check if we should use side-by-side layout
-            if side_by_side and side_text:
-                # Get QR code dimensions
-                qr_width, qr_height = qr_img.size
-                
-                # Use text_font_size if provided, otherwise fall back to font_size or default
-                text_font_size = settings.get("text_font_size", settings.get("font_size", 30))
-                font = ImageFont.truetype(self.font_path, text_font_size)
-                
-                # Parse side_text into lines
-                side_text_lines = side_text.split('\n')
-                
-                # Calculate text dimensions for each line
-                text_metrics = []
-                max_text_width = 0
-                total_text_height = 0
-                line_spacing = 10
-                
-                dummy_draw = ImageDraw.Draw(qr_img)
-                for line in side_text_lines:
-                    bbox = dummy_draw.textbbox((0, 0), line, font=font)
-                    line_width = bbox[2] - bbox[0]
-                    line_height = bbox[3] - bbox[1]
-                    max_text_width = max(max_text_width, line_width)
-                    text_metrics.append((line, line_width, line_height))
-                    total_text_height += line_height + line_spacing
-                
-                # Remove extra line spacing from the last line
-                total_text_height -= line_spacing
-                
-                # Calculate dimensions for the combined image
-                # Text takes 2/3, QR code takes 1/3
-                padding = 20
-                total_width = max(qr_width + max_text_width + padding * 3, 696)  # Ensure minimum width
-                text_area_width = int(total_width * 2/3) - padding * 2
-                qr_area_width = total_width - text_area_width - padding * 3
-                
-                # Resize QR code to fit in the 1/3 area while keeping it square
-                # Use the width as the limiting factor for both dimensions
-                qr_img = qr_img.resize((qr_area_width, qr_area_width), Image.Resampling.LANCZOS)
-                qr_width, qr_height = qr_img.size
-                
-                # Create a new image with the combined layout
-                total_height = max(qr_height, total_text_height) + padding * 2
-                new_img = Image.new("RGB", (total_width, total_height), "white")
-                
-                # Determine positions based on qr_position
-                if qr_position == "left":
-                    # QR code on the left, text on the right
-                    qr_x = padding
-                    text_area_x = qr_area_width + padding * 2
-                else:
-                    # QR code on the right, text on the left (default)
-                    qr_x = text_area_width + padding * 2
-                    text_area_x = padding
-                
-                # Paste QR code
-                qr_y = (total_height - qr_height) // 2  # Center vertically
-                new_img.paste(qr_img, (qr_x, qr_y))
-                
-                # Draw text with specified alignment
-                draw = ImageDraw.Draw(new_img)
-                text_y = (total_height - total_text_height) // 2  # Center vertically
-                
-                for line, line_width, line_height in text_metrics:
-                    # Calculate text position based on alignment
-                    if text_alignment == "center":
-                        text_x = text_area_x + (text_area_width - line_width) // 2
-                    elif text_alignment == "right":
-                        text_x = text_area_x + text_area_width - line_width
-                    else:  # left alignment (default)
-                        text_x = text_area_x
-                    
-                    draw.text((text_x, text_y), line, font=font, fill="black")
-                    text_y += line_height + line_spacing
-                
-                qr_img = new_img
-                
-            # If text should be shown with the QR code (only if not using side-by-side)
-            elif show_text and text:
-                # Get QR code dimensions
-                qr_width, qr_height = qr_img.size
-                
-                # Create a new image with space for text
-                # Use text_font_size if provided, otherwise fall back to font_size or default
-                text_font_size = settings.get("text_font_size", settings.get("font_size", 30))
-                font = ImageFont.truetype(self.font_path, text_font_size)
-                
-                # Calculate text dimensions
-                dummy_draw = ImageDraw.Draw(qr_img)
-                bbox = dummy_draw.textbbox((0, 0), text, font=font)
-                text_width = bbox[2] - bbox[0]
-                text_height = bbox[3] - bbox[1]
-                
-                # Create a new image with space for text
-                padding = 20  # Padding between QR code and text
-                
-                # Determine layout based on text position
-                if text_position == "top":
-                    # Text above QR code
-                    new_height = qr_height + text_height + padding
-                    new_img = Image.new("RGB", (qr_width, new_height), "white")
-                    
-                    # Draw text at the top
-                    draw = ImageDraw.Draw(new_img)
-                    
-                    # Calculate text position based on alignment
-                    if text_alignment == "center":
-                        x = (qr_width - text_width) // 2
-                    elif text_alignment == "right":
-                        x = qr_width - text_width - 10
-                    else:  # left alignment
-                        x = 10
-                    
-                    y = padding // 2
-                    draw.text((x, y), text, font=font, fill="black")
-                    
-                    # Paste QR code below text
-                    new_img.paste(qr_img, (0, text_height + padding))
-                else:
-                    # Text below QR code (default)
-                    new_height = qr_height + text_height + padding
-                    new_img = Image.new("RGB", (qr_width, new_height), "white")
-                    
-                    # Paste QR code at the top
-                    new_img.paste(qr_img, (0, 0))
-                    
-                    # Draw text below QR code
-                    draw = ImageDraw.Draw(new_img)
-                    
-                    # Calculate text position based on alignment
-                    if text_alignment == "center":
-                        x = (qr_width - text_width) // 2
-                    elif text_alignment == "right":
-                        x = qr_width - text_width - 10
-                    else:  # left alignment
-                        x = 10
-                    
-                    y = qr_height + padding // 2
-                    draw.text((x, y), text, font=font, fill="black")
-                
-                qr_img = new_img
-            
-            # Save QR code image
+            # 1. Render the bare QR code (encoding + optional resize).
+            qr_img = self._generate_qr_image(data, settings)
+
+            # 2. Compose with text according to the requested layout
+            #    (side-by-side, or text above/below). No-op if no text.
+            qr_img = self._compose_qr_with_text(qr_img, data, settings)
+
+            # 3. Persist the result.
             image_path = os.path.join(self.upload_folder, f"qrcode_{uuid.uuid4().hex[:8]}.png")
             qr_img.save(image_path)
-            
+
             return image_path
         except Exception as e:
             logger.error("Error creating QR code", error=str(e), exc_info=True)
             raise ImageProcessingError(f"Error creating QR code: {str(e)}")
+
+    def _generate_qr_image(self, data: str, settings: Dict[str, Any]) -> Image.Image:
+        """
+        Encode ``data`` into a QR code image and resize it to the configured
+        overall size (maintaining aspect ratio).
+
+        Returns:
+            The rendered QR code as an RGB ``PIL.Image``.
+        """
+        # Extract QR code settings
+        qr_version = settings.get("qr_version", 1)  # QR code version (1-40)
+        qr_box_size = settings.get("qr_box_size", 10)  # Size of each box in pixels
+        qr_border = settings.get("qr_border", 4)  # Border size in boxes
+        error_correction = settings.get("error_correction", "M")  # L, M, Q, H
+
+        # Map error correction string to qrcode constants
+        error_correction_map = {
+            "L": qrcode.constants.ERROR_CORRECT_L,  # 7% error correction
+            "M": qrcode.constants.ERROR_CORRECT_M,  # 15% error correction
+            "Q": qrcode.constants.ERROR_CORRECT_Q,  # 25% error correction
+            "H": qrcode.constants.ERROR_CORRECT_H,  # 30% error correction
+        }
+        ec_level = error_correction_map.get(error_correction, qrcode.constants.ERROR_CORRECT_M)
+
+        # Create QR code
+        qr = qrcode.QRCode(
+            version=qr_version,
+            error_correction=ec_level,
+            box_size=qr_box_size,
+            border=qr_border,
+        )
+        qr.add_data(data)
+        qr.make(fit=True)
+
+        # Create image
+        qr_img = qr.make_image(fill_color="black", back_color="white")
+        qr_img = qr_img.convert("RGB")
+
+        # Resize QR code to desired size if specified
+        qr_size = settings.get("qr_size", 400)  # Default to 400px for better visibility
+        if qr_size:
+            # Get current size
+            current_width, current_height = qr_img.size
+
+            # Calculate new size while maintaining aspect ratio
+            if current_width != qr_size:
+                ratio = qr_size / current_width
+                new_size = (qr_size, int(current_height * ratio))
+                qr_img = qr_img.resize(new_size, Image.Resampling.LANCZOS)
+                logger.debug("Resized QR code",
+                           original_size=(current_width, current_height),
+                           new_size=new_size)
+
+        return qr_img
+
+    def _compose_qr_with_text(self, qr_img: Image.Image, data: str, settings: Dict[str, Any]) -> Image.Image:
+        """
+        Combine the rendered QR code with any configured text.
+
+        Dispatches to the side-by-side layout when requested (and side text is
+        present), otherwise to the text-above/below layout when text display is
+        enabled. If neither applies the QR image is returned unchanged.
+        """
+        show_text = settings.get("show_text", False)
+        text = settings.get("text", data)  # Use data as default text if not provided
+
+        # Layout settings
+        side_by_side = settings.get("side_by_side", False)  # Whether to show text and QR code side by side
+        side_text = settings.get("side_text", "")  # Text to show on the side
+
+        # Check if we should use side-by-side layout
+        if side_by_side and side_text:
+            return self._layout_side_by_side(qr_img, side_text, settings)
+        # If text should be shown with the QR code (only if not using side-by-side)
+        elif show_text and text:
+            return self._layout_text_above_below(qr_img, text, settings)
+
+        return qr_img
+
+    def _layout_side_by_side(self, qr_img: Image.Image, side_text: str, settings: Dict[str, Any]) -> Image.Image:
+        """
+        Place the QR code and multi-line text side by side (text 2/3, QR 1/3).
+
+        ``qr_position`` selects whether the QR sits on the left or the right;
+        ``text_alignment`` controls horizontal alignment of the text block.
+        """
+        text_alignment = settings.get("text_alignment", "center")  # Text alignment: "left", "center", or "right"
+        qr_position = settings.get("qr_position", "right")  # Position of QR code: "left" or "right"
+
+        # Get QR code dimensions
+        qr_width, qr_height = qr_img.size
+
+        # Use text_font_size if provided, otherwise fall back to font_size or default
+        text_font_size = settings.get("text_font_size", settings.get("font_size", 30))
+        font = ImageFont.truetype(self.font_path, text_font_size)
+
+        # Parse side_text into lines
+        side_text_lines = side_text.split('\n')
+
+        # Calculate text dimensions for each line
+        text_metrics = []
+        max_text_width = 0
+        total_text_height = 0
+        line_spacing = 10
+
+        dummy_draw = ImageDraw.Draw(qr_img)
+        for line in side_text_lines:
+            bbox = dummy_draw.textbbox((0, 0), line, font=font)
+            line_width = bbox[2] - bbox[0]
+            line_height = bbox[3] - bbox[1]
+            max_text_width = max(max_text_width, line_width)
+            text_metrics.append((line, line_width, line_height))
+            total_text_height += line_height + line_spacing
+
+        # Remove extra line spacing from the last line
+        total_text_height -= line_spacing
+
+        # Calculate dimensions for the combined image
+        # Text takes 2/3, QR code takes 1/3
+        padding = 20
+        total_width = max(qr_width + max_text_width + padding * 3, 696)  # Ensure minimum width
+        text_area_width = int(total_width * 2/3) - padding * 2
+        qr_area_width = total_width - text_area_width - padding * 3
+
+        # Resize QR code to fit in the 1/3 area while keeping it square
+        # Use the width as the limiting factor for both dimensions
+        qr_img = qr_img.resize((qr_area_width, qr_area_width), Image.Resampling.LANCZOS)
+        qr_width, qr_height = qr_img.size
+
+        # Create a new image with the combined layout
+        total_height = max(qr_height, total_text_height) + padding * 2
+        new_img = Image.new("RGB", (total_width, total_height), "white")
+
+        # Determine positions based on qr_position
+        if qr_position == "left":
+            # QR code on the left, text on the right
+            qr_x = padding
+            text_area_x = qr_area_width + padding * 2
+        else:
+            # QR code on the right, text on the left (default)
+            qr_x = text_area_width + padding * 2
+            text_area_x = padding
+
+        # Paste QR code
+        qr_y = (total_height - qr_height) // 2  # Center vertically
+        new_img.paste(qr_img, (qr_x, qr_y))
+
+        # Draw text with specified alignment
+        draw = ImageDraw.Draw(new_img)
+        text_y = (total_height - total_text_height) // 2  # Center vertically
+
+        for line, line_width, line_height in text_metrics:
+            # Calculate text position based on alignment
+            if text_alignment == "center":
+                text_x = text_area_x + (text_area_width - line_width) // 2
+            elif text_alignment == "right":
+                text_x = text_area_x + text_area_width - line_width
+            else:  # left alignment (default)
+                text_x = text_area_x
+
+            draw.text((text_x, text_y), line, font=font, fill="black")
+            text_y += line_height + line_spacing
+
+        return new_img
+
+    def _layout_text_above_below(self, qr_img: Image.Image, text: str, settings: Dict[str, Any]) -> Image.Image:
+        """
+        Stack a single line of text above or below the QR code.
+
+        ``text_position`` ("top"/"bottom") selects placement; ``text_alignment``
+        controls horizontal alignment.
+        """
+        text_position = settings.get("text_position", "bottom")  # Position of text: "top", "bottom", or "none"
+        text_alignment = settings.get("text_alignment", "center")  # Text alignment: "left", "center", or "right"
+
+        # Get QR code dimensions
+        qr_width, qr_height = qr_img.size
+
+        # Create a new image with space for text
+        # Use text_font_size if provided, otherwise fall back to font_size or default
+        text_font_size = settings.get("text_font_size", settings.get("font_size", 30))
+        font = ImageFont.truetype(self.font_path, text_font_size)
+
+        # Calculate text dimensions
+        dummy_draw = ImageDraw.Draw(qr_img)
+        bbox = dummy_draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+
+        # Create a new image with space for text
+        padding = 20  # Padding between QR code and text
+
+        # Determine layout based on text position
+        if text_position == "top":
+            # Text above QR code
+            new_height = qr_height + text_height + padding
+            new_img = Image.new("RGB", (qr_width, new_height), "white")
+
+            # Draw text at the top
+            draw = ImageDraw.Draw(new_img)
+
+            # Calculate text position based on alignment
+            if text_alignment == "center":
+                x = (qr_width - text_width) // 2
+            elif text_alignment == "right":
+                x = qr_width - text_width - 10
+            else:  # left alignment
+                x = 10
+
+            y = padding // 2
+            draw.text((x, y), text, font=font, fill="black")
+
+            # Paste QR code below text
+            new_img.paste(qr_img, (0, text_height + padding))
+        else:
+            # Text below QR code (default)
+            new_height = qr_height + text_height + padding
+            new_img = Image.new("RGB", (qr_width, new_height), "white")
+
+            # Paste QR code at the top
+            new_img.paste(qr_img, (0, 0))
+
+            # Draw text below QR code
+            draw = ImageDraw.Draw(new_img)
+
+            # Calculate text position based on alignment
+            if text_alignment == "center":
+                x = (qr_width - text_width) // 2
+            elif text_alignment == "right":
+                x = qr_width - text_width - 10
+            else:  # left alignment
+                x = 10
+
+            y = qr_height + padding // 2
+            draw.text((x, y), text, font=font, fill="black")
+
+        return new_img
     
     def get_keep_alive_status(self) -> Dict[str, Any]:
         """
@@ -851,6 +1026,125 @@ class PrinterService:
                 "error": str(e)
             }
     
+    def _get_ipp_port(self) -> int:
+        """IPP port used for status/keep-alive. Defaults to the IANA-standard
+        631 (the same on virtually all Brother network printers) but can be
+        overridden via the ``ipp_port`` setting for non-standard setups."""
+        try:
+            return int(settings_service.get_settings().get("ipp_port", 631) or 631)
+        except (TypeError, ValueError):
+            return 631
+
+    def _build_clock_info(self, printer_time: Optional[datetime]) -> Dict[str, Any]:
+        """Compare the printer's reported clock against the server clock (UTC)."""
+        now = datetime.now(timezone.utc)
+        info: Dict[str, Any] = {
+            "server_time": now.isoformat(timespec="seconds"),
+            "printer_time": None,
+            "drift_seconds": None,
+            "in_sync": None,
+            "note": None,
+        }
+        if printer_time is None:
+            info["note"] = "Printer did not report a clock"
+            return info
+        info["printer_time"] = printer_time.isoformat(timespec="seconds")
+        drift = (printer_time.astimezone(timezone.utc) - now).total_seconds()
+        info["drift_seconds"] = round(drift, 1)
+        info["in_sync"] = abs(drift) <= 120  # within 2 minutes (UTC compare)
+        if not info["in_sync"]:
+            info["note"] = (
+                "Printer clock differs from server time (UTC). It cannot be set "
+                "remotely; adjust it on the device LCD / Brother Printer Setting "
+                "Tool, check the CR2032 backup battery, and verify the timezone "
+                "in the printer web UI."
+            )
+        return info
+
+    def get_printer_clock(self, printer_uri: Optional[str] = None) -> Dict[str, Any]:
+        """Read the printer's real-time clock via IPP and compare to the server.
+
+        Read-only: the Brother QL clock cannot be set programmatically (no IPP
+        Set-Printer-Attributes and no documented protocol command), so this only
+        surfaces a drift warning.
+        """
+        if printer_uri is None:
+            printer_uri = settings_service.get_settings().get("printer_uri", "")
+        if not printer_uri or guess_backend(printer_uri) != "network":
+            return {"available": False, "note": "Clock readout requires a network (tcp://) printer"}
+        ip_address = self._extract_ip_from_uri(printer_uri)
+        ipp = get_printer_attributes(ip_address, port=self._get_ipp_port())
+        if not ipp.get("reachable"):
+            return {"available": False, "note": "Printer not reachable via IPP", "error": ipp.get("error")}
+        clock = self._build_clock_info(ipp.get("current_time"))
+        clock["available"] = ipp.get("current_time") is not None
+        return clock
+
+    def _ipp_ping(self, ip_address: str) -> bool:
+        """Keep-alive/reachability probe via IPP Get-Printer-Attributes (TCP 631).
+
+        Unlike a bare TCP connect this is a real request/response round-trip and
+        is the only working status channel on Brother QL models with SNMP off.
+        """
+        try:
+            return bool(get_printer_attributes(ip_address, port=self._get_ipp_port()).get("reachable"))
+        except Exception as e:
+            logger.debug("IPP ping failed", ip_address=ip_address, error=str(e))
+            return False
+
+    def _write_keepalive(self, ip_address: str, port: int = 9100, timeout: float = 3.0) -> bool:
+        """Active keep-alive heartbeat: send a harmless ``ESC @`` (initialize) to
+        the raster/print port (TCP 9100).
+
+        Rationale: a status *read* (IPP/SNMP/TCP-connect) does NOT reset a Brother
+        QL's auto-power-off / sleep timer — per Brother's docs only *received
+        print data* does. ``ESC @`` (0x1B 0x40) is the printer-reset command; it
+        prints nothing and feeds nothing, but it is real data on the print
+        channel, so it is the best app-side attempt to keep the device awake.
+
+        Serialized via ``self._io_lock`` so it never interleaves with a real
+        print. If a print is already in progress the lock is held — that print is
+        itself activity, so we skip this heartbeat and report success.
+        """
+        host = ip_address.split(":")[0] if ":" in ip_address else ip_address
+        if not self._io_lock.acquire(blocking=False):
+            # A print job holds the port right now -> that already keeps the
+            # printer awake; treat this cycle as a successful heartbeat.
+            logger.debug("Keep alive skipped: print in progress", ip_address=host)
+            return True
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            try:
+                if sock.connect_ex((host, port)) != 0:
+                    return False
+                sock.sendall(b"\x1b\x40")  # ESC @ = initialize (no print, no feed)
+                return True
+            finally:
+                sock.close()
+        except Exception as e:
+            logger.debug("Keep alive write failed", ip_address=host, error=str(e))
+            return False
+        finally:
+            self._io_lock.release()
+
+    def _tcp_reachable(self, ip_address: str, port: int = 9100, timeout: float = 1.5) -> bool:
+        """Single quick TCP connect probe (reachability only).
+
+        Used as the status-check fallback after IPP. Unlike ``_tcp_ping`` it does
+        not sweep several ports, so an offline printer fails in ~1.5s instead of
+        summing multiple timeouts.
+        """
+        host = ip_address.split(":")[0] if ":" in ip_address else ip_address
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+
     def _extract_ip_from_uri(self, printer_uri: str) -> str:
         """
         Extract IP address from printer URI.
@@ -1036,6 +1330,7 @@ class PrinterService:
         # Track consecutive failures to implement exponential backoff
         consecutive_failures = 0
         max_backoff = 300  # Maximum backoff in seconds (5 minutes)
+        last_ok: Optional[bool] = None  # for state-change (INFO/WARN) logging
         
         while not stop_event.is_set():
             try:
@@ -1051,39 +1346,41 @@ class PrinterService:
                         break
                 
                 logger.debug("Sending keep alive ping", ip_address=ip_address)
-                
-                # Try SNMP ping first (for all addresses including host.docker.internal)
-                if self._snmp_ping(ip_address):
-                    logger.debug("SNMP keep alive ping successful", ip_address=ip_address)
-                    consecutive_failures = 0
-                # Fall back to TCP ping if SNMP fails
+
+                # PRIMARY: write a harmless ESC @ to port 9100. A status *read*
+                # (IPP/SNMP/TCP-connect) does not reset the printer's
+                # auto-power-off timer — only *received print data* does — so the
+                # write is the only app-side attempt that can actually keep the
+                # device awake. Fall back to IPP/TCP purely for reachability
+                # reporting if the write channel is unavailable.
+                method = None
+                if self._write_keepalive(ip_address):
+                    method = "raw9100"
+                elif self._ipp_ping(ip_address):
+                    method = "ipp"
                 elif self._tcp_ping(ip_address):
-                    logger.debug("TCP keep alive ping successful", ip_address=ip_address)
+                    method = "tcp"
+
+                if method is not None:
                     consecutive_failures = 0
-                # If both fail, try the original method with the full printer_uri
+                    if last_ok is not True:
+                        logger.info("Keep alive: printer reachable",
+                                    printer_uri=printer_uri, ip_address=ip_address, method=method)
+                    else:
+                        logger.debug("Keep alive ping successful",
+                                     printer_uri=printer_uri, ip_address=ip_address, method=method)
+                    last_ok = True
                 else:
-                    logger.debug("Falling back to original keep alive method", printer_uri=printer_uri)
-                    try:
-                        # Create a connection to the printer using the original URI
-                        # This is important for Docker environments where host.docker.internal
-                        # might be used to access the host network
-                        backend = backend_factory(guess_backend(printer_uri))["backend_class"](printer_uri)
-                        
-                        # Just establishing and closing a connection might be enough
-                        logger.debug("Connection established as keep-alive ping", printer_uri=printer_uri)
-                        
-                        # Close the connection
-                        backend.dispose()
-                        consecutive_failures = 0
-                    except Exception as backend_error:
-                        logger.warning("Original keep alive method failed", 
-                                   printer_uri=printer_uri,
-                                   error=str(backend_error))
-                        # Don't raise the error, just increment the failure counter
-                        consecutive_failures += 1
-                        continue
-                
-                logger.debug("Keep alive ping successful", printer_uri=printer_uri)
+                    consecutive_failures += 1
+                    if last_ok is not False:
+                        logger.warning("Keep alive: printer not reachable",
+                                       printer_uri=printer_uri, ip_address=ip_address,
+                                       consecutive_failures=consecutive_failures)
+                    else:
+                        logger.debug("Keep alive ping failed (repeated)",
+                                     printer_uri=printer_uri, ip_address=ip_address,
+                                     consecutive_failures=consecutive_failures)
+                    last_ok = False
             except Exception as e:
                 # Increment consecutive failures for backoff
                 consecutive_failures += 1

@@ -7,7 +7,7 @@ from typing import Dict, Any, List
 
 from src.services.printer_service import printer_service
 from src.services.settings_service import settings_service
-from src.utils.exceptions import ValidationError, PrinterError, ResourceNotFoundError
+from src.utils.exceptions import ValidationError, PrinterError
 
 logger = structlog.get_logger()
 
@@ -48,26 +48,19 @@ def check_printer_status(body: Dict[str, Any]) -> Dict[str, Any]:
         if not printer_model:
             raise ValidationError("printer_model is required", "printer_model")
         
-        # Check printer status
+        # Check printer status. An offline/unreachable printer is a normal,
+        # queryable state (available=false), not an error, so we return the
+        # status with HTTP 200 and let the client render it.
         status = printer_service.check_printer_status(printer_uri, printer_model)
-        
-        # If printer is not available, return 404
-        if not status.get("available", False):
-            error_message = status.get("status", "Printer not found")
-            raise ResourceNotFoundError(
-                error_message,
-                resource_type="printer",
-                resource_id=printer_uri,
-                details=status.get("details", {})
-            )
-        
         return status
     except ValidationError as e:
         logger.error("Validation error", error=str(e), exc_info=True)
         raise
-    except ResourceNotFoundError as e:
-        logger.error("Printer not found", error=str(e), exc_info=True)
-        raise
+    except ValueError as e:
+        # Pure input/validation errors from the service layer must map to
+        # HTTP 400, not 500.
+        logger.warning("Validation error", error=str(e), exc_info=True)
+        raise ValidationError(str(e), "printer")
     except Exception as e:
         logger.error("Error checking printer status", error=str(e), exc_info=True)
         raise PrinterError(f"Error checking printer status: {str(e)}")
@@ -146,6 +139,11 @@ def update_keep_alive(body: Dict[str, Any]) -> Dict[str, Any]:
     except ValidationError as e:
         logger.error("Validation error", error=str(e), exc_info=True)
         raise
+    except ValueError as e:
+        # Pure input/validation errors from the service layer must map to
+        # HTTP 400, not 500.
+        logger.warning("Validation error", error=str(e), exc_info=True)
+        raise ValidationError(str(e), "keep_alive")
     except Exception as e:
         logger.error("Error updating keep alive", error=str(e), exc_info=True)
         raise PrinterError(f"Error updating keep alive: {str(e)}")
