@@ -142,13 +142,78 @@ Open your browser and navigate to [http://localhost:5000](http://localhost:5000)
 
 ## Configuration
 
-The application settings can be configured in the `data/settings.json` file. This file contains various options for printer settings, including:
+The application settings can be configured in the `data/settings.json` file. This file contains the default printer settings as well as the global options described below.
+
+### Settings Fields
 
 - `printer_uri`: The URI of the printer to use (e.g., `tcp://192.168.1.100` when over network, or `file:///dev/usb/lp0` when using USB)
 - `printer_model`: The model of the printer (e.g., `QL-800`)
 - `label_size`: The size of the label to print (e.g., `62`)
+- `font_size`: The default font size used for text printing (e.g., `50`)
+- `alignment`: The default text alignment (`left`, `center`, or `right`)
+- `rotate`: The rotation applied to the rendered label in degrees (`0`, `90`, `180`, or `270`)
+- `threshold`: The black/white threshold used when converting the image (e.g., `70.0`)
+- `dither`: Whether to apply dithering when converting the image (`true`/`false`)
+- `compress`: Whether to enable printer-side compression (`true`/`false`)
+- `red`: Whether to use the red channel for two-color labels such as 62-red (`true`/`false`)
 - `keep_alive_enabled`: Whether to keep the printer connection alive (only needed for network printers)
-- `keep_alive_interval`: The interval for keep-alive messages (in seconds)
+- `keep_alive_interval`: The interval for keep-alive messages (in seconds, minimum `10`)
+- `ipp_port`: The IPP port used to query printer status (default `631`)
+
+### Multiple Printers
+
+To control more than one printer, define a `printers` array. Each entry describes a printer that can be selected via the API; the top-level fields above act as the default printer.
+
+```json
+{
+    "printer_uri": "tcp://192.168.1.100",
+    "printer_model": "QL-820NWB",
+    "label_size": "62",
+    "font_size": 50,
+    "alignment": "left",
+    "rotate": 0,
+    "threshold": 70.0,
+    "dither": false,
+    "compress": false,
+    "red": false,
+    "keep_alive_enabled": true,
+    "keep_alive_interval": 30,
+    "ipp_port": 631,
+    "printers": [
+        {
+            "id": "default",
+            "name": "QL-820NWB (Office)",
+            "printer_uri": "tcp://192.168.1.100",
+            "printer_model": "QL-820NWB",
+            "label_size": "62"
+        },
+        {
+            "id": "label-station",
+            "name": "QL-800 (Warehouse)",
+            "printer_uri": "tcp://192.168.1.101",
+            "printer_model": "QL-800",
+            "label_size": "29"
+        }
+    ]
+}
+```
+
+Each printer entry supports:
+
+- `id`: A unique identifier used to reference the printer
+- `name`: A human-readable label shown in the UI
+- `printer_uri`: The URI of this printer (network or USB)
+- `printer_model`: The model of this printer
+- `label_size`: The default label size for this printer
+
+### Environment Variables
+
+The following environment variables can be set (e.g. in `docker-compose.yml` or via `docker run -e`):
+
+- `API_KEY`: Opt-in API authentication. When set, every request to `/api/v1/*` must include the header `X-API-Key: <your-key>`. The bundled UI, static assets, Swagger UI and the health probes remain unauthenticated. When unset, the API is open.
+- `CORS_ORIGINS`: Comma-separated list of allowed cross-origin origins (e.g. `https://home.example.com,https://hass.example.com`). When unset, only same-origin requests are allowed.
+- `SECRET_KEY`: The Flask secret key. Set a stable value in production; if unset, an ephemeral random key is generated on each start.
+- `ENABLE_SWAGGER_UI`: Set to `true` or `false` to force the Swagger UI on or off. When unset, the UI defaults to on unless `FLASK_ENV=production`.
 
 ## 📔 API Documentation
 
@@ -165,6 +230,8 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 - **POST /api/v1/qrcode/print**: Print QR code on a label
 - **POST /api/v1/label/text-qrcode**: Print combined text and QR code on a label
 - **POST /api/v1/printers/keep-alive**: Control the printer keep alive feature
+- **GET /health**: Liveness probe reporting that the web application process is up
+- **GET /health/printer**: Readiness probe reporting whether the configured printer is reachable
 
 ## 📤 Example API Usage
 
@@ -366,6 +433,12 @@ if response.status_code == 200:
 else:
     print("Error:", response.status_code, response.json())
 ```
+
+## 🔄 Keep Alive
+
+Network Brother QL printers tend to power themselves off automatically after a period of inactivity. The keep-alive feature periodically writes to the printer's raw port (`9100`) at the configured `keep_alive_interval` to keep the connection warm and reduce the chance of an unexpected power-off.
+
+> **Note:** Keep-alive is a best-effort mitigation. The only guaranteed way to prevent the printer from shutting down is to disable the device's own power-saving setting (set **Auto Power Off = Off** in the printer's menu).
 
 ## 📝 License
 
