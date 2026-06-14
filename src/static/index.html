@@ -2,231 +2,250 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, viewport-fit=cover">
+    <!-- Standalone "app" feel when added to the home screen (no service worker / PWA needed) -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Brother QL">
+    <meta name="theme-color" content="#F4F6F9" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#0B0E14" media="(prefers-color-scheme: dark)">
     <title>Brother QL Label Printer</title>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
-    <!-- Top Navigation Bar -->
-    <nav class="navbar navbar-expand-lg sticky-top">
-        <div class="container-fluid">
-            <a class="navbar-brand" href="#">
-                <i class="bi bi-printer-fill"></i> Brother QL Web App
-            </a>
-            
-            <div class="navbar-nav ms-auto d-flex flex-row align-items-center">
-                <!-- Printer Status -->
+    <div class="shell">
 
-                
-                <div class="nav-item me-3">
-                    <button id="navbar-check-status" class="btn status-btn" title="Printer Status">
-                        <i class="bi bi-printer-fill me-1"></i>
-                        <span id="status-indicator">Status</span>
+        <!-- ============ NAV RAIL / SIDEBAR ============ -->
+        <aside class="rail" id="rail">
+            <div class="rail-inner">
+                <div class="brand">
+                    <span class="glyph"><i class="bi bi-printer-fill"></i></span>
+                    <span class="brand-text">
+                        <span class="name">Brother&nbsp;QL</span>
+                        <span class="sub">Web App</span>
+                    </span>
+                </div>
+
+                <div class="nav-label">Compose</div>
+                <nav class="nav-list" role="tablist">
+                    <button class="nav-item active" id="text-tab" data-bs-toggle="tab" data-bs-target="#text-panel" type="button" role="tab" aria-controls="text-panel" aria-selected="true">
+                        <i class="bi bi-type"></i><span>Text</span>
                     </button>
-                </div>
-                
-                <div class="nav-item me-3">
-                    <a href="https://github.com/Dodoooh/brother_ql_app" class="btn api-btn" title="GitHub" target="_blank" rel="noopener noreferrer">
-                        <i class="bi bi-github"></i> Github
-                    </a>
-                </div>
-                
-                <!-- API Link -->
-                <div class="nav-item me-3">
-                    <a href="/api/v1/ui/" class="btn api-btn" title="API Documentation" target="_blank" rel="noopener noreferrer">
-                        <i class="bi bi-code-slash"></i> API Docs
-                      </a>
-                </div>
-                
-                <!-- Theme Toggle -->
-                <div class="nav-item">
-                    <button id="theme-toggle" class="btn theme-btn" aria-label="Toggle dark mode">
+                    <button class="nav-item" id="image-tab" data-bs-toggle="tab" data-bs-target="#image-panel" type="button" role="tab" aria-controls="image-panel" aria-selected="false">
+                        <i class="bi bi-image"></i><span>Image</span>
+                    </button>
+                    <button class="nav-item" id="qrcode-tab" data-bs-toggle="tab" data-bs-target="#qrcode-panel" type="button" role="tab" aria-controls="qrcode-panel" aria-selected="false">
+                        <i class="bi bi-qr-code"></i><span>QR&nbsp;Code</span>
+                    </button>
+                    <button class="nav-item" id="label-tab" data-bs-toggle="tab" data-bs-target="#label-panel" type="button" role="tab" aria-controls="label-panel" aria-selected="false">
+                        <i class="bi bi-layout-text-sidebar"></i><span>Text&nbsp;+&nbsp;QR</span>
+                    </button>
+                    <button class="nav-item" id="pdf-tab" data-bs-toggle="tab" data-bs-target="#pdf-panel" type="button" role="tab" aria-controls="pdf-panel" aria-selected="false">
+                        <i class="bi bi-file-earmark-pdf"></i><span>PDF</span>
+                    </button>
+                </nav>
+
+                <div class="nav-label">System</div>
+                <nav class="nav-list" role="tablist">
+                    <button class="nav-item" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings-panel" type="button" role="tab" aria-controls="settings-panel" aria-selected="false">
+                        <i class="bi bi-gear-fill"></i><span>Settings</span>
+                    </button>
+                </nav>
+
+                <div class="rail-foot">
+                    <button id="theme-toggle" class="rail-action" aria-label="Toggle dark mode" title="Toggle theme">
                         <i class="bi bi-moon-fill"></i>
                     </button>
+                    <a href="/api/v1/ui/" class="rail-action" title="API Documentation" target="_blank" rel="noopener noreferrer">
+                        <i class="bi bi-code-slash"></i>
+                    </a>
+                    <a href="https://github.com/Dodoooh/brother_ql_app" class="rail-action" title="GitHub" target="_blank" rel="noopener noreferrer">
+                        <i class="bi bi-github"></i>
+                    </a>
                 </div>
             </div>
-        </div>
-    </nav>
+        </aside>
 
-    <div class="app-container">
-        <div class="container mt-4">
-            <!-- Main Content Area -->
-            <div class="row">
-                <!-- Left Column: Controls -->
-                <div class="col-lg-5">
-                    <!-- Tabs for different print options -->
-                    <div class="print-options mb-4">
-                        <div class="row g-2 align-items-end mb-3">
-                            <div class="col">
-                                <label for="copies" class="form-label">Copies</label>
-                                <input type="number" id="copies" class="form-control" value="1" min="1" max="100">
-                            </div>
-                            <div class="col">
-                                <label for="cut-mode" class="form-label">Cut</label>
-                                <select id="cut-mode" class="form-select">
-                                    <option value="each">Cut after each label</option>
-                                    <option value="end">Cut only at end</option>
-                                    <option value="none">No cut</option>
-                                </select>
-                            </div>
-                        </div>
+        <!-- scrim for mobile drawer -->
+        <div class="rail-scrim" id="rail-scrim" hidden></div>
 
-                        <ul class="nav nav-tabs" id="printTabs" role="tablist">
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link active" id="text-tab" data-bs-toggle="tab" data-bs-target="#text-panel" type="button" role="tab" aria-controls="text-panel" aria-selected="true">
-                                    <i class="bi bi-type"></i> Text
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="image-tab" data-bs-toggle="tab" data-bs-target="#image-panel" type="button" role="tab" aria-controls="image-panel" aria-selected="false">
-                                    <i class="bi bi-image"></i> Image
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="qrcode-tab" data-bs-toggle="tab" data-bs-target="#qrcode-panel" type="button" role="tab" aria-controls="qrcode-panel" aria-selected="false">
-                                    <i class="bi bi-qr-code"></i> QR Code
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="label-tab" data-bs-toggle="tab" data-bs-target="#label-panel" type="button" role="tab" aria-controls="label-panel" aria-selected="false">
-                                    <i class="bi bi-layout-text-sidebar"></i> Text+QR
-                                </button>
-                            </li>
-                            <li class="nav-item" role="presentation">
-                                <button class="nav-link" id="pdf-tab" data-bs-toggle="tab" data-bs-target="#pdf-panel" type="button" role="tab" aria-controls="pdf-panel" aria-selected="false">
-                                    <i class="bi bi-file-earmark-pdf"></i> PDF
-                                </button>
-                            </li>
-                        </ul>
-                        
-                        <div class="tab-content p-3 border border-top-0 rounded-bottom" id="printTabsContent">
-                            <!-- Text Panel -->
-                            <div class="tab-pane fade show active" id="text-panel" role="tabpanel" aria-labelledby="text-tab">
+        <!-- ============ TOP BAR ============ -->
+        <header class="topbar">
+            <div class="topbar-left">
+                <button class="hamburger" id="rail-toggle" aria-label="Open navigation" aria-expanded="false">
+                    <i class="bi bi-list"></i>
+                </button>
+                <div class="title">
+                    <h1>Brother QL</h1>
+                    <p>Label Printer</p>
+                </div>
+            </div>
+            <div class="status-cluster">
+                <button id="navbar-check-status" class="pill" title="Printer Status">
+                    <span class="dot"></span>
+                    <span id="status-indicator">Status</span>
+                </button>
+            </div>
+        </header>
+
+        <!-- ============ MAIN ============ -->
+        <main class="main">
+            <div class="tab-content" id="composeContent">
+
+                <!-- ================= TEXT ================= -->
+                <div class="tab-pane fade show active" id="text-panel" role="tabpanel" aria-labelledby="text-tab">
+                    <div class="work-grid">
+                        <section class="panel compose-panel">
+                            <div class="panel-head">
+                                <h2>Text Label</h2>
+                                <span class="tag">mode: text</span>
+                            </div>
+                            <div class="panel-body">
                                 <form id="text-form">
-                                    <div class="mb-3">
-                                        <label for="text-input" class="form-label">Text Content</label>
-                                        <textarea id="text-input" class="form-control" rows="4" placeholder="Enter text to print..."></textarea>
-                                        <div class="form-text">Use **bold** or *italic* for formatting</div>
+                                    <div class="field">
+                                        <label class="lbl" for="text-input">Text Content</label>
+                                        <textarea id="text-input" rows="4" placeholder="Enter text to print..." spellcheck="false"></textarea>
+                                        <div class="hint">Use **bold** or *italic* for formatting</div>
                                     </div>
-                                    
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="text-font-size" class="form-label">Font Size</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-fonts"></i></span>
-                                                <input type="number" id="text-font-size" class="form-control" value="50" min="10" max="100">
-                                            </div>
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="text-font-size">Font Size</label>
+                                            <input type="number" id="text-font-size" class="mono" value="50" min="10" max="100">
                                         </div>
-                                        <div class="col-md-6">
-                                            <label for="text-alignment" class="form-label">Alignment</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-text-left"></i></span>
-                                                <select id="text-alignment" class="form-select">
-                                                    <option value="left">Left</option>
-                                                    <option value="center">Center</option>
-                                                    <option value="right">Right</option>
+                                        <div class="field">
+                                            <label class="lbl" for="text-alignment">Alignment</label>
+                                            <select id="text-alignment">
+                                                <option value="left">Left</option>
+                                                <option value="center">Center</option>
+                                                <option value="right">Right</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="print-options">
+                                        <div class="grid-2">
+                                            <div class="field">
+                                                <label class="lbl" for="copies">Copies <span class="hint">1–100</span></label>
+                                                <input type="number" id="copies" class="mono" value="1" min="1" max="100">
+                                            </div>
+                                            <div class="field">
+                                                <label class="lbl" for="cut-mode">Cut</label>
+                                                <select id="cut-mode">
+                                                    <option value="each">Cut after each label</option>
+                                                    <option value="end">Cut only at end</option>
+                                                    <option value="none">No cut</option>
                                                 </select>
                                             </div>
                                         </div>
                                     </div>
-                                    
-                                    <button type="submit" class="btn btn-primary w-100">
-                                        <i class="bi bi-printer-fill me-2"></i>Print Text
+                                    <button type="submit" class="btn-print">
+                                        <i class="bi bi-printer-fill"></i> Print Text
                                     </button>
                                 </form>
                             </div>
-                            
-                            <!-- Image Panel -->
-                            <div class="tab-pane fade" id="image-panel" role="tabpanel" aria-labelledby="image-tab">
+                        </section>
+                        <div class="preview-mount"></div>
+                    </div>
+                </div>
+
+                <!-- ================= IMAGE ================= -->
+                <div class="tab-pane fade" id="image-panel" role="tabpanel" aria-labelledby="image-tab">
+                    <div class="work-grid">
+                        <section class="panel compose-panel">
+                            <div class="panel-head">
+                                <h2>Image Label</h2>
+                                <span class="tag">mode: image</span>
+                            </div>
+                            <div class="panel-body">
                                 <form id="image-form">
-                                    <div class="mb-3">
-                                        <label for="image-input" class="form-label">Select Image</label>
-                                        <div class="input-group">
-                                            <span class="input-group-text"><i class="bi bi-file-image"></i></span>
-                                            <input type="file" id="image-input" class="form-control" accept="image/*">
-                                        </div>
-                                        <div class="form-text">Supported formats: JPG, PNG, GIF, BMP</div>
+                                    <div class="field">
+                                        <label class="lbl" for="image-input">Select Image</label>
+                                        <input type="file" id="image-input" accept="image/*">
+                                        <div class="hint">Supported: JPG, PNG, GIF, BMP</div>
                                     </div>
-                                    
-                                    <div class="mb-3">
-                                        <label for="image-mode" class="form-label">Image Mode</label>
-                                        <select id="image-mode" class="form-select">
+                                    <div class="field">
+                                        <label class="lbl" for="image-mode">Image Mode</label>
+                                        <select id="image-mode">
                                             <option value="color">Color (Original)</option>
-                                            <option value="bw">Black & White</option>
-                                            <option value="bw-dither">Black & White with Dithering</option>
+                                            <option value="bw">Black &amp; White</option>
+                                            <option value="bw-dither">Black &amp; White with Dithering</option>
                                         </select>
-                                        <div class="form-text">Preview how the image will be printed</div>
+                                        <div class="hint">Preview how the image will be printed</div>
                                     </div>
-                                    
-                                    <button type="submit" class="btn btn-primary w-100">
-                                        <i class="bi bi-printer-fill me-2"></i>Print Image
+                                    <button type="submit" class="btn-print">
+                                        <i class="bi bi-printer-fill"></i> Print Image
                                     </button>
                                 </form>
                             </div>
-                            
-                            <!-- QR Code Panel -->
-                            <div class="tab-pane fade" id="qrcode-panel" role="tabpanel" aria-labelledby="qrcode-tab">
+                        </section>
+                        <div class="preview-mount"></div>
+                    </div>
+                </div>
+
+                <!-- ================= QR CODE ================= -->
+                <div class="tab-pane fade" id="qrcode-panel" role="tabpanel" aria-labelledby="qrcode-tab">
+                    <div class="work-grid">
+                        <section class="panel compose-panel">
+                            <div class="panel-head">
+                                <h2>QR Code Label</h2>
+                                <span class="tag">mode: qr</span>
+                            </div>
+                            <div class="panel-body">
                                 <form id="qrcode-form">
-                                    <div class="mb-3">
-                                        <label for="qr-data" class="form-label">QR Code Data</label>
-                                        <input type="text" id="qr-data" class="form-control" placeholder="Enter URL or text for QR code">
+                                    <div class="field">
+                                        <label class="lbl" for="qr-data">QR Code Data</label>
+                                        <input type="text" id="qr-data" class="mono" placeholder="Enter URL or text for QR code">
                                     </div>
-                                    
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="qr-size" class="form-label">QR Size</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-arrows-angle-expand"></i></span>
-                                                <input type="number" id="qr-size" class="form-control" value="400" min="100" max="600">
-                                            </div>
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="qr-size">QR Size</label>
+                                            <input type="number" id="qr-size" class="mono" value="400" min="100" max="600">
                                         </div>
-                                        <div class="col-md-6">
-                                            <label for="qr-error-correction" class="form-label">Error Correction</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-shield-check"></i></span>
-                                                <select id="qr-error-correction" class="form-select">
-                                                    <option value="L">Low (7%)</option>
-                                                    <option value="M" selected>Medium (15%)</option>
-                                                    <option value="Q">Quartile (25%)</option>
-                                                    <option value="H">High (30%)</option>
-                                                </select>
-                                            </div>
+                                        <div class="field">
+                                            <label class="lbl" for="qr-error-correction">Error Correction</label>
+                                            <select id="qr-error-correction">
+                                                <option value="L">Low (7%)</option>
+                                                <option value="M" selected>Medium (15%)</option>
+                                                <option value="Q">Quartile (25%)</option>
+                                                <option value="H">High (30%)</option>
+                                            </select>
                                         </div>
                                     </div>
-                                    
-                                    <div class="mb-3">
-                                        <div class="form-check form-switch">
+                                    <div class="field toggle-row">
+                                        <div class="meta">
+                                            <div class="t">Show Text with QR Code</div>
+                                            <div class="d">render a caption next to the symbol</div>
+                                        </div>
+                                        <label class="switch">
                                             <input class="form-check-input" type="checkbox" id="qr-show-text" checked>
-                                            <label class="form-check-label" for="qr-show-text">Show Text with QR Code</label>
-                                        </div>
+                                            <span class="track"></span><span class="knob"></span>
+                                        </label>
                                     </div>
-                                    
                                     <div id="qr-text-options">
-                                        <div class="mb-3">
-                                            <label for="qr-text-content" class="form-label">Text</label>
-                                            <input type="text" id="qr-text-content" class="form-control" placeholder="Text to display with QR code">
+                                        <div class="field">
+                                            <label class="lbl" for="qr-text-content">Text</label>
+                                            <input type="text" id="qr-text-content" placeholder="Text to display with QR code">
                                         </div>
-                                        
-                                        <div class="row mb-3">
-                                            <div class="col-md-4">
-                                                <label for="qr-text-position" class="form-label">Position</label>
-                                                <select id="qr-text-position" class="form-select">
+                                        <div class="grid-3">
+                                            <div class="field">
+                                                <label class="lbl" for="qr-text-position">Position</label>
+                                                <select id="qr-text-position">
                                                     <option value="bottom" selected>Bottom</option>
                                                     <option value="top">Top</option>
                                                 </select>
                                             </div>
-                                            <div class="col-md-4">
-                                                <label for="qr-text-font-size" class="form-label">Font Size</label>
-                                                <input type="number" id="qr-text-font-size" class="form-control" value="30" min="10" max="100">
+                                            <div class="field">
+                                                <label class="lbl" for="qr-text-font-size">Font Size</label>
+                                                <input type="number" id="qr-text-font-size" class="mono" value="30" min="10" max="100">
                                             </div>
-                                            <div class="col-md-4">
-                                                <label for="qr-text-alignment" class="form-label">Alignment</label>
-                                                <select id="qr-text-alignment" class="form-select">
+                                            <div class="field">
+                                                <label class="lbl" for="qr-text-alignment">Alignment</label>
+                                                <select id="qr-text-alignment">
                                                     <option value="left">Left</option>
                                                     <option value="center" selected>Center</option>
                                                     <option value="right">Right</option>
@@ -234,163 +253,160 @@
                                             </div>
                                         </div>
                                     </div>
-                                    
-                                    <button type="submit" class="btn btn-primary w-100">
-                                        <i class="bi bi-printer-fill me-2"></i>Print QR Code
+                                    <button type="submit" class="btn-print">
+                                        <i class="bi bi-printer-fill"></i> Print QR Code
                                     </button>
                                 </form>
                             </div>
-                            
-                            <!-- Label (Text + QR) Panel -->
-                            <div class="tab-pane fade" id="label-panel" role="tabpanel" aria-labelledby="label-tab">
+                        </section>
+                        <div class="preview-mount"></div>
+                    </div>
+                </div>
+
+                <!-- ================= TEXT + QR LABEL ================= -->
+                <div class="tab-pane fade" id="label-panel" role="tabpanel" aria-labelledby="label-tab">
+                    <div class="work-grid">
+                        <section class="panel compose-panel">
+                            <div class="panel-head">
+                                <h2>Text + QR Label</h2>
+                                <span class="tag">mode: text+qr</span>
+                            </div>
+                            <div class="panel-body">
                                 <form id="label-form">
-                                    <div class="row mb-3">
-                                        <div class="col-md-8">
-                                            <label for="label-qr-data" class="form-label">QR Code Data</label>
-                                            <input type="text" id="label-qr-data" class="form-control" placeholder="Enter URL or text for QR code">
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="label-qr-data">QR Code Data</label>
+                                            <input type="text" id="label-qr-data" class="mono" placeholder="Enter URL or text for QR code">
                                         </div>
-                                        <div class="col-md-4">
-                                            <label for="label-qr-position" class="form-label">QR Position</label>
-                                            <select id="label-qr-position" class="form-select">
+                                        <div class="field">
+                                            <label class="lbl" for="label-qr-position">QR Position</label>
+                                            <select id="label-qr-position">
                                                 <option value="right" selected>Right</option>
                                                 <option value="left">Left</option>
                                             </select>
                                         </div>
                                     </div>
-                                    
-                                    <div class="mb-3">
-                                        <label for="label-qr-error-correction" class="form-label">Error Correction</label>
-                                        <select id="label-qr-error-correction" class="form-select">
+                                    <div class="field">
+                                        <label class="lbl" for="label-qr-error-correction">Error Correction</label>
+                                        <select id="label-qr-error-correction">
                                             <option value="L">Low (7%)</option>
                                             <option value="M" selected>Medium (15%)</option>
                                             <option value="Q">Quartile (25%)</option>
                                             <option value="H">High (30%)</option>
                                         </select>
                                     </div>
-                                    
-                                    <div class="mb-3">
-                                        <label for="label-text-content" class="form-label">Text Content</label>
-                                        <textarea id="label-text-content" class="form-control" rows="4" placeholder="Enter text to display next to QR code"></textarea>
+                                    <div class="field">
+                                        <label class="lbl" for="label-text-content">Text Content</label>
+                                        <textarea id="label-text-content" rows="4" placeholder="Enter text to display next to QR code"></textarea>
                                     </div>
-                                    
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="label-text-font-size" class="form-label">Font Size</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-fonts"></i></span>
-                                                <input type="number" id="label-text-font-size" class="form-control" value="30" min="10" max="100">
-                                            </div>
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="label-text-font-size">Font Size</label>
+                                            <input type="number" id="label-text-font-size" class="mono" value="30" min="10" max="100">
                                         </div>
-                                        <div class="col-md-6">
-                                            <label for="label-text-alignment" class="form-label">Text Alignment</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-text-left"></i></span>
-                                                <select id="label-text-alignment" class="form-select">
-                                                    <option value="left" selected>Left</option>
-                                                    <option value="center">Center</option>
-                                                    <option value="right">Right</option>
-                                                </select>
-                                            </div>
+                                        <div class="field">
+                                            <label class="lbl" for="label-text-alignment">Text Alignment</label>
+                                            <select id="label-text-alignment">
+                                                <option value="left" selected>Left</option>
+                                                <option value="center">Center</option>
+                                                <option value="right">Right</option>
+                                            </select>
                                         </div>
                                     </div>
-                                    
-                                    <button type="submit" class="btn btn-primary w-100">
-                                        <i class="bi bi-printer-fill me-2"></i>Print Label
+                                    <button type="submit" class="btn-print">
+                                        <i class="bi bi-printer-fill"></i> Print Label
                                     </button>
                                 </form>
                             </div>
-
-                            <!-- PDF Panel -->
-                            <div class="tab-pane fade" id="pdf-panel" role="tabpanel" aria-labelledby="pdf-tab">
-                                <form id="pdf-form">
-                                    <div class="mb-3">
-                                        <label for="pdf-input" class="form-label">Select PDF</label>
-                                        <div class="input-group">
-                                            <span class="input-group-text"><i class="bi bi-file-earmark-pdf"></i></span>
-                                            <input type="file" id="pdf-input" class="form-control" accept="application/pdf,.pdf">
-                                        </div>
-                                        <div class="form-text">Supported format: PDF</div>
-                                    </div>
-
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="pdf-pages" class="form-label">Pages</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-files"></i></span>
-                                                <input type="text" id="pdf-pages" class="form-control" placeholder="e.g. 1-3,5 (leer = alle)">
-                                            </div>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <label for="pdf-scale-mode" class="form-label">Scale Mode</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-aspect-ratio"></i></span>
-                                                <select id="pdf-scale-mode" class="form-select">
-                                                    <option value="fit" selected>Fit (Ränder)</option>
-                                                    <option value="fill">Fill (zuschneiden)</option>
-                                                </select>
-                                            </div>
-                                        </div>
-                                    </div>
-
-                                    <button type="submit" class="btn btn-primary w-100">
-                                        <i class="bi bi-printer-fill me-2"></i>Print PDF
-                                    </button>
-                                </form>
-                            </div>
-                        </div>
+                        </section>
+                        <div class="preview-mount"></div>
                     </div>
-                    
-                    <!-- Settings Card -->
-                    <div class="card settings-card mb-4">
-                        <div class="card-header" data-bs-toggle="collapse" data-bs-target="#settingsBody" aria-expanded="false">
-                            <h5 class="mb-0 d-flex align-items-center">
-                                <i class="bi bi-gear-fill me-2"></i>
-                                Printer Settings
-                                <i class="bi bi-chevron-down ms-auto"></i>
-                            </h5>
-                        </div>
-                        <div class="collapse" id="settingsBody">
-                            <div class="card-body">
-                                <form id="settings-form">
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="printer-uri" class="form-label">Printer URI</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-link-45deg"></i></span>
-                                                <input type="text" id="printer-uri" class="form-control" placeholder="tcp://192.168.1.100">
-                                            </div>
+                </div>
+
+                <!-- ================= PDF ================= -->
+                <div class="tab-pane fade" id="pdf-panel" role="tabpanel" aria-labelledby="pdf-tab">
+                    <div class="work-grid">
+                        <section class="panel compose-panel">
+                            <div class="panel-head">
+                                <h2>PDF Label</h2>
+                                <span class="tag">mode: pdf</span>
+                            </div>
+                            <div class="panel-body">
+                                <form id="pdf-form">
+                                    <div class="field">
+                                        <label class="lbl" for="pdf-input">Select PDF</label>
+                                        <input type="file" id="pdf-input" accept="application/pdf,.pdf">
+                                        <div class="hint">Supported format: PDF</div>
+                                    </div>
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="pdf-pages">Pages</label>
+                                            <input type="text" id="pdf-pages" class="mono" placeholder="e.g. 1-3,5 (leer = alle)">
                                         </div>
-                                        <div class="col-md-6">
-                                            <label for="printer-model" class="form-label">Printer Model</label>
-                                            <div class="input-group">
-                                                <span class="input-group-text"><i class="bi bi-printer"></i></span>
-                                                <select id="printer-model" class="form-select">
-                                                    <option value="QL-500">QL-500</option>
-                                                    <option value="QL-550">QL-550</option>
-                                                    <option value="QL-560">QL-560</option>
-                                                    <option value="QL-570">QL-570</option>
-                                                    <option value="QL-580N">QL-580N</option>
-                                                    <option value="QL-650TD">QL-650TD</option>
-                                                    <option value="QL-700">QL-700</option>
-                                                    <option value="QL-710W">QL-710W</option>
-                                                    <option value="QL-720NW">QL-720NW</option>
-                                                    <option value="QL-800">QL-800</option>
-                                                    <option value="QL-810W">QL-810W</option>
-                                                    <option value="QL-820NWB">QL-820NWB</option>
-                                                    <option value="QL-1050">QL-1050</option>
-                                                    <option value="QL-1060N">QL-1060N</option>
-                                                    <option value="QL-1100">QL-1100</option>
-                                                    <option value="QL-1100NWB">QL-1100NWB</option>
-                                                    <option value="QL-1115NWB">QL-1115NWB</option>
-                                                </select>
-                                            </div>
+                                        <div class="field">
+                                            <label class="lbl" for="pdf-scale-mode">Scale Mode</label>
+                                            <select id="pdf-scale-mode">
+                                                <option value="fit" selected>Fit (Ränder)</option>
+                                                <option value="fill">Fill (zuschneiden)</option>
+                                            </select>
                                         </div>
                                     </div>
-                                    
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="label-size" class="form-label">Label Type</label>
-                                            <select id="label-size" class="form-select">
+                                    <button type="submit" class="btn-print">
+                                        <i class="bi bi-printer-fill"></i> Print PDF
+                                    </button>
+                                </form>
+                            </div>
+                        </section>
+                        <div class="preview-mount"></div>
+                    </div>
+                </div>
+
+                <!-- ================= SETTINGS ================= -->
+                <div class="tab-pane fade" id="settings-panel" role="tabpanel" aria-labelledby="settings-tab">
+                    <div class="settings-wrap">
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h2>Printer Settings</h2>
+                                <span class="tag">config</span>
+                            </div>
+                            <div class="panel-body">
+                                <form id="settings-form">
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="printer-uri">Printer URI</label>
+                                            <input type="text" id="printer-uri" class="mono" placeholder="tcp://192.168.1.100">
+                                        </div>
+                                        <div class="field">
+                                            <label class="lbl" for="printer-model">Printer Model</label>
+                                            <select id="printer-model">
+                                                <option value="QL-500">QL-500</option>
+                                                <option value="QL-550">QL-550</option>
+                                                <option value="QL-560">QL-560</option>
+                                                <option value="QL-570">QL-570</option>
+                                                <option value="QL-580N">QL-580N</option>
+                                                <option value="QL-650TD">QL-650TD</option>
+                                                <option value="QL-700">QL-700</option>
+                                                <option value="QL-710W">QL-710W</option>
+                                                <option value="QL-720NW">QL-720NW</option>
+                                                <option value="QL-800">QL-800</option>
+                                                <option value="QL-810W">QL-810W</option>
+                                                <option value="QL-820NWB">QL-820NWB</option>
+                                                <option value="QL-1050">QL-1050</option>
+                                                <option value="QL-1060N">QL-1060N</option>
+                                                <option value="QL-1100">QL-1100</option>
+                                                <option value="QL-1100NWB">QL-1100NWB</option>
+                                                <option value="QL-1115NWB">QL-1115NWB</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <div class="section-sep"></div>
+                                    <div class="section-cap">Media</div>
+
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="label-size">Label Type</label>
+                                            <select id="label-size">
                                                 <option value="12">12 mm (endless)</option>
                                                 <option value="12+17">12+17 mm (endless)</option>
                                                 <option value="18">18 mm (endless)</option>
@@ -427,9 +443,9 @@
                                                 <option value="pt36">pTouch 36mm (endless)</option>
                                             </select>
                                         </div>
-                                        <div class="col-md-6">
-                                            <label for="rotate" class="form-label">Rotation</label>
-                                            <select id="rotate" class="form-select">
+                                        <div class="field">
+                                            <label class="lbl" for="rotate">Rotation</label>
+                                            <select id="rotate">
                                                 <option value="0">0°</option>
                                                 <option value="90">90°</option>
                                                 <option value="180">180°</option>
@@ -437,132 +453,126 @@
                                             </select>
                                         </div>
                                     </div>
-                                    
-                                    <div class="row mb-3">
-                                        <div class="col-md-4">
-                                            <label for="threshold" class="form-label">Threshold</label>
-                                            <input type="number" id="threshold" class="form-control" value="70" min="0" max="100">
+
+                                    <div class="section-sep"></div>
+                                    <div class="section-cap">Rendering</div>
+
+                                    <div class="grid-3">
+                                        <div class="field">
+                                            <label class="lbl" for="threshold">Threshold</label>
+                                            <input type="number" id="threshold" class="mono" value="70" min="0" max="100">
                                         </div>
-                                        <div class="col-md-4">
-                                            <label for="dither" class="form-label">Dithering</label>
-                                            <select id="dither" class="form-select">
+                                        <div class="field">
+                                            <label class="lbl" for="dither">Dithering</label>
+                                            <select id="dither">
                                                 <option value="false">Disabled</option>
                                                 <option value="true">Enabled</option>
                                             </select>
                                         </div>
-                                        <div class="col-md-4">
-                                            <label for="red" class="form-label">Red Ink</label>
-                                            <select id="red" class="form-select">
+                                        <div class="field">
+                                            <label class="lbl" for="red">Red Ink</label>
+                                            <select id="red">
                                                 <option value="false">Disabled</option>
                                                 <option value="true">Enabled</option>
                                             </select>
                                         </div>
                                     </div>
 
-                                    <div class="row mb-3">
-                                        <div class="col-md-4">
-                                            <label for="dpi-600" class="form-label">600 dpi</label>
-                                            <select id="dpi-600" class="form-select">
+                                    <div class="grid-3">
+                                        <div class="field">
+                                            <label class="lbl" for="dpi-600">600 dpi</label>
+                                            <select id="dpi-600">
                                                 <option value="false">Disabled</option>
                                                 <option value="true">Enabled</option>
                                             </select>
                                         </div>
                                     </div>
 
-                                    <div class="row mb-3">
-                                        <div class="col-md-6">
-                                            <label for="keep-alive-enabled" class="form-label">Keep Alive</label>
-                                            <select id="keep-alive-enabled" class="form-select">
+                                    <div class="section-sep"></div>
+                                    <div class="section-cap">Keep Alive</div>
+
+                                    <div class="grid-2">
+                                        <div class="field col-md-6">
+                                            <label class="lbl" for="keep-alive-enabled">Keep Alive</label>
+                                            <select id="keep-alive-enabled">
                                                 <option value="false">Disabled</option>
                                                 <option value="true">Enabled</option>
                                             </select>
-                                            <div class="form-text">Prevents printer from shutting down (only needed for network printers)</div>
+                                            <div class="hint">Prevents printer shutdown (network printers only)</div>
                                         </div>
-                                        <div class="col-md-6">
-                                            <label for="keep-alive-interval" class="form-label">Interval (seconds)</label>
-                                            <input type="number" id="keep-alive-interval" class="form-control" value="60" min="10" max="3600">
-                                            <div class="form-text">Time between pings (min 10s)</div>
+                                        <div class="field">
+                                            <label class="lbl" for="keep-alive-interval">Interval (seconds)</label>
+                                            <input type="number" id="keep-alive-interval" class="mono" value="60" min="10" max="3600">
+                                            <div class="hint">Time between pings (min 10s)</div>
                                         </div>
                                     </div>
-                                    
-                                    <button type="submit" class="btn btn-primary">
-                                        <i class="bi bi-save me-2"></i>Save Settings
-                                    </button>
-                                    
-                                    <button type="button" id="check-status" class="btn btn-outline-primary ms-2">
-                                        <i class="bi bi-check-circle me-2"></i>Check Status
-                                    </button>
+
+                                    <div class="settings-actions">
+                                        <button type="submit" class="btn-print">
+                                            <i class="bi bi-save"></i> Save Settings
+                                        </button>
+                                        <button type="button" id="check-status" class="btn-ghost">
+                                            <i class="bi bi-check-circle"></i> Check Status
+                                        </button>
+                                    </div>
                                 </form>
                             </div>
+                        </section>
+                    </div>
+                </div>
+
+            </div>
+
+            <!-- ===== Shared preview panel (relocated into active tab via JS) ===== -->
+            <section class="panel preview-panel" id="preview-panel-host">
+                <div class="panel-head">
+                    <h2>Live Preview</h2>
+                    <span class="tag">output</span>
+                </div>
+                <div class="panel-body">
+                    <div class="preview-container">
+                        <img id="preview-server" class="preview-server d-none" src="" alt="Rendered label preview">
+                        <div id="preview-text" class="preview-text d-none"></div>
+                        <img id="preview-image" class="preview-image d-none" src="" alt="Image Preview">
+                        <div id="preview-qrcode" class="preview-qrcode d-none"></div>
+                        <div id="preview-label" class="preview-label d-none"></div>
+                        <div id="pdf-preview" class="pdf-preview d-none">
+                            <div id="pdf-preview-notice" class="text-muted small mb-2 d-none"></div>
+                            <div id="pdf-preview-pages" class="d-flex flex-column align-items-center gap-3"></div>
+                        </div>
+                        <div id="preview-placeholder" class="preview-placeholder">
+                            <i class="bi bi-card-image"></i>
+                            <p>Enter content in the form to see a live preview</p>
                         </div>
                     </div>
                 </div>
-                
-                <!-- Right Column: Preview -->
-                <div class="col-lg-7">
-                    <div class="card preview-card mb-4">
-                        <div class="card-header">
-                            <h5 class="mb-0">
-                                <i class="bi bi-eye-fill me-2"></i>
-                                Live Preview
-                            </h5>
-                        </div>
-                        <div class="card-body">
-                            <div class="preview-container">
-                                <!-- Text Preview -->
-                                <div id="preview-text" class="preview-text d-none"></div>
-                                
-                                <!-- Image Preview -->
-                                <img id="preview-image" class="preview-image d-none" src="" alt="Image Preview">
-                                
-                                <!-- QR Code Preview -->
-                                <div id="preview-qrcode" class="preview-qrcode d-none"></div>
-                                
-                                <!-- Label Preview -->
-                                <div id="preview-label" class="preview-label d-none"></div>
+            </section>
+        </main>
+    </div>
 
-                                <!-- PDF Preview -->
-                                <div id="pdf-preview" class="pdf-preview d-none" style="width: 100%; max-height: 70vh; overflow-y: auto;">
-                                    <div id="pdf-preview-notice" class="text-muted small mb-2 d-none"></div>
-                                    <div id="pdf-preview-pages" class="d-flex flex-column align-items-center gap-3"></div>
-                                </div>
-
-                                <!-- Placeholder when no preview is available -->
-                                <div id="preview-placeholder" class="preview-placeholder">
-                                    <i class="bi bi-card-image"></i>
-                                    <p>Enter content in the form to see a live preview</p>
-                                </div>
-                            </div>
-                        </div>
+    <!-- Status Modal -->
+    <div class="modal fade" id="statusModal" tabindex="-1" aria-labelledby="statusModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="statusModalLabel">Printer Status</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <div id="status-result">
+                        <p>Checking printer status...</p>
                     </div>
-                    
-                    <!-- Status Modal -->
-                    <div class="modal fade" id="statusModal" tabindex="-1" aria-labelledby="statusModalLabel" aria-hidden="true">
-                        <div class="modal-dialog">
-                            <div class="modal-content">
-                                <div class="modal-header">
-                                    <h5 class="modal-title" id="statusModalLabel">Printer Status</h5>
-                                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                                </div>
-                                <div class="modal-body">
-                                    <div id="status-result">
-                                        <p>Checking printer status...</p>
-                                    </div>
-                                </div>
-                                <div class="modal-footer">
-                                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
                 </div>
             </div>
         </div>
     </div>
-    
+
     <!-- Notifications Container -->
     <div id="notifications" class="notifications"></div>
-    
+
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="js/utils.js"></script>

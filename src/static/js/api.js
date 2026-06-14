@@ -886,6 +886,236 @@ async function handleSaveSettings(event) {
     }
 }
 
+// ===================== Hybrid live server preview =====================
+//
+// The client-side preview (preview.js) updates instantly while typing. In
+// addition, we debounce a request to the server which renders the EXACT print
+// label as a PNG and overlays it on top of the instant client preview.
+//
+// A single shared debounce timer + AbortController ensure only the latest
+// request "wins": older in-flight requests are aborted and stale responses are
+// ignored.
+
+let serverPreviewTimer = null;
+let serverPreviewController = null;
+
+/**
+ * Collect the shared printer/render settings exactly like the print handlers
+ * do, so the server preview matches the real print output.
+ */
+function collectPreviewSettings() {
+    return {
+        printer_uri: document.getElementById('printer-uri').value,
+        printer_model: document.getElementById('printer-model').value,
+        label_size: document.getElementById('label-size').value,
+        rotate: parseInt(document.getElementById('rotate').value),
+        threshold: parseFloat(document.getElementById('threshold').value),
+        dither: document.getElementById('dither').value === 'true',
+        red: document.getElementById('red').value === 'true',
+        copies: parseInt(document.getElementById('copies').value) || 1,
+        cut_mode: document.getElementById('cut-mode').value,
+        dpi_600: document.getElementById('dpi-600').value === 'true'
+    };
+}
+
+/**
+ * Hide the server preview image and clear its source. The client preview /
+ * placeholder underneath then becomes visible again.
+ */
+function clearServerPreview() {
+    const serverImg = document.getElementById('preview-server');
+    if (serverImg) {
+        serverImg.classList.add('d-none');
+        serverImg.src = '';
+    }
+}
+
+/**
+ * Show the server preview image and hide the client previews + placeholder so
+ * the server-rendered label "wins".
+ * @param {string} dataUrl - data:image/png;base64,... returned by the API
+ */
+function showServerPreview(dataUrl) {
+    const serverImg = document.getElementById('preview-server');
+    if (!serverImg) return;
+    serverImg.src = dataUrl;
+    serverImg.classList.remove('d-none');
+
+    // Hide the instant client previews + placeholder; the server image wins.
+    ['preview-text', 'preview-image', 'preview-qrcode', 'preview-label',
+     'pdf-preview', 'preview-placeholder'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.classList.add('d-none');
+    });
+}
+
+/**
+ * Build the request descriptor (endpoint + body) for the given compose mode,
+ * or return null when there is nothing to render (empty input / no file).
+ * @param {string} mode - 'text' | 'qrcode' | 'label' | 'image'
+ */
+function buildPreviewRequest(mode) {
+    const settings = collectPreviewSettings();
+
+    if (mode === 'text') {
+        const text = document.getElementById('text-input').value;
+        if (!text.trim()) return null;
+        return {
+            url: '/api/v1/text/preview',
+            json: {
+                text: text,
+                settings: Object.assign({}, settings, {
+                    font_size: parseInt(document.getElementById('text-font-size').value),
+                    alignment: document.getElementById('text-alignment').value
+                })
+            }
+        };
+    }
+
+    if (mode === 'qrcode') {
+        const qrData = document.getElementById('qr-data').value;
+        if (!qrData.trim()) return null;
+        const body = {
+            qr: {
+                data: qrData,
+                size: parseInt(document.getElementById('qr-size').value),
+                error_correction: document.getElementById('qr-error-correction').value,
+                version: 1,
+                box_size: 10,
+                border: 4
+            },
+            settings: settings
+        };
+        const showText = document.getElementById('qr-show-text').checked;
+        const textContent = document.getElementById('qr-text-content').value;
+        if (showText && textContent) {
+            body.text = {
+                content: textContent,
+                position: document.getElementById('qr-text-position').value,
+                font_size: parseInt(document.getElementById('qr-text-font-size').value),
+                alignment: document.getElementById('qr-text-alignment').value
+            };
+        }
+        return { url: '/api/v1/qrcode/preview', json: body };
+    }
+
+    if (mode === 'label') {
+        const qrData = document.getElementById('label-qr-data').value;
+        const textContent = document.getElementById('label-text-content').value;
+        if (!qrData.trim() || !textContent.trim()) return null;
+        return {
+            url: '/api/v1/label/preview',
+            json: {
+                qr: {
+                    data: qrData,
+                    position: document.getElementById('label-qr-position').value,
+                    size: 400,
+                    error_correction: document.getElementById('label-qr-error-correction').value || 'M',
+                    version: 1,
+                    box_size: 10,
+                    border: 4
+                },
+                text: {
+                    content: textContent,
+                    font_size: parseInt(document.getElementById('label-text-font-size').value),
+                    alignment: document.getElementById('label-text-alignment').value
+                },
+                settings: settings
+            }
+        };
+    }
+
+    if (mode === 'image') {
+        const imageInput = document.getElementById('image-input');
+        if (!imageInput || !imageInput.files || imageInput.files.length === 0) {
+            return null;
+        }
+        const imageMode = document.getElementById('image-mode');
+        let dither = settings.dither;
+        if (imageMode.value === 'bw-dither') {
+            dither = true;
+        } else if (imageMode.value === 'bw') {
+            dither = false;
+        }
+        const formData = new FormData();
+        formData.append('image', imageInput.files[0]);
+        formData.append('settings', JSON.stringify(Object.assign({}, settings, {
+            dither: dither,
+            image_mode: imageMode.value
+        })));
+        return { url: '/api/v1/image/preview', form: formData };
+    }
+
+    return null;
+}
+
+/**
+ * Request a server-rendered, true-to-print preview for the given compose mode.
+ * Debounced (~250ms) and abortable: the newest request always wins. On success
+ * the returned PNG overlays the instant client preview; on any error / empty
+ * input the server image is hidden so the client preview stays visible.
+ * @param {string} mode - 'text' | 'qrcode' | 'label' | 'image'
+ */
+function requestServerPreview(mode) {
+    clearTimeout(serverPreviewTimer);
+    serverPreviewTimer = setTimeout(() => {
+        const request = buildPreviewRequest(mode);
+
+        // Nothing to render -> drop any server image, let the client preview show.
+        if (!request) {
+            clearServerPreview();
+            return;
+        }
+
+        // Abort any in-flight request so its (older) response is ignored.
+        if (serverPreviewController) {
+            serverPreviewController.abort();
+        }
+        const controller = new AbortController();
+        serverPreviewController = controller;
+
+        const options = { method: 'POST', signal: controller.signal };
+        if (request.form) {
+            options.body = request.form;
+        } else {
+            options.headers = { 'Content-Type': 'application/json' };
+            options.body = JSON.stringify(request.json);
+        }
+
+        fetch(request.url, options)
+            .then(response => {
+                // A newer request started meanwhile: ignore this result.
+                if (serverPreviewController !== controller) return null;
+                if (!response.ok) {
+                    // 400 / invalid input -> keep the client preview, no server image.
+                    clearServerPreview();
+                    return null;
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (!data) return;
+                if (serverPreviewController !== controller) return;
+                if (data.image) {
+                    showServerPreview(data.image);
+                } else {
+                    clearServerPreview();
+                }
+            })
+            .catch(error => {
+                // Swallow aborts from superseding requests.
+                if (error && error.name === 'AbortError') return;
+                console.error('Error generating server preview:', error);
+                clearServerPreview();
+            })
+            .finally(() => {
+                if (serverPreviewController === controller) {
+                    serverPreviewController = null;
+                }
+            });
+    }, 250);
+}
+
 /**
  * Update keep alive settings
  * @param {boolean} enabled - Whether keep alive should be enabled

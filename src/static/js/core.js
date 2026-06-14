@@ -37,6 +37,29 @@ function initApp() {
 }
 
 /**
+ * Map a compose tab target id to the server-preview mode, or null if the tab
+ * has no server-rendered preview (e.g. PDF, which has its own preview).
+ * @param {string} targetId - e.g. '#text-panel'
+ */
+function previewModeForTarget(targetId) {
+    switch (targetId) {
+        case '#text-panel': return 'text';
+        case '#qrcode-panel': return 'qrcode';
+        case '#label-panel': return 'label';
+        case '#image-panel': return 'image';
+        default: return null;
+    }
+}
+
+/**
+ * Determine the server-preview mode of the currently active compose tab.
+ */
+function getActiveComposeMode() {
+    const activePane = document.querySelector('#composeContent > .tab-pane.active');
+    return activePane ? previewModeForTarget('#' + activePane.id) : null;
+}
+
+/**
  * Set up event listeners for the application
  */
 function setupEventListeners() {
@@ -81,28 +104,62 @@ function setupEventListeners() {
         tabEl.addEventListener('shown.bs.tab', event => {
             const targetId = event.target.getAttribute('data-bs-target');
 
-            // When leaving the PDF tab, hide its preview so it does not linger
-            // over the other (text/image/qr/label) previews.
-            if (targetId !== '#pdf-panel') {
-                const pdfPreview = document.getElementById('pdf-preview');
-                if (pdfPreview) pdfPreview.classList.add('d-none');
-            }
+            // The sidebar splits nav items into two groups (Compose / System),
+            // which confuses Bootstrap's automatic deactivation and can leave the
+            // previously active pane visible (e.g. the Text form showing above
+            // Settings). Enforce exactly one active pane + one active nav item.
+            document.querySelectorAll('#composeContent > .tab-pane').forEach(p => {
+                if ('#' + p.id !== targetId) p.classList.remove('show', 'active');
+            });
+            document.querySelectorAll('[data-bs-toggle="tab"]').forEach(n => {
+                const isActive = n.getAttribute('data-bs-target') === targetId;
+                n.classList.toggle('active', isActive);
+                n.setAttribute('aria-selected', isActive ? 'true' : 'false');
+            });
 
-            // Update the appropriate preview based on the active tab
+            // Reset the shared preview so each tab shows ONLY its own content
+            // (or the placeholder). Without this, content rendered for one tab
+            // (e.g. typed text) lingers in the preview on every other tab.
+            ['preview-text', 'preview-image', 'preview-qrcode', 'preview-label', 'pdf-preview'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.classList.add('d-none');
+            });
+            const previewPlaceholder = document.getElementById('preview-placeholder');
+            if (previewPlaceholder) previewPlaceholder.classList.remove('d-none');
+
+            // Drop any stale server preview from the previous tab; the active
+            // tab's render is (re-)requested below if it has content.
+            if (typeof clearServerPreview === 'function') clearServerPreview();
+
+            // Re-render the preview for the now-active tab (empty -> placeholder).
             if (targetId === '#text-panel') {
                 updateTextPreview();
             } else if (targetId === '#image-panel') {
-                // Image preview is handled by the file input change event
+                // The image change handler only fires on file selection, so
+                // re-show the already-loaded image (if any) on tab switch.
+                const previewImage = document.getElementById('preview-image');
+                const imageInput = document.getElementById('image-input');
+                if (previewImage && previewImage.dataset.originalSrc &&
+                    imageInput && imageInput.files && imageInput.files.length > 0) {
+                    previewImage.classList.remove('d-none');
+                    hideOtherPreviews('preview-image');
+                }
             } else if (targetId === '#qrcode-panel') {
                 updateQRCodePreview();
             } else if (targetId === '#label-panel') {
                 updateLabelPreview();
             } else if (targetId === '#pdf-panel') {
-                // Refresh the PDF preview if a file is already selected.
                 const pdfInput = document.getElementById('pdf-input');
                 if (pdfInput && pdfInput.files && pdfInput.files.length > 0) {
                     previewPdf();
                 }
+            }
+
+            // Re-request the server-rendered preview for the now-active tab.
+            // requestServerPreview() itself no-ops (and clears) on empty input.
+            const serverMode = previewModeForTarget(targetId);
+            if (serverMode && typeof requestServerPreview === 'function') {
+                requestServerPreview(serverMode);
             }
         });
     });
@@ -120,6 +177,8 @@ function setupEventListeners() {
         if (textInput && textFontSize && textAlignment) {
             [textInput, textFontSize, textAlignment].forEach(el => {
                 el.addEventListener('input', updateTextPreview);
+                // Also push a debounced server-rendered (true-to-print) preview.
+                el.addEventListener('input', () => requestServerPreview('text'));
             });
         }
     }
@@ -134,6 +193,11 @@ function setupEventListeners() {
     const imageInput = document.getElementById('image-input');
     if (imageInput) {
         imageInput.addEventListener('change', handleImagePreview);
+        imageInput.addEventListener('change', () => requestServerPreview('image'));
+    }
+    const imageMode = document.getElementById('image-mode');
+    if (imageMode) {
+        imageMode.addEventListener('change', () => requestServerPreview('image'));
     }
     
     // QR code print form
@@ -188,6 +252,14 @@ function setupEventListeners() {
         if (qrTextAlignment) {
             qrTextAlignment.addEventListener('change', updateQRCodePreview);
         }
+
+        // Any QR field change also refreshes the server-rendered preview.
+        [qrData, qrSize, qrErrorCorrection, qrShowText, qrTextContent,
+         qrTextPosition, qrTextFontSize, qrTextAlignment].forEach(el => {
+            if (!el) return;
+            const evt = (el.tagName === 'SELECT' || el.type === 'checkbox') ? 'change' : 'input';
+            el.addEventListener(evt, () => requestServerPreview('qrcode'));
+        });
     }
     
     // Label print form
@@ -226,6 +298,14 @@ function setupEventListeners() {
         if (labelTextAlignment) {
             labelTextAlignment.addEventListener('change', updateLabelPreview);
         }
+
+        // Any label field change also refreshes the server-rendered preview.
+        [labelQrData, labelQrPosition, labelQrErrorCorrection, labelTextContent,
+         labelTextFontSize, labelTextAlignment].forEach(el => {
+            if (!el) return;
+            const evt = el.tagName === 'SELECT' ? 'change' : 'input';
+            el.addEventListener(evt, () => requestServerPreview('label'));
+        });
     }
     
     // PDF print form
@@ -258,6 +338,96 @@ function setupEventListeners() {
     if (settingsForm) {
         settingsForm.addEventListener('submit', handleSaveSettings);
     }
+
+    // Settings fields that change the rendered output should refresh the
+    // server preview of whichever compose tab is currently active.
+    ['rotate', 'threshold', 'dither', 'label-size', 'printer-model'].forEach(id => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const evt = el.tagName === 'SELECT' ? 'change' : 'input';
+        el.addEventListener(evt, () => {
+            const mode = getActiveComposeMode();
+            if (mode) requestServerPreview(mode);
+        });
+    });
+
+    // ---- Console layout wiring (sidebar drawer + preview relocation) ----
+    setupConsoleLayout();
+}
+
+/**
+ * Wire up the Console layout: the responsive sidebar drawer and the relocation
+ * of the single shared preview panel into whichever compose tab is active.
+ */
+function setupConsoleLayout() {
+    // Move the shared preview panel into the active tab's mount point so it
+    // always sits next to the active compose form. Settings has no mount, so
+    // the preview is simply not shown there.
+    const previewPanel = document.getElementById('preview-panel-host');
+
+    function placePreview(targetId) {
+        if (!previewPanel) return;
+        const pane = targetId
+            ? document.querySelector(targetId)
+            : document.querySelector('.tab-pane.active');
+        if (!pane) return;
+        const mount = pane.querySelector('.preview-mount');
+        if (mount) {
+            mount.appendChild(previewPanel);
+            previewPanel.style.display = '';
+        } else {
+            // No preview slot in this pane (e.g. Settings) -> hide it.
+            previewPanel.style.display = 'none';
+        }
+    }
+
+    // Initial placement (Text panel is active on load).
+    placePreview('#text-panel');
+
+    // Reposition on every tab switch. This runs alongside the preview-update
+    // listeners already registered above.
+    document.querySelectorAll('button[data-bs-toggle="tab"]').forEach(tabEl => {
+        tabEl.addEventListener('shown.bs.tab', event => {
+            const targetId = event.target.getAttribute('data-bs-target');
+            placePreview(targetId);
+        });
+    });
+
+    // Responsive off-canvas sidebar drawer.
+    const rail = document.getElementById('rail');
+    const railToggle = document.getElementById('rail-toggle');
+    const railScrim = document.getElementById('rail-scrim');
+
+    function openRail() {
+        if (!rail) return;
+        rail.classList.add('open');
+        if (railScrim) railScrim.hidden = false;
+        if (railToggle) railToggle.setAttribute('aria-expanded', 'true');
+    }
+    function closeRail() {
+        if (!rail) return;
+        rail.classList.remove('open');
+        if (railScrim) railScrim.hidden = true;
+        if (railToggle) railToggle.setAttribute('aria-expanded', 'false');
+    }
+
+    if (railToggle) {
+        railToggle.addEventListener('click', () => {
+            if (rail && rail.classList.contains('open')) {
+                closeRail();
+            } else {
+                openRail();
+            }
+        });
+    }
+    if (railScrim) railScrim.addEventListener('click', closeRail);
+
+    // Tapping a sidebar entry on mobile should close the drawer.
+    document.querySelectorAll('.rail .nav-item').forEach(item => {
+        item.addEventListener('click', () => {
+            if (window.matchMedia('(max-width: 768px)').matches) closeRail();
+        });
+    });
 }
 
 /**
@@ -336,15 +506,36 @@ async function handleSharedFile() {
  */
 function initTheme() {
     const savedTheme = localStorage.getItem('theme');
-    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-    
-    if (savedTheme === 'dark' || (!savedTheme && prefersDark)) {
-        document.body.classList.add('dark-mode');
-        updateThemeToggleIcon(true);
-    } else {
-        document.body.classList.remove('dark-mode');
-        updateThemeToggleIcon(false);
+    const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+    // If the user has never manually toggled (no explicit value in
+    // localStorage), follow the system preference: dark when the system is
+    // dark, light otherwise (light stays the fallback default).
+    const useDark = savedTheme === 'dark' || (!savedTheme && darkQuery.matches);
+    applyTheme(useDark);
+
+    // Live-follow system theme changes, but ONLY while the user has not set an
+    // explicit preference. A manual toggle writes to localStorage and from then
+    // on overrides the auto-detection permanently.
+    const onSystemThemeChange = (e) => {
+        if (localStorage.getItem('theme')) return; // explicit choice wins
+        applyTheme(e.matches);
+    };
+    if (typeof darkQuery.addEventListener === 'function') {
+        darkQuery.addEventListener('change', onSystemThemeChange);
+    } else if (typeof darkQuery.addListener === 'function') {
+        // Safari < 14 fallback
+        darkQuery.addListener(onSystemThemeChange);
     }
+}
+
+/**
+ * Apply the given theme to the document and sync the toggle icon.
+ * @param {boolean} isDarkMode - Whether dark mode should be active
+ */
+function applyTheme(isDarkMode) {
+    document.body.classList.toggle('dark-mode', isDarkMode);
+    updateThemeToggleIcon(isDarkMode);
 }
 
 /**
