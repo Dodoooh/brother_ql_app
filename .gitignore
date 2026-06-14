@@ -206,3 +206,21 @@ data/
 
 # Settings (If settings.json contains secrets or local config)
 # src/config/settings.json # Uncomment if it contains sensitive info
+
+# Local tooling / editor artifacts
+# Keep AI assistant / coding-agent helper files out of version control.
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+.claude/**
+**/.claude/
+**/CLAUDE.md
+**/CLAUDE.local.md
+# Local agent settings/memory (e.g. .claude/settings.local.json)
+.claude/settings.local.json
+**/.claude/settings.local.json
+
+# Local planning / internal notes (not for the public repo)
+.planning/
+.planning/**
+**/.planning/

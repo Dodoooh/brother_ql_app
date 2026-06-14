@@ -1,0 +1,81 @@
+# .dockerignore — keep junk, secrets and internal tooling out of the image.
+# The Dockerfile does `COPY . .`, so anything not listed here is baked in.
+# NOTE: docker-entrypoint.sh and requirements.txt are needed at build time and
+# must NOT be ignored.
+
+# --- Version control ---
+.git/
+.gitignore
+.gitattributes
+
+# --- Python bytecode / caches ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# --- Virtual environments ---
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# --- Packaging / build artifacts ---
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+wheels/
+
+# --- Tooling caches ---
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.cache
+
+# --- Runtime data / user uploads (must not be shipped in the image) ---
+uploads/
+src/uploads/
+data/
+*.sqlite3
+*.db
+*.log
+logs/
+*.pid
+
+# --- Documentation (not needed at runtime) ---
+*.md
+doc/
+
+# --- CI / repo metadata ---
+.github/
+repository.json
+
+# --- Tests (not needed in the runtime image) ---
+tests/
+
+# --- Editor / OS cruft ---
+.vscode/
+.idea/
+.DS_Store
+*.swp
+*.swo
+*~
+
+# --- Internal tooling / planning files (NEVER ship these) ---
+.claude/
+CLAUDE.md
+CLAUDE.local.md
+.planning/
+
+# --- Local docker overrides ---
+docker-compose.override.yml
