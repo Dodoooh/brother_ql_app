@@ -266,6 +266,8 @@ body {
     flex: none;
     transition: background .2s, box-shadow .2s;
 }
+/* Compact icon shown instead of the dot+label on phones (see mobile media query). */
+.pill .pill-icon { display: none; }
 .pill.online { border-color: color-mix(in srgb, var(--green) 45%, var(--border)); }
 .pill.online .dot { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent); }
 .pill.offline { border-color: color-mix(in srgb, var(--red) 45%, var(--border)); }
@@ -846,6 +848,34 @@ body.dark-mode .queue-badge { color: #06222B; }
     .queue-cancel,
     .queue-reprint,
     .queue-open { padding: 9px 16px; font-size: 13px; }
+}
+
+/* Phones: the top bar is too narrow for the title subtitle + full-text status
+   pills (they wrap awkwardly). Drop the subtitle, keep the title on one line,
+   and collapse both pills to round, icon-only buttons (power = keep-alive,
+   printer = status) coloured by state. */
+@media (max-width: 600px) {
+    .topbar { padding: 0 14px; }
+    .title h1 { white-space: nowrap; }
+    .title p { display: none; }
+    .status-cluster { gap: 8px; }
+    .pill {
+        width: 36px; height: 36px;
+        padding: 0;
+        justify-content: center;
+        border-radius: 50%;
+        flex: none;
+    }
+    .pill .dot,
+    .pill span:not(.dot) { display: none; }
+    .pill .pill-icon {
+        display: inline-flex;
+        font-size: 15px;
+        color: var(--muted);
+    }
+    .pill.online .pill-icon,
+    .pill.ka-active .pill-icon { color: var(--green); }
+    .pill.offline .pill-icon { color: var(--red); }
 }
 
 /* ===================== Demo mode banner ===================== */
