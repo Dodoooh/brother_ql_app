@@ -102,6 +102,7 @@ class SettingsService:
             "font_size": (int, float), "alignment": str, "rotate": (int, float),
             "threshold": (int, float), "dither": bool, "compress": bool, "red": bool,
             "keep_alive_enabled": bool, "keep_alive_interval": (int, float),
+            "keep_alive_mode": str, "keep_alive_duration_seconds": int,
             "ipp_port": int,
             "copies": int, "cut_mode": str, "dpi_600": bool, "hq": bool,
             "printers": list
@@ -142,6 +143,12 @@ class SettingsService:
 
         if "cut_mode" in settings_to_validate and settings_to_validate["cut_mode"] not in ["each", "end", "none"]:
              raise ValueError(f"Invalid cut_mode value: {settings_to_validate['cut_mode']}. Must be each, end, or none.")
+
+        if "keep_alive_mode" in settings_to_validate and settings_to_validate["keep_alive_mode"] not in ["forever", "timed"]:
+             raise ValueError(f"Invalid keep_alive_mode value: {settings_to_validate['keep_alive_mode']}. Must be forever or timed.")
+
+        if "keep_alive_duration_seconds" in settings_to_validate and settings_to_validate["keep_alive_duration_seconds"] < 0:
+             raise ValueError(f"Invalid keep_alive_duration_seconds value: {settings_to_validate['keep_alive_duration_seconds']}. Must be 0 or greater.")
 
         if "ipp_port" in settings_to_validate and not (1 <= settings_to_validate["ipp_port"] <= 65535):
              raise ValueError(f"Invalid ipp_port value: {settings_to_validate['ipp_port']}. Must be between 1 and 65535.")

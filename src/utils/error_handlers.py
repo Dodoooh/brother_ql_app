@@ -13,7 +13,8 @@ from src.utils.exceptions import (
     ResourceNotFoundError,
     PrinterError,
     ImageProcessingError,
-    ConfigurationError
+    ConfigurationError,
+    ConfirmationRequiredError
 )
 
 logger = structlog.get_logger()
@@ -95,6 +96,20 @@ def register_error_handlers(app):
         logger.error("Configuration error", error=str(error), details=error.details)
         return error.to_dict(), 500
     
+    @app.errorhandler(ConfirmationRequiredError)
+    def handle_confirmation_required_error(error: ConfirmationRequiredError) -> Tuple[Dict[str, Any], int]:
+        """
+        Handle large-batch confirmation errors.
+
+        Args:
+            error: ConfirmationRequiredError instance.
+
+        Returns:
+            Tuple of error response and status code.
+        """
+        logger.warning("Confirmation required", error=str(error), details=error.details)
+        return error.to_dict(), 400
+
     @app.errorhandler(AppError)
     def handle_app_error(error: AppError) -> Tuple[Dict[str, Any], int]:
         """

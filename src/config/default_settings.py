@@ -20,6 +20,8 @@ DEFAULT_SETTINGS = {
     "hq": True,
     "keep_alive_enabled": False,
     "keep_alive_interval": 60,  # seconds
+    "keep_alive_mode": "forever",  # forever | timed
+    "keep_alive_duration_seconds": 7200,  # used when mode == "timed" (default 2h)
     "ipp_port": 631,  # IPP port for network status/keep-alive (IANA standard)
     "printers": [
         {

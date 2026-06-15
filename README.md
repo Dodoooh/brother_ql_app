@@ -3,7 +3,7 @@
 [![Docker Pulls](https://img.shields.io/docker/pulls/dodoooh/brother_ql_app)](https://hub.docker.com/r/dodoooh/brother_ql_app)
 [![GitHub Release](https://img.shields.io/github/v/release/dodoooh/brother_ql_app)](https://github.com/dodoooh/brother_ql_app/releases)
 [![GitHub Issues](https://img.shields.io/github/issues/dodoooh/brother_ql_app)](https://github.com/dodoooh/brother_ql_app/issues)
-[![Version](https://img.shields.io/badge/version-3.1.0-blue)](https://github.com/dodoooh/brother_ql_app/blob/main/changelog.md)
+[![Version](https://img.shields.io/badge/version-4.0.0--dev-blue)](https://github.com/dodoooh/brother_ql_app/blob/main/changelog.md)
 
 A modern web application to control Brother QL printers, enabling customizable text, image, and QR code printing with ease.
 
@@ -15,20 +15,29 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **📱 QR Code Generation**: Create and print QR codes for URLs, contact information, or any text data.
 
-- **🔀 Combined Layouts**: Print text and QR codes together with customizable positioning.
-- **👁️ Live Preview**: See how your labels will look before printing for all label types.
+- **🔀 Combined Layouts**: Print text and QR codes together — or text and an uploaded image side by side — with customizable positioning.
 
-- **⚙️ Custom Settings**: Fine-tune font size, label size, and text alignment to match your specific needs.
+- **📄 PDF Printing**: Upload a PDF and print selected pages, with per-page preview and fit/fill scaling.
+
+- **👁️ Live Preview**: See how your labels will look before printing for all label types, with an instant client-side preview backed by a true-to-print server render.
+
+- **⚙️ Custom Settings**: Fine-tune font size, label size, alignment, rotation, threshold, dithering and red printing. Copies (1–100) and cut mode are available directly in every compose section.
+
+- **🗂 Print Queue**: Submit multiple jobs and have them printed sequentially. Pause/resume the queue, emergency-stop (cancel all waiting jobs), delete individual jobs, reprint with the same settings, or re-open a job's parameters — all from the Queue panel.
+
+- **🛡 Large-batch Confirmation**: Printing 10 or more copies requires an explicit confirmation in the UI and an explicit flag in the API, so a big run is never started by accident.
 
 - **🔗 API Support**: Seamlessly integrate with external systems like Home Assistant ❤️ via a comprehensive, documented API.
 
 - **🖨 Multiple Printer Support**: Control multiple printers simultaneously via the API, enabling the use of different label sizes and configurations for various tasks.
 
-- **🔄 Printer Keep Alive**: Prevent your printer from shutting down with the keep alive feature.
+- **🔄 Printer Keep Alive**: Prevent your printer from shutting down with the keep alive feature — keep it awake continuously, or only for a configurable window after each print. A toggle in the top bar makes it accessible from anywhere.
 
 - **📱 Responsive Design**: Enjoy a smooth user experience on desktop, tablet, and smartphone devices.
 
 - **🌙 Dark Mode**: Modern interface with automatic dark mode support based on system preferences.
+
+- **🧪 Live Demo**: The static UI can be hosted on GitHub Pages with a built-in demo mode that mocks the API with sample data — no backend or printer required — so anyone can explore the interface.
 
 - **📚 Swagger Documentation**: Explore and test the API using the built-in Swagger UI documentation.
 
@@ -156,8 +165,14 @@ The application settings can be configured in the `data/settings.json` file. Thi
 - `dither`: Whether to apply dithering when converting the image (`true`/`false`)
 - `compress`: Whether to enable printer-side compression (`true`/`false`)
 - `red`: Whether to use the red channel for two-color labels such as 62-red (`true`/`false`)
+- `copies`: The default number of copies to print (`1`–`100`)
+- `cut_mode`: When to cut the tape — `each` (after every label), `end` (only after the last), or `none`
+- `dpi_600`: Whether to print at 600 dpi where supported (`true`/`false`)
+- `hq`: Whether to use high-quality printing (`true`/`false`)
 - `keep_alive_enabled`: Whether to keep the printer connection alive (only needed for network printers)
 - `keep_alive_interval`: The interval for keep-alive messages (in seconds, minimum `10`)
+- `keep_alive_mode`: `forever` to keep the printer awake continuously, or `timed` to keep it awake only for a window after each print
+- `keep_alive_duration_seconds`: When `keep_alive_mode` is `timed`, how long (in seconds) to stay awake after each print (e.g. `7200` for 2 hours)
 - `ipp_port`: The IPP port used to query printer status (default `631`)
 
 ### Multiple Printers
@@ -214,6 +229,9 @@ The following environment variables can be set (e.g. in `docker-compose.yml` or 
 - `CORS_ORIGINS`: Comma-separated list of allowed cross-origin origins (e.g. `https://home.example.com,https://hass.example.com`). When unset, only same-origin requests are allowed.
 - `SECRET_KEY`: The Flask secret key. Set a stable value in production; if unset, an ephemeral random key is generated on each start.
 - `ENABLE_SWAGGER_UI`: Set to `true` or `false` to force the Swagger UI on or off. When unset, the UI defaults to on unless `FLASK_ENV=production`.
+- `UPLOAD_FOLDER`: Directory used to persist uploaded image/PDF files (job files and shared files). Defaults to an app-relative `uploads/` folder.
+- `JOB_FILE_TTL_SECONDS`: How long persisted image/PDF job files are kept so they can be reprinted or re-opened (default `86400`, i.e. 24 hours).
+- `SHARE_TTL_SECONDS`: How long files staged via the `/share` endpoint are kept before cleanup (default `3600`, i.e. 1 hour).
 
 ## 📔 API Documentation
 
@@ -221,17 +239,43 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 
 ### Available Endpoints
 
+**Settings & printers**
 - **GET /api/v1/settings**: Get current settings
 - **PUT /api/v1/settings**: Update settings
 - **GET /api/v1/printers**: Get available printers
 - **POST /api/v1/printers/status**: Check printer status
+- **GET /api/v1/printers/keep-alive**: Get keep-alive status
+- **PUT /api/v1/printers/keep-alive**: Start/stop the keep-alive feature
+
+**Printing**
 - **POST /api/v1/text/print**: Print text on a label
 - **POST /api/v1/image/print**: Print image on a label
 - **POST /api/v1/qrcode/print**: Print QR code on a label
 - **POST /api/v1/label/text-qrcode**: Print combined text and QR code on a label
-- **POST /api/v1/printers/keep-alive**: Control the printer keep alive feature
+- **POST /api/v1/label/text-image**: Print an uploaded image and a text block side by side on a label
+- **POST /api/v1/pdf/print**: Print selected pages of an uploaded PDF
+- **POST /api/v1/share**: Generic share hand-off endpoint for mobile share shortcuts (image/PDF)
+
+**Live preview** (true-to-print PNG render)
+- **POST /api/v1/text/preview**, **/qrcode/preview**, **/label/preview**, **/image/preview**, **/pdf/preview**
+
+**Print queue**
+- **GET /api/v1/jobs**: List recent jobs (newest first)
+- **GET /api/v1/jobs/{id}**: Get a single job's status
+- **POST /api/v1/jobs/{id}/cancel**: Cancel a queued job
+- **POST /api/v1/jobs/{id}/reprint**: Re-queue a job with the same settings
+- **POST /api/v1/jobs/{id}/delete**: Delete a waiting or finished job
+- **GET /api/v1/jobs/{id}/file**: Download a job's persisted image/PDF
+- **POST /api/v1/jobs/clear**: Remove finished jobs
+- **POST /api/v1/jobs/clear-all**: Remove all jobs
+- **GET /api/v1/jobs/queue**: Queue control status (paused + counts)
+- **POST /api/v1/jobs/pause** · **/jobs/resume** · **/jobs/stop**: Control queue processing
+
+**Health**
 - **GET /health**: Liveness probe reporting that the web application process is up
 - **GET /health/printer**: Readiness probe reporting whether the configured printer is reachable
+
+> **Large batches:** Any print request that would print 10 or more copies must include an explicit `confirm_large_batch` flag (boolean `true` for JSON endpoints, the string `"true"` for multipart endpoints). Without it the request is rejected with HTTP 400 and the error code `CONFIRMATION_REQUIRED`.
 
 ## 📤 Example API Usage
 
@@ -439,6 +483,47 @@ else:
 Network Brother QL printers tend to power themselves off automatically after a period of inactivity. The keep-alive feature periodically writes to the printer's raw port (`9100`) at the configured `keep_alive_interval` to keep the connection warm and reduce the chance of an unexpected power-off.
 
 > **Note:** Keep-alive is a best-effort mitigation. The only guaranteed way to prevent the printer from shutting down is to disable the device's own power-saving setting (set **Auto Power Off = Off** in the printer's menu).
+
+Keep-alive can run in two modes (configurable in the settings):
+
+- **Forever**: keeps the printer awake continuously while enabled.
+- **Timed**: keeps the printer awake only for a configurable window after each print (e.g. 2 hours), then lets it sleep until the next print.
+
+A keep-alive toggle is always available in the top bar so it can be turned on or off from any view.
+
+## 🗂 Print Queue
+
+All print requests are queued and processed sequentially by a single background worker, so the printer (which accepts only one connection at a time) is never driven concurrently. The **Queue** panel lists recent jobs with their status (`queued`, `printing`, `done`, `failed`, `cancelled`) and lets you:
+
+- **Pause/Resume** processing — a job that is already printing finishes; the next ones wait.
+- **Stop** — an emergency stop that pauses the queue and cancels all waiting jobs (a printing job still finishes).
+- **Reprint** a job with the same settings, or **Open** its parameters back into the form.
+- **Delete** a single waiting or finished job, **Clear finished**, or **Clear all**.
+
+The same controls are available via the `/api/v1/jobs/*` endpoints listed above. Image and PDF jobs keep their uploaded file for a configurable time (`JOB_FILE_TTL_SECONDS`, default 24 h) so they can be reprinted or re-opened.
+
+## 📲 Share from your Phone
+
+The generic `/share` endpoint lets you send a PDF or image straight from your phone into the print form using **Apple Shortcuts** (iOS) or **HTTP Shortcuts** (Android) — no PWA required.
+
+Send the file as a `multipart/form-data` POST with a `file` field to `POST /api/v1/share`. The server detects whether it is a PDF or an image (via magic bytes, content type or extension), stages it under a random token, and responds with a `302` redirect to `/?share=<token>&type=<pdf|image>`. Opening that URL loads the file into the matching tab (PDF or Image), ready to print with a single tap.
+
+```bash
+curl -i -F "file=@label.pdf" http://localhost:5000/api/v1/share
+# -> 302 Location: /?share=<token>&type=pdf
+```
+
+On a phone, create a Shortcut that takes the shared file and performs a "Get contents of URL" `POST` to `http://<host>:5000/api/v1/share` with the file as a form field named `file`, then opens the returned URL.
+
+Staged files live in `uploads/shared/` and are automatically removed after `SHARE_TTL_SECONDS` (default `3600`, i.e. 1 hour).
+
+## 🧪 Demo on GitHub Pages
+
+The UI is a static single-page app, so it can be published to GitHub Pages as an interactive demo. A bundled demo layer (`src/static/js/demo.js`) activates automatically on a `*.github.io` host (or locally with `?demo` in the URL) and mocks the entire API with sample data — settings populate, the queue is pre-filled, printing is simulated and previews use the fast client-side render. Nothing is sent to a real printer.
+
+To deploy it, enable **Pages → Source: GitHub Actions** in the repository settings; the included `.github/workflows/pages.yml` workflow publishes `src/static/` on every push to `main`. PDF printing is disabled in the demo because it requires the local backend.
+
+> **Note:** The demo only showcases the interface. Actual printing always needs the Python backend running on the same network as the printer — a browser cannot talk to the printer directly.
 
 ## 📝 License
 

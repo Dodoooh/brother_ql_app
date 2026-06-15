@@ -16,6 +16,7 @@ from src.utils.pillow_patch import apply_pillow_patch
 from src.utils.auth import auth_enabled, is_valid_api_key, API_KEY_HEADER
 from src.services.printer_service import printer_service
 from src.services.settings_service import settings_service
+from src.services.queue_service import print_queue
 
 # Configure structured logging
 structlog.configure(
@@ -146,6 +147,9 @@ def create_app():
 
     # Register routes
     register_routes(app)
+
+    # Start the in-process print-queue worker thread (idempotent).
+    print_queue.start()
 
     # Start the keep-alive feature (if enabled in settings)
     init_keep_alive()

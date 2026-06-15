@@ -13,8 +13,10 @@ from werkzeug.utils import secure_filename
 from flask import request, current_app
 
 from src.services.printer_service import printer_service
+from src.services.queue_service import print_queue
 from src.services.pdf_renderer import render_pdf_thumbnails
-from src.utils.exceptions import ValidationError, PrinterError
+from src.utils.exceptions import ValidationError, PrinterError, ConfirmationRequiredError
+from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 
 logger = structlog.get_logger()
 
@@ -72,17 +74,41 @@ def print_pdf() -> Dict[str, Any]:
         if scale_mode not in ('fit', 'fill'):
             raise ValidationError("scale_mode must be 'fit' or 'fill'", "scale_mode")
 
-        # Save uploaded PDF
-        pdf_path = _save_uploaded_file(pdf_file)
-        logger.info("PDF saved", path=pdf_path)
+        # Large batches require explicit confirmation before enqueuing.
+        enforce_large_batch_confirmation(
+            settings.get("copies", 1), is_confirmed(request.form.get("confirm_large_batch"))
+        )
 
-        try:
-            result = printer_service.print_pdf(pdf_path, settings, pages, scale_mode)
-            return result
-        finally:
-            # Only remove the upload we saved here; render artifacts are
-            # handled by the printer service.
-            _cleanup_uploaded_file(pdf_path)
+        # Persist the uploaded PDF under uploads/jobs/ so it survives the print
+        # and is available for reprint/open. TTL cleanup in the queue service
+        # removes it later -- the job no longer deletes it.
+        stored_path = _save_persistent_file(pdf_file)
+        logger.info("PDF saved", path=stored_path)
+
+        # Enqueue the print job. The job prints from the persistent path and
+        # does NOT delete it; TTL cleanup handles removal. Default args bind
+        # the current path/settings/pages to avoid late-binding in the closure.
+        def job(path=stored_path, s=settings, p=pages, mode=scale_mode):
+            printer_service.print_pdf(path, s, p, mode)
+
+        original_name = pdf_file.filename or "PDF"
+        name = secure_filename(pdf_file.filename or "") or "PDF"
+        label = "PDF: " + name + (f" ({pages})" if pages else "")
+        params = {
+            "type": "pdf",
+            "filename": original_name,
+            "pages": pages,
+            "scale_mode": scale_mode,
+            "settings": settings,
+        }
+        job_id = print_queue.submit(
+            "pdf", label, job, params=params, file_path=stored_path
+        )
+        logger.info("PDF print job queued", job_id=job_id, path=stored_path)
+
+        return {"success": True, "job_id": job_id, "message": "Print job queued"}
+    except ConfirmationRequiredError:
+        raise
     except (ValidationError, ValueError) as e:
         logger.warning("Validation error printing PDF", error=str(e))
         if isinstance(e, ValidationError):
@@ -180,6 +206,9 @@ def _save_uploaded_file(file: FileStorage) -> str:
     """
     Save an uploaded file to the upload folder under a UUID-based name.
 
+    Used by the preview endpoint, which stores the PDF in a throwaway temp
+    location and cleans it up itself.
+
     Args:
         file: The uploaded file.
 
@@ -197,6 +226,33 @@ def _save_uploaded_file(file: FileStorage) -> str:
     os.makedirs(upload_folder, exist_ok=True)
 
     file_path = os.path.join(upload_folder, filename)
+    file.save(file_path)
+
+    return file_path
+
+
+def _save_persistent_file(file: FileStorage) -> str:
+    """
+    Save an uploaded PDF persistently under the uploads/jobs/ subfolder.
+
+    Queued print jobs keep their file around for reprint/open until the queue
+    service's TTL cleanup removes it; unlike the preview temp, it is not
+    deleted by the controller.
+
+    Args:
+        file: The uploaded file.
+
+    Returns:
+        Path to the saved file.
+    """
+    safe_name = secure_filename(file.filename or "")
+    extension = os.path.splitext(safe_name)[1] or ".pdf"
+    filename = f"{uuid.uuid4().hex}{extension}"
+
+    jobs_folder = os.path.join(_get_upload_folder(), "jobs")
+    os.makedirs(jobs_folder, exist_ok=True)
+
+    file_path = os.path.join(jobs_folder, filename)
     file.save(file_path)
 
     return file_path

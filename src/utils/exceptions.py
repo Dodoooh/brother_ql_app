@@ -66,6 +66,25 @@ class ValidationError(AppError):
         super().__init__(message, "VALIDATION_ERROR", details)
 
 
+class ConfirmationRequiredError(AppError):
+    """Exception raised when a large print batch needs explicit confirmation."""
+
+    def __init__(self, copies, threshold: int = 10, details: dict = None):
+        """
+        Initialize the exception.
+
+        Args:
+            copies: Number of copies the request would print.
+            threshold: Copy count at/above which confirmation is required.
+            details: Additional error details.
+        """
+        details = details or {}
+        details.update({"copies": copies, "threshold": threshold, "field": "confirm_large_batch"})
+        super().__init__(
+            f"Printing {copies} copies requires confirmation. Resend with confirm_large_batch=true.",
+            "CONFIRMATION_REQUIRED", details)
+
+
 class ResourceNotFoundError(AppError):
     """Exception raised when a requested resource is not found."""
     

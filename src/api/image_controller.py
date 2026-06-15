@@ -14,7 +14,9 @@ from flask import request, current_app
 from PIL import Image, UnidentifiedImageError
 
 from src.services.printer_service import printer_service
-from src.utils.exceptions import ValidationError, PrinterError, ImageProcessingError, ResourceNotFoundError
+from src.services.queue_service import print_queue
+from src.utils.exceptions import ValidationError, PrinterError, ImageProcessingError, ResourceNotFoundError, ConfirmationRequiredError
+from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 
 logger = structlog.get_logger()
 
@@ -52,30 +54,47 @@ def print_image() -> Dict[str, Any]:
         for setting in required_settings:
             if setting not in settings:
                 raise ValidationError(f"{setting} is required", f"settings.{setting}")
-        
-        # Save uploaded image
-        image_path = _save_uploaded_file(image_file)
-        logger.info("Image saved", path=image_path)
 
+        # Large batches require explicit confirmation before enqueuing.
+        enforce_large_batch_confirmation(
+            settings.get("copies", 1), is_confirmed(request.form.get("confirm_large_batch"))
+        )
+
+        # Persist the uploaded image under uploads/jobs/ so it survives the
+        # print and is available for reprint/open. TTL cleanup in the queue
+        # service removes it later -- the job no longer deletes it.
+        stored_path = _save_uploaded_file(image_file)
+        logger.info("Image saved", path=stored_path)
+
+        # Verify the uploaded file is actually a decodable image before
+        # enqueuing it. Image.verify() consumes the file object, so we
+        # re-open for each step. On rejection we clean up the just-saved file
+        # immediately, since nothing was queued.
         try:
-            # Verify the uploaded file is actually a decodable image before
-            # handing it to the printer service. Image.verify() consumes the
-            # file object, so we re-open for each step.
-            try:
-                with Image.open(image_path) as img:
-                    img.verify()
-            except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
-                logger.warning("Rejected non-image or invalid upload", error=str(e))
-                raise ValidationError("Uploaded file is not a valid image", "image")
+            with Image.open(stored_path) as img:
+                img.verify()
+        except (UnidentifiedImageError, OSError, Image.DecompressionBombError) as e:
+            logger.warning("Rejected non-image or invalid upload", error=str(e))
+            _cleanup_uploaded_file(stored_path)
+            raise ValidationError("Uploaded file is not a valid image", "image")
 
-            # Print image
-            result = printer_service.print_image(image_path, settings)
+        # Enqueue the print job. The job prints from the persistent path and
+        # does NOT delete it; TTL cleanup handles removal. Default args bind
+        # the current path/settings to avoid late-binding in the closure.
+        def job(path=stored_path, s=settings):
+            printer_service.print_image(path, s)
 
-            return result
-        finally:
-            # Clean up only the upload we saved in this controller. Render
-            # artifacts produced by printer_service are handled elsewhere.
-            _cleanup_uploaded_file(image_path)
+        original_name = image_file.filename or "Image"
+        label = secure_filename(image_file.filename or "") or "Image"
+        params = {"type": "image", "filename": original_name, "settings": settings}
+        job_id = print_queue.submit(
+            "image", label, job, params=params, file_path=stored_path
+        )
+        logger.info("Image print job queued", job_id=job_id, path=stored_path)
+
+        return {"success": True, "job_id": job_id, "message": "Print job queued"}
+    except ConfirmationRequiredError:
+        raise
     except ValidationError as e:
         logger.error("Validation error", error=str(e), exc_info=True)
         raise
@@ -114,16 +133,13 @@ def _save_uploaded_file(file: FileStorage) -> str:
     extension = os.path.splitext(safe_name)[1]
     filename = f"{uuid.uuid4().hex}{extension}"
 
-    # Resolve the upload folder from the single source of truth
-    # (printer_service.upload_folder, which honours the UPLOAD_FOLDER env var).
-    # Prefer the app config when available so the two stay consistent.
-    upload_folder = _get_upload_folder()
-
-    # Ensure upload folder exists
-    os.makedirs(upload_folder, exist_ok=True)
+    # Persist into the uploads/jobs/ subfolder so queued jobs keep their file
+    # around for reprint/open until the queue service's TTL cleanup removes it.
+    jobs_folder = os.path.join(_get_upload_folder(), "jobs")
+    os.makedirs(jobs_folder, exist_ok=True)
 
     # Save the file
-    file_path = os.path.join(upload_folder, filename)
+    file_path = os.path.join(jobs_folder, filename)
     file.save(file_path)
 
     return file_path

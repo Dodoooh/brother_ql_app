@@ -1,0 +1,51 @@
+# Deploy the static demo UI (src/static/) to GitHub Pages.
+#
+# GitHub Pages serves only static files, so the bundled demo layer in
+# js/demo.js detects the *.github.io host and serves all /api/v1 calls from an
+# in-memory mock — letting the interface run fully interactive without the
+# Python backend.
+
+name: Deploy demo to GitHub Pages
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "src/static/**"
+      - ".github/workflows/pages.yml"
+
+# Allow the workflow to publish to Pages and mint the deployment id token.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; let an in-progress run finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload static UI artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: src/static
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

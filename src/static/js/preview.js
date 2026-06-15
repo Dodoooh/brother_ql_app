@@ -351,6 +351,44 @@ function handleImagePreview(event) {
 }
 
 /**
+ * Handle the Text + Image preview when an image file is selected. Reuses the
+ * shared #preview-image element to show the chosen image (always in color,
+ * since the text is rendered server-side). The placeholder/other previews are
+ * hidden while it is shown.
+ * @param {Event} event - Change event
+ */
+function handleTextImagePreview(event) {
+    const previewImage = document.getElementById('preview-image');
+    const previewPlaceholder = document.getElementById('preview-placeholder');
+
+    if (!previewImage) return;
+
+    if (event.target.files && event.target.files[0]) {
+        const reader = new FileReader();
+
+        reader.onload = function(e) {
+            previewImage.dataset.originalSrc = e.target.result;
+            previewImage.src = e.target.result;
+            previewImage.style.filter = 'none';
+            previewImage.classList.remove('d-none');
+
+            if (previewPlaceholder) previewPlaceholder.classList.add('d-none');
+            hideOtherPreviews('preview-image');
+        };
+
+        reader.readAsDataURL(event.target.files[0]);
+    } else {
+        previewImage.src = '';
+        previewImage.dataset.originalSrc = '';
+        previewImage.classList.add('d-none');
+
+        if (areAllPreviewsEmpty() && previewPlaceholder) {
+            previewPlaceholder.classList.remove('d-none');
+        }
+    }
+}
+
+/**
  * Apply image processing mode to the preview image
  * @param {HTMLImageElement} imageElement - The image element to process
  * @param {string} mode - The processing mode (color, bw, bw-dither)

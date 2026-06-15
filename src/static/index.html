@@ -46,13 +46,20 @@
                     <button class="nav-item" id="label-tab" data-bs-toggle="tab" data-bs-target="#label-panel" type="button" role="tab" aria-controls="label-panel" aria-selected="false">
                         <i class="bi bi-layout-text-sidebar"></i><span>Text&nbsp;+&nbsp;QR</span>
                     </button>
+                    <button class="nav-item" id="textimage-tab" data-bs-toggle="tab" data-bs-target="#textimage-panel" type="button" role="tab" aria-controls="textimage-panel" aria-selected="false">
+                        <i class="bi bi-card-image"></i><span>Text&nbsp;+&nbsp;Image</span>
+                    </button>
                     <button class="nav-item" id="pdf-tab" data-bs-toggle="tab" data-bs-target="#pdf-panel" type="button" role="tab" aria-controls="pdf-panel" aria-selected="false">
                         <i class="bi bi-file-earmark-pdf"></i><span>PDF</span>
                     </button>
                 </nav>
 
-                <div class="nav-label">System</div>
+                <div class="nav-label nav-label--bottom">System</div>
                 <nav class="nav-list" role="tablist">
+                    <button class="nav-item" id="queue-tab" data-bs-toggle="tab" data-bs-target="#queue-panel" type="button" role="tab" aria-controls="queue-panel" aria-selected="false">
+                        <i class="bi bi-list-task"></i><span>Queue</span>
+                        <span id="queue-badge" class="queue-badge" hidden>0</span>
+                    </button>
                     <button class="nav-item" id="settings-tab" data-bs-toggle="tab" data-bs-target="#settings-panel" type="button" role="tab" aria-controls="settings-panel" aria-selected="false">
                         <i class="bi bi-gear-fill"></i><span>Settings</span>
                     </button>
@@ -87,6 +94,10 @@
                 </div>
             </div>
             <div class="status-cluster">
+                <button id="navbar-keepalive" class="pill" title="Toggle keep alive" aria-pressed="false">
+                    <span class="dot"></span>
+                    <span id="keepalive-indicator">Keep Alive</span>
+                </button>
                 <button id="navbar-check-status" class="pill" title="Printer Status">
                     <span class="dot"></span>
                     <span id="status-indicator">Status</span>
@@ -177,6 +188,22 @@
                                         </select>
                                         <div class="hint">Preview how the image will be printed</div>
                                     </div>
+                                    <div class="print-options">
+                                        <div class="grid-2">
+                                            <div class="field">
+                                                <label class="lbl" for="copies-image">Copies <span class="hint">1–100</span></label>
+                                                <input type="number" id="copies-image" class="mono" value="1" min="1" max="100">
+                                            </div>
+                                            <div class="field">
+                                                <label class="lbl" for="cut-mode-image">Cut</label>
+                                                <select id="cut-mode-image">
+                                                    <option value="each">Cut after each label</option>
+                                                    <option value="end">Cut only at end</option>
+                                                    <option value="none">No cut</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
                                     <button type="submit" class="btn-print">
                                         <i class="bi bi-printer-fill"></i> Print Image
                                     </button>
@@ -253,6 +280,22 @@
                                             </div>
                                         </div>
                                     </div>
+                                    <div class="print-options">
+                                        <div class="grid-2">
+                                            <div class="field">
+                                                <label class="lbl" for="copies-qrcode">Copies <span class="hint">1–100</span></label>
+                                                <input type="number" id="copies-qrcode" class="mono" value="1" min="1" max="100">
+                                            </div>
+                                            <div class="field">
+                                                <label class="lbl" for="cut-mode-qrcode">Cut</label>
+                                                <select id="cut-mode-qrcode">
+                                                    <option value="each">Cut after each label</option>
+                                                    <option value="end">Cut only at end</option>
+                                                    <option value="none">No cut</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
                                     <button type="submit" class="btn-print">
                                         <i class="bi bi-printer-fill"></i> Print QR Code
                                     </button>
@@ -313,8 +356,90 @@
                                             </select>
                                         </div>
                                     </div>
+                                    <div class="print-options">
+                                        <div class="grid-2">
+                                            <div class="field">
+                                                <label class="lbl" for="copies-label">Copies <span class="hint">1–100</span></label>
+                                                <input type="number" id="copies-label" class="mono" value="1" min="1" max="100">
+                                            </div>
+                                            <div class="field">
+                                                <label class="lbl" for="cut-mode-label">Cut</label>
+                                                <select id="cut-mode-label">
+                                                    <option value="each">Cut after each label</option>
+                                                    <option value="end">Cut only at end</option>
+                                                    <option value="none">No cut</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
                                     <button type="submit" class="btn-print">
                                         <i class="bi bi-printer-fill"></i> Print Label
+                                    </button>
+                                </form>
+                            </div>
+                        </section>
+                        <div class="preview-mount"></div>
+                    </div>
+                </div>
+
+                <!-- ================= TEXT + IMAGE ================= -->
+                <div class="tab-pane fade" id="textimage-panel" role="tabpanel" aria-labelledby="textimage-tab">
+                    <div class="work-grid">
+                        <section class="panel compose-panel">
+                            <div class="panel-head">
+                                <h2>Text + Image</h2>
+                                <span class="tag">mode: text + image</span>
+                            </div>
+                            <div class="panel-body">
+                                <form id="textimage-form">
+                                    <div class="field">
+                                        <label class="lbl" for="textimage-input">Select Image</label>
+                                        <input type="file" id="textimage-input" accept="image/*">
+                                        <div class="hint">Supported: PNG, JPG, etc.</div>
+                                    </div>
+                                    <div class="field">
+                                        <label class="lbl" for="textimage-text">Text Content</label>
+                                        <textarea id="textimage-text" rows="4" placeholder="Enter text to display next to the image"></textarea>
+                                    </div>
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="textimage-font-size">Font Size</label>
+                                            <input type="number" id="textimage-font-size" class="mono" value="30" min="10" max="100">
+                                        </div>
+                                        <div class="field">
+                                            <label class="lbl" for="textimage-alignment">Alignment</label>
+                                            <select id="textimage-alignment">
+                                                <option value="left" selected>Left</option>
+                                                <option value="center">Center</option>
+                                                <option value="right">Right</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="field">
+                                        <label class="lbl" for="textimage-position">Image Position</label>
+                                        <select id="textimage-position">
+                                            <option value="right" selected>Image right</option>
+                                            <option value="left">Image left</option>
+                                        </select>
+                                    </div>
+                                    <div class="print-options">
+                                        <div class="grid-2">
+                                            <div class="field">
+                                                <label class="lbl" for="copies-textimage">Copies <span class="hint">1–100</span></label>
+                                                <input type="number" id="copies-textimage" class="mono" value="1" min="1" max="100">
+                                            </div>
+                                            <div class="field">
+                                                <label class="lbl" for="cut-mode-textimage">Cut</label>
+                                                <select id="cut-mode-textimage">
+                                                    <option value="each">Cut after each label</option>
+                                                    <option value="end">Cut only at end</option>
+                                                    <option value="none">No cut</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button type="submit" class="btn-print">
+                                        <i class="bi bi-printer-fill"></i> Print Text + Image
                                     </button>
                                 </form>
                             </div>
@@ -341,14 +466,30 @@
                                     <div class="grid-2">
                                         <div class="field">
                                             <label class="lbl" for="pdf-pages">Pages</label>
-                                            <input type="text" id="pdf-pages" class="mono" placeholder="e.g. 1-3,5 (leer = alle)">
+                                            <input type="text" id="pdf-pages" class="mono" placeholder="e.g. 1-3,5 (empty = all)">
                                         </div>
                                         <div class="field">
                                             <label class="lbl" for="pdf-scale-mode">Scale Mode</label>
                                             <select id="pdf-scale-mode">
-                                                <option value="fit" selected>Fit (Ränder)</option>
-                                                <option value="fill">Fill (zuschneiden)</option>
+                                                <option value="fit" selected>Fit (with margins)</option>
+                                                <option value="fill">Fill (crop)</option>
                                             </select>
+                                        </div>
+                                    </div>
+                                    <div class="print-options">
+                                        <div class="grid-2">
+                                            <div class="field">
+                                                <label class="lbl" for="copies-pdf">Copies <span class="hint">1–100</span></label>
+                                                <input type="number" id="copies-pdf" class="mono" value="1" min="1" max="100">
+                                            </div>
+                                            <div class="field">
+                                                <label class="lbl" for="cut-mode-pdf">Cut</label>
+                                                <select id="cut-mode-pdf">
+                                                    <option value="each">Cut after each label</option>
+                                                    <option value="end">Cut only at end</option>
+                                                    <option value="none">No cut</option>
+                                                </select>
+                                            </div>
                                         </div>
                                     </div>
                                     <button type="submit" class="btn-print">
@@ -358,6 +499,43 @@
                             </div>
                         </section>
                         <div class="preview-mount"></div>
+                    </div>
+                </div>
+
+                <!-- ================= QUEUE ================= -->
+                <div class="tab-pane fade" id="queue-panel" role="tabpanel" aria-labelledby="queue-tab">
+                    <div class="settings-wrap">
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h2>Print Queue</h2>
+                                <div class="queue-head-actions">
+                                    <span class="tag">jobs</span>
+                                    <span id="queue-paused-badge" class="queue-paused-badge" hidden>
+                                        <i class="bi bi-pause-circle-fill"></i> Queue paused
+                                    </span>
+                                    <button type="button" id="queue-pause-toggle" class="btn-ghost btn-sm">
+                                        <i class="bi bi-pause-fill"></i> Pause
+                                    </button>
+                                    <button type="button" id="queue-stop" class="btn-ghost btn-sm btn-danger-ghost">
+                                        <i class="bi bi-stop-fill"></i> Stop
+                                    </button>
+                                    <button type="button" id="queue-clear" class="btn-ghost btn-sm">
+                                        <i class="bi bi-trash3"></i> Clear finished
+                                    </button>
+                                    <button type="button" id="queue-clear-all" class="btn-ghost btn-sm btn-danger-ghost">
+                                        <i class="bi bi-x-octagon"></i> Clear all
+                                    </button>
+                                </div>
+                            </div>
+                            <div class="panel-body">
+                                <div id="queue-list" class="queue-list">
+                                    <div class="queue-empty">
+                                        <i class="bi bi-inbox"></i>
+                                        <p>No print jobs yet</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
                     </div>
                 </div>
 
@@ -507,6 +685,28 @@
                                         </div>
                                     </div>
 
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="keep-alive-mode">Keep Alive Mode</label>
+                                            <select id="keep-alive-mode">
+                                                <option value="forever">Forever</option>
+                                                <option value="timed">For a set time after each print</option>
+                                            </select>
+                                            <div class="hint">Forever keeps the printer awake continuously</div>
+                                        </div>
+                                        <div class="field" id="keep-alive-duration-field">
+                                            <label class="lbl" for="keep-alive-duration-value">Duration</label>
+                                            <div class="grid-2">
+                                                <input type="number" id="keep-alive-duration-value" class="mono" value="2" min="0">
+                                                <select id="keep-alive-duration-unit">
+                                                    <option value="minutes">Minutes</option>
+                                                    <option value="hours" selected>Hours</option>
+                                                </select>
+                                            </div>
+                                            <div class="hint">How long to stay awake after each print</div>
+                                        </div>
+                                    </div>
+
                                     <div class="settings-actions">
                                         <button type="submit" class="btn-print">
                                             <i class="bi bi-save"></i> Save Settings
@@ -570,11 +770,31 @@
         </div>
     </div>
 
+    <!-- Confirm Modal -->
+    <div class="modal fade" id="confirmModal" tabindex="-1" aria-labelledby="confirmModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="confirmModalLabel">Confirm</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+                    <p id="confirm-message">Are you sure?</p>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="confirm-cancel">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="confirm-ok">Confirm</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Notifications Container -->
     <div id="notifications" class="notifications"></div>
 
     <!-- Scripts -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="js/demo.js"></script>
     <script src="js/utils.js"></script>
     <script src="js/preview.js"></script>
     <script src="js/api.js"></script>

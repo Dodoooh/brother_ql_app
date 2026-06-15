@@ -4,7 +4,7 @@ info:
   description: |
     API for controlling Brother QL label printers, enabling customizable text and image printing.
     This API allows for printing formatted text and images on labels with various settings.
-  version: 3.1.0
+  version: 4.0.0-dev
   contact:
     name: Brother QL Printer App Support
     url: https://github.com/dodoooh/brother_ql_app/issues
@@ -32,6 +32,8 @@ tags:
     description: Server-side render-only label previews (no printing)
   - name: settings
     description: Settings management
+  - name: jobs
+    description: Print queue job status and management
 
 # Advertise the optional API-key scheme so the Swagger UI shows an "Authorize"
 # button and injects the X-API-Key header into "Try it out" calls. Actual
@@ -207,6 +209,13 @@ paths:
                   type: string
                   description: JSON string containing print settings
                   example: '{"printer_uri": "tcp://192.168.1.100", "label_size": "62"}'
+                confirm_large_batch:
+                  type: string
+                  description: >-
+                    Set to "true" to confirm large batches. Required when
+                    settings.copies >= 10, otherwise the request is rejected
+                    with code CONFIRMATION_REQUIRED.
+                  example: "true"
               required:
                 - image
       responses:
@@ -294,6 +303,13 @@ paths:
                   enum: [fit, fill]
                   default: fit
                   example: "fit"
+                confirm_large_batch:
+                  type: string
+                  description: >-
+                    Set to "true" to confirm large batches. Required when
+                    settings.copies >= 10, otherwise the request is rejected
+                    with code CONFIRMATION_REQUIRED.
+                  example: "true"
               required:
                 - file
       responses:
@@ -485,6 +501,75 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /label/text-image:
+    post:
+      summary: Print label with text and an uploaded image
+      description: >-
+        Prints a label with an uploaded image and a text block side by side.
+        The image is placed on the side selected by ``position`` (left or
+        right) and the text block on the opposite side.
+      operationId: api.text_image_controller.print_text_image
+      tags:
+        - label
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: The image file to place beside the text
+                text:
+                  type: string
+                  description: Text content to render alongside the image
+                  example: "Product: Widget XYZ"
+                font_size:
+                  type: integer
+                  description: Font size for the text
+                  default: 30
+                  example: 30
+                alignment:
+                  type: string
+                  description: Horizontal alignment of the text
+                  enum: [left, center, right]
+                  default: left
+                  example: "left"
+                position:
+                  type: string
+                  description: Position of the image relative to the text
+                  enum: [left, right]
+                  default: right
+                  example: "right"
+                settings:
+                  type: string
+                  description: JSON string containing print settings
+                  example: '{"printer_uri": "tcp://192.168.1.100", "printer_model": "QL-800", "label_size": "62"}'
+                confirm_large_batch:
+                  type: string
+                  description: >-
+                    Set to "true" to confirm large batches. Required when
+                    settings.copies >= 10, otherwise the request is rejected
+                    with code CONFIRMATION_REQUIRED.
+                  example: "true"
+              required:
+                - image
+                - text
+                - settings
+      responses:
+        '200':
+          description: Label printed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrintResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /label/preview:
     post:
       summary: Render a server-side preview of a text + QR code label
@@ -554,6 +639,305 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /jobs:
+    get:
+      summary: List print jobs
+      description: Returns the most recent print-queue jobs (newest first)
+      operationId: api.jobs_controller.list_jobs
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: List of print jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  jobs:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/JobStatus'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{job_id}:
+    get:
+      summary: Get a print job
+      description: Returns the status of a single print job
+      operationId: api.jobs_controller.get_job
+      tags:
+        - jobs
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Identifier of the print job
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Print job status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobStatus'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{job_id}/cancel:
+    post:
+      summary: Cancel a print job
+      description: Cancels a print job if it is still queued
+      operationId: api.jobs_controller.cancel_job
+      tags:
+        - jobs
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Identifier of the print job
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Cancellation result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cancelled:
+                    type: boolean
+                    description: Whether the job was cancelled (only queued jobs can be cancelled)
+                    example: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{job_id}/reprint:
+    post:
+      summary: Reprint a print job
+      description: >-
+        Re-queues a previous job's executor as a new job, reusing the same
+        inputs (and persisted file for image/pdf jobs).
+      operationId: api.jobs_controller.reprint_job
+      tags:
+        - jobs
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Identifier of the print job to reprint
+          schema:
+            type: string
+      responses:
+        '200':
+          description: New job id created for the reprint
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  job_id:
+                    type: string
+                    description: Identifier of the newly created reprint job
+                    example: "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{job_id}/file:
+    get:
+      summary: Download a print job's file
+      description: >-
+        Returns the persisted image/pdf file backing a job. Responds 404 when
+        no file is associated or it has expired (TTL sweep).
+      operationId: api.jobs_controller.get_job_file
+      tags:
+        - jobs
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Identifier of the print job
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The persisted job file
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/clear:
+    post:
+      summary: Clear finished print jobs
+      description: Removes all jobs in a terminal state (done, failed, cancelled)
+      operationId: api.jobs_controller.clear_jobs
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Number of cleared jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared:
+                    type: integer
+                    description: Number of finished jobs removed from the registry
+                    example: 3
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/clear-all:
+    post:
+      summary: Clear all print jobs
+      description: >-
+        Cancels every queued job and removes all jobs from the registry, except
+        a job that is currently printing (it is kept so its result is recorded).
+      operationId: api.jobs_controller.clear_all_jobs
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Number of cleared jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared:
+                    type: integer
+                    description: Number of jobs removed from the registry
+                    example: 5
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/{job_id}/delete:
+    post:
+      summary: Delete a print job
+      description: >-
+        Deletes a single job. A queued job is cancelled and removed; a finished
+        job is removed. A job currently printing cannot be deleted.
+      operationId: api.jobs_controller.delete_job
+      tags:
+        - jobs
+      parameters:
+        - name: job_id
+          in: path
+          required: true
+          description: Identifier of the print job to delete
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Deletion result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  removed:
+                    type: boolean
+                    description: Whether the job was removed (a printing job cannot be removed)
+                    example: true
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/queue:
+    get:
+      summary: Get print-queue control status
+      description: Returns whether the queue is paused plus queued/printing counts
+      operationId: api.jobs_controller.get_queue_status
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Queue control status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueStatus'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/pause:
+    post:
+      summary: Pause the print queue
+      description: >-
+        Pauses processing. A job already printing finishes; subsequent jobs are
+        held until the queue is resumed.
+      operationId: api.jobs_controller.pause_queue
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Queue control status after pausing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueStatus'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/resume:
+    post:
+      summary: Resume the print queue
+      description: Resumes a previously paused queue
+      operationId: api.jobs_controller.resume_queue
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Queue control status after resuming
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueStatus'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /jobs/stop:
+    post:
+      summary: Stop the print queue
+      description: >-
+        Emergency stop: pauses the queue and cancels every queued job. A job
+        currently printing still finishes.
+      operationId: api.jobs_controller.stop_queue
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Queue control status after stopping (with cancelled count)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/QueueStatus'
+                  - type: object
+                    properties:
+                      cancelled:
+                        type: integer
+                        description: Number of queued jobs cancelled by the stop
+                        example: 4
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
 components:
   # The global `security:` above references this scheme so the Swagger UI shows
   # an "Authorize" button. Actual enforcement is the Flask before_request hook
@@ -570,6 +954,92 @@ components:
         server, send the matching key in the X-API-Key header for all
         /api/v1/* requests (UI, Swagger UI and health endpoints are exempt).
   schemas:
+    JobStatus:
+      type: object
+      description: Status of a single print-queue job
+      properties:
+        id:
+          type: string
+          description: Unique job identifier (uuid hex)
+          example: "3f2a1b9c4d5e6f708192a3b4c5d6e7f8"
+        type:
+          type: string
+          description: Job type tag (e.g. text, image, qrcode, pdf, label)
+          example: "text"
+        status:
+          type: string
+          description: Current job status
+          enum:
+            - queued
+            - printing
+            - done
+            - failed
+            - cancelled
+          example: "queued"
+        label:
+          type: string
+          description: Human-readable label describing the job
+          example: "Hello World"
+        created_at:
+          type: string
+          format: date-time
+          description: ISO-8601 timestamp when the job was created
+          example: "2026-06-14T12:00:00+00:00"
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO-8601 timestamp when the job started printing (null until started)
+          example: "2026-06-14T12:00:01+00:00"
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO-8601 timestamp when the job finished (null until finished)
+          example: "2026-06-14T12:00:03+00:00"
+        error:
+          type: string
+          nullable: true
+          description: Error message when the job failed (null otherwise)
+          example: null
+        params:
+          type: object
+          additionalProperties: true
+          description: >-
+            Serializable inputs describing the job (e.g. text/settings or
+            filename/settings/pages); used to re-open or reprint the job.
+        can_reprint:
+          type: boolean
+          description: Whether a stored executor still exists so the job can be reprinted
+          example: true
+      required:
+        - id
+        - type
+        - status
+        - label
+        - created_at
+
+    QueueStatus:
+      type: object
+      description: Print-queue control status
+      properties:
+        paused:
+          type: boolean
+          description: Whether the queue is currently paused
+          example: false
+        queued:
+          type: integer
+          description: Number of jobs currently waiting in the queue
+          example: 0
+        printing:
+          type: integer
+          description: Number of jobs currently printing (0 or 1)
+          example: 0
+      required:
+        - paused
+        - queued
+        - printing
+
     KeepAliveStatus:
       type: object
       properties:
@@ -696,6 +1166,12 @@ components:
           default: "Hello World!\nThis is a test print."
         settings:
           $ref: '#/components/schemas/PrintSettings'
+        confirm_large_batch:
+          type: boolean
+          description: >-
+            Confirm large batches. Required (true) when settings.copies >= 10,
+            otherwise the request is rejected with code CONFIRMATION_REQUIRED.
+          default: false
       required:
         - text
         - settings
@@ -776,11 +1252,17 @@ components:
               maximum: 100
         settings:
           $ref: '#/components/schemas/PrintSettings'
+        confirm_large_batch:
+          type: boolean
+          description: >-
+            Confirm large batches. Required (true) when settings.copies >= 10,
+            otherwise the request is rejected with code CONFIRMATION_REQUIRED.
+          default: false
       required:
         - qr
         - text
         - settings
-        
+
     QRCodePrintRequest:
       type: object
       properties:
@@ -856,6 +1338,12 @@ components:
               default: "center"
         settings:
           $ref: '#/components/schemas/PrintSettings'
+        confirm_large_batch:
+          type: boolean
+          description: >-
+            Confirm large batches. Required (true) when settings.copies >= 10,
+            otherwise the request is rejected with code CONFIRMATION_REQUIRED.
+          default: false
       required:
         - qr
         - settings
@@ -1034,6 +1522,23 @@ components:
           default: 60
           minimum: 10
           maximum: 3600
+        keep_alive_mode:
+          type: string
+          description: >-
+            Keep-alive scheduling mode. "forever" keeps the printer awake
+            continuously; "timed" only sends pings for keep_alive_duration_seconds
+            after the most recent print, then pauses until the next print.
+          enum: [forever, timed]
+          example: forever
+          default: forever
+        keep_alive_duration_seconds:
+          type: integer
+          description: >-
+            When keep_alive_mode is "timed", how long (in seconds) to keep the
+            printer awake after each print. 0 disables the timed window.
+          example: 7200
+          default: 7200
+          minimum: 0
         ipp_port:
           type: integer
           description: >-

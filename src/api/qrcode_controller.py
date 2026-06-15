@@ -6,9 +6,19 @@ import structlog
 from typing import Dict, Any
 
 from src.services.printer_service import printer_service
-from src.utils.exceptions import ValidationError, PrinterError
+from src.services.queue_service import print_queue
+from src.utils.exceptions import ValidationError, PrinterError, ConfirmationRequiredError
+from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 
 logger = structlog.get_logger()
+
+
+def _short_label(text: str, limit: int = 40) -> str:
+    """Build a short, single-line human label for a queued job."""
+    flattened = " ".join((text or "").split())
+    if len(flattened) > limit:
+        return flattened[:limit].rstrip() + "..."
+    return flattened
 
 def print_qr_code(body: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -33,7 +43,12 @@ def print_qr_code(body: Dict[str, Any]) -> Dict[str, Any]:
         
         if not data:
             raise ValidationError("qr.data is required", "qr.data")
-        
+
+        # Large batches require explicit confirmation before enqueuing.
+        enforce_large_batch_confirmation(
+            settings.get("copies", 1), is_confirmed(body.get("confirm_large_batch"))
+        )
+
         # Prepare settings for the printer service
         combined_settings = settings.copy()
         
@@ -57,10 +72,18 @@ def print_qr_code(body: Dict[str, Any]) -> Dict[str, Any]:
                 combined_settings["text_font_size"] = text_settings.get("font_size", 30)
                 combined_settings["text_alignment"] = text_settings.get("alignment", "center")
         
-        # Print QR code
-        result = printer_service.print_qr_code(data, combined_settings)
-        
-        return result
+        # Enqueue the print job; the actual print runs later in the worker.
+        def job(data=data, settings=combined_settings):
+            printer_service.print_qr_code(data, settings)
+
+        # Parameters that allow the UI to restore the form for a reprint.
+        params = {"type": "qrcode", "data": data, "settings": combined_settings}
+        job_id = print_queue.submit("qrcode", "QR: " + _short_label(data), job, params=params)
+        logger.info("QR code print job queued", job_id=job_id)
+
+        return {"success": True, "job_id": job_id, "message": "Print job queued"}
+    except ConfirmationRequiredError:
+        raise
     except ValidationError as e:
         logger.error("Validation error", error=str(e), exc_info=True)
         raise

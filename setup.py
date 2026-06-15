@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="brother_ql_app",
-    version="3.1.0",
+    version="4.0.0.dev0",
     packages=find_packages(),
     include_package_data=True,
     # Kept in sync with requirements.txt (the authoritative dependency list).

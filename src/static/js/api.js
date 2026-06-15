@@ -1,5 +1,55 @@
 // Brother QL Printer App - API Interactions
 
+// Backend requires an explicit confirmation flag when printing this many
+// copies or more. The UI mirrors that threshold with a confirm dialog.
+const LARGE_BATCH_THRESHOLD = 10;
+
+/**
+ * Read a panel's copies value (clamped to a sane integer >= 1).
+ * @param {string} copiesId - element id of the panel's copies input
+ * @returns {number}
+ */
+function readCopies(copiesId) {
+    const el = document.getElementById(copiesId);
+    const value = parseInt(el && el.value, 10);
+    return Number.isFinite(value) && value >= 1 ? value : 1;
+}
+
+/**
+ * If the requested copies meet the large-batch threshold, ask the user to
+ * confirm. Returns true when it is safe to proceed (either below threshold or
+ * the user confirmed), false when the user cancelled.
+ * @param {number} copies
+ * @returns {Promise<boolean>}
+ */
+async function confirmLargeBatch(copies) {
+    if (copies < LARGE_BATCH_THRESHOLD) return true;
+    return confirmDialog(
+        `You are about to print ${copies} copies. Print more than 10 copies?`,
+        { title: 'Confirm large batch', confirmLabel: 'Print' }
+    );
+}
+
+/**
+ * Parse an error response body and throw an Error carrying its message. Adds a
+ * clear message when the backend reports CONFIRMATION_REQUIRED.
+ * @param {Response} response
+ */
+async function throwPrintError(response) {
+    let message = `Error: ${response.status}`;
+    try {
+        const errorData = await response.json();
+        if (response.status === 400 && errorData.code === 'CONFIRMATION_REQUIRED') {
+            throw new Error(errorData.message || 'Confirmation required for this many copies');
+        }
+        message = errorData.message || message;
+    } catch (e) {
+        if (e instanceof Error && e.message && response.status === 400) throw e;
+        // Non-JSON body: keep the generic message.
+    }
+    throw new Error(message);
+}
+
 /**
  * Load settings from the API
  */
@@ -22,12 +72,27 @@ async function loadSettings() {
         document.getElementById('threshold').value = settings.threshold || '70';
         document.getElementById('dither').value = settings.dither ? 'true' : 'false';
         document.getElementById('red').value = settings.red ? 'true' : 'false';
-        document.getElementById('copies').value = settings.copies || 1;
-        document.getElementById('cut-mode').value = settings.cut_mode || 'each';
+        // Apply the saved copies/cut defaults to every compose panel.
+        const defaultCopies = settings.copies || 1;
+        const defaultCutMode = settings.cut_mode || 'each';
+        ['copies', 'copies-image', 'copies-qrcode', 'copies-label', 'copies-pdf', 'copies-textimage'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.value = defaultCopies;
+        });
+        ['cut-mode', 'cut-mode-image', 'cut-mode-qrcode', 'cut-mode-label', 'cut-mode-pdf', 'cut-mode-textimage'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.value = defaultCutMode;
+        });
         document.getElementById('dpi-600').value = settings.dpi_600 ? 'true' : 'false';
         document.getElementById('keep-alive-enabled').value = settings.keep_alive_enabled ? 'true' : 'false';
         document.getElementById('keep-alive-interval').value = settings.keep_alive_interval || '60';
-        
+
+        // Keep alive mode + duration (derive a sensible value+unit for display)
+        document.getElementById('keep-alive-mode').value = settings.keep_alive_mode || 'forever';
+        applyKeepAliveDuration(settings.keep_alive_duration_seconds);
+        // Reflect the current mode in the duration controls' visibility/state.
+        updateKeepAliveModeUI();
+
         // Also check the current keep alive status
         loadKeepAliveStatus();
         
@@ -36,6 +101,46 @@ async function loadSettings() {
         console.error('Error loading settings:', error);
         showNotification('Error loading settings', 'error');
     }
+}
+
+/**
+ * Derive a sensible value + unit from a keep_alive_duration_seconds value and
+ * populate the duration input/unit fields. Prefers hours when the value divides
+ * evenly by 3600, otherwise falls back to minutes.
+ * @param {number} seconds
+ */
+function applyKeepAliveDuration(seconds) {
+    const valueEl = document.getElementById('keep-alive-duration-value');
+    const unitEl = document.getElementById('keep-alive-duration-unit');
+    if (!valueEl || !unitEl) return;
+
+    const total = (typeof seconds === 'number' && seconds >= 0) ? seconds : 7200;
+
+    if (total > 0 && total % 3600 === 0) {
+        valueEl.value = String(total / 3600);
+        unitEl.value = 'hours';
+    } else {
+        valueEl.value = String(Math.round(total / 60));
+        unitEl.value = 'minutes';
+    }
+}
+
+/**
+ * Toggle the visibility / disabled state of the keep-alive duration controls
+ * based on the selected keep-alive mode. The duration only applies in "timed"
+ * mode, so it is hidden + disabled in "forever" mode.
+ */
+function updateKeepAliveModeUI() {
+    const modeEl = document.getElementById('keep-alive-mode');
+    const durationField = document.getElementById('keep-alive-duration-field');
+    const valueEl = document.getElementById('keep-alive-duration-value');
+    const unitEl = document.getElementById('keep-alive-duration-unit');
+    if (!modeEl || !durationField) return;
+
+    const timed = modeEl.value === 'timed';
+    durationField.style.display = timed ? '' : 'none';
+    if (valueEl) valueEl.disabled = !timed;
+    if (unitEl) unitEl.disabled = !timed;
 }
 
 /**
@@ -49,11 +154,14 @@ async function loadKeepAliveStatus() {
         }
         
         const status = await response.json();
-        
+
+        // Reflect state in the always-visible navbar pill
+        updateKeepAlivePill(status);
+
         // Update status indicator
         const keepAliveEnabled = document.getElementById('keep-alive-enabled');
-        const statusText = status.running ? 
-            'Keep alive is active and running' : 
+        const statusText = status.running ?
+            'Keep alive is active and running' :
             'Keep alive is not running';
         
         // Add a status indicator below the keep alive controls
@@ -75,6 +183,46 @@ async function loadKeepAliveStatus() {
         console.log('Keep alive status loaded successfully', status);
     } catch (error) {
         console.error('Error loading keep alive status:', error);
+    }
+}
+
+/**
+ * Update the always-visible navbar keep-alive pill to mirror the current state.
+ * @param {{enabled?: boolean, running?: boolean}} status
+ */
+function updateKeepAlivePill(status) {
+    const pill = document.getElementById('navbar-keepalive');
+    const label = document.getElementById('keepalive-indicator');
+    if (!pill || !label) return;
+    const running = !!(status && status.running);
+    pill.classList.toggle('ka-active', running);
+    pill.setAttribute('aria-pressed', running ? 'true' : 'false');
+    pill.title = running ? 'Keep alive is running — click to turn off' : 'Keep alive is off — click to turn on';
+    label.textContent = running ? 'Keep Alive: On' : 'Keep Alive: Off';
+}
+
+/**
+ * Toggle keep alive on/off from the navbar pill. Reuses the keep-alive interval
+ * configured in Settings (falling back to 60s) and refreshes the pill afterwards.
+ */
+async function toggleKeepAliveFromNavbar() {
+    const pill = document.getElementById('navbar-keepalive');
+    if (!pill) return;
+    const turnOn = !pill.classList.contains('ka-active');
+    const intervalEl = document.getElementById('keep-alive-interval');
+    let interval = parseInt(intervalEl && intervalEl.value, 10);
+    if (!Number.isFinite(interval) || interval < 10) interval = 60;
+
+    pill.classList.add('busy');
+    try {
+        await updateKeepAlive(turnOn, interval);
+        // Keep the Settings dropdown in sync if it is present in the DOM
+        const enabledSel = document.getElementById('keep-alive-enabled');
+        if (enabledSel) enabledSel.value = turnOn ? 'true' : 'false';
+    } finally {
+        pill.classList.remove('busy');
+        // Re-sync the pill with the real server state (covers failed toggles too)
+        loadKeepAliveStatus();
     }
 }
 
@@ -226,39 +374,47 @@ async function handleTextPrint(event) {
         if (!text) {
             throw new Error('Text is required');
         }
-        
+
         if (!printerUri || !printerModel || !labelSize) {
             throw new Error('Printer settings are incomplete');
         }
-        
+
+        const copies = readCopies('copies');
+        if (!await confirmLargeBatch(copies)) return;
+
         // Show loading state
         const submitBtn = event.target.querySelector('button[type="submit"]');
         const originalBtnText = submitBtn.innerHTML;
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Printing...';
-        
+
+        const requestBody = {
+            text: text,
+            settings: {
+                printer_uri: printerUri,
+                printer_model: printerModel,
+                label_size: labelSize,
+                font_size: parseInt(fontSize),
+                alignment: alignment,
+                rotate: parseInt(rotate),
+                threshold: parseFloat(threshold),
+                dither: dither,
+                red: red,
+                copies: copies,
+                cut_mode: document.getElementById('cut-mode').value,
+                dpi_600: document.getElementById('dpi-600').value === 'true'
+            }
+        };
+        if (copies >= LARGE_BATCH_THRESHOLD) {
+            requestBody.confirm_large_batch = true;
+        }
+
         const response = await fetch('/api/v1/text/print', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
-                text: text,
-                settings: {
-                    printer_uri: printerUri,
-                    printer_model: printerModel,
-                    label_size: labelSize,
-                    font_size: parseInt(fontSize),
-                    alignment: alignment,
-                    rotate: parseInt(rotate),
-                    threshold: parseFloat(threshold),
-                    dither: dither,
-                    red: red,
-                    copies: parseInt(document.getElementById('copies').value) || 1,
-                    cut_mode: document.getElementById('cut-mode').value,
-                    dpi_600: document.getElementById('dpi-600').value === 'true'
-                }
-            })
+            body: JSON.stringify(requestBody)
         });
 
         // Reset button state
@@ -266,14 +422,14 @@ async function handleTextPrint(event) {
         submitBtn.innerHTML = originalBtnText;
 
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.message || `Error: ${response.status}`);
+            await throwPrintError(response);
         }
 
         const data = await response.json();
 
-        showNotification('Text printed successfully', 'success');
+        showNotification('Added to print queue', 'success');
         console.log('Print result:', data);
+        if (typeof refreshJobs === 'function') refreshJobs();
     } catch (error) {
         console.error('Error printing text:', error);
         showNotification(`Error printing text: ${error.message}`, 'error');
@@ -315,13 +471,16 @@ async function handleImagePrint(event) {
         if (!printerUri || !printerModel || !labelSize) {
             throw new Error('Printer settings are incomplete');
         }
-        
+
+        const copies = readCopies('copies-image');
+        if (!await confirmLargeBatch(copies)) return;
+
         // Show loading state
         const submitBtn = event.target.querySelector('button[type="submit"]');
         const originalBtnText = submitBtn.innerHTML;
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Printing...';
-        
+
         const formData = new FormData();
         formData.append('image', imageInput.files[0]);
         formData.append('settings', JSON.stringify({
@@ -332,30 +491,33 @@ async function handleImagePrint(event) {
             threshold: parseFloat(threshold),
             dither: dither,
             red: red,
-            copies: parseInt(document.getElementById('copies').value) || 1,
-            cut_mode: document.getElementById('cut-mode').value,
+            copies: copies,
+            cut_mode: document.getElementById('cut-mode-image').value,
             dpi_600: document.getElementById('dpi-600').value === 'true',
             image_mode: imageMode.value
         }));
-        
+        if (copies >= LARGE_BATCH_THRESHOLD) {
+            formData.append('confirm_large_batch', 'true');
+        }
+
         const response = await fetch('/api/v1/image/print', {
             method: 'POST',
             body: formData
         });
-        
+
         // Reset button state
         submitBtn.disabled = false;
         submitBtn.innerHTML = originalBtnText;
-        
+
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.message || `Error: ${response.status}`);
+            await throwPrintError(response);
         }
-        
+
         const data = await response.json();
-        
-        showNotification('Image printed successfully', 'success');
+
+        showNotification('Added to print queue', 'success');
         console.log('Print result:', data);
+        if (typeof refreshJobs === 'function') refreshJobs();
     } catch (error) {
         console.error('Error printing image:', error);
         showNotification(`Error printing image: ${error.message}`, 'error');
@@ -392,6 +554,9 @@ async function handlePdfPrint(event) {
         const pages = document.getElementById('pdf-pages').value;
         const scaleMode = document.getElementById('pdf-scale-mode').value;
 
+        const copies = readCopies('copies-pdf');
+        if (!await confirmLargeBatch(copies)) return;
+
         // Show loading state
         const submitBtn = event.target.querySelector('button[type="submit"]');
         const originalBtnText = submitBtn.innerHTML;
@@ -408,12 +573,15 @@ async function handlePdfPrint(event) {
             threshold: parseFloat(threshold),
             dither: dither,
             red: red,
-            copies: parseInt(document.getElementById('copies').value) || 1,
-            cut_mode: document.getElementById('cut-mode').value,
+            copies: copies,
+            cut_mode: document.getElementById('cut-mode-pdf').value,
             dpi_600: document.getElementById('dpi-600').value === 'true'
         }));
         formData.append('pages', pages);
         formData.append('scale_mode', scaleMode);
+        if (copies >= LARGE_BATCH_THRESHOLD) {
+            formData.append('confirm_large_batch', 'true');
+        }
 
         const response = await fetch('/api/v1/pdf/print', {
             method: 'POST',
@@ -425,14 +593,14 @@ async function handlePdfPrint(event) {
         submitBtn.innerHTML = originalBtnText;
 
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.message || `Error: ${response.status}`);
+            await throwPrintError(response);
         }
 
         const data = await response.json();
 
-        showNotification('PDF printed successfully', 'success');
+        showNotification('Added to print queue', 'success');
         console.log('Print result:', data);
+        if (typeof refreshJobs === 'function') refreshJobs();
     } catch (error) {
         console.error('Error printing PDF:', error);
         showNotification(`Error printing PDF: ${error.message}`, 'error');
@@ -637,13 +805,16 @@ async function handleQRCodePrint(event) {
         if (!printerUri || !printerModel || !labelSize) {
             throw new Error('Printer settings are incomplete');
         }
-        
+
+        const copies = readCopies('copies-qrcode');
+        if (!await confirmLargeBatch(copies)) return;
+
         // Show loading state
         const submitBtn = event.target.querySelector('button[type="submit"]');
         const originalBtnText = submitBtn.innerHTML;
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Printing...';
-        
+
         // Prepare request body with new API structure
         const requestBody = {
             qr: {
@@ -662,8 +833,8 @@ async function handleQRCodePrint(event) {
                 threshold: parseFloat(threshold),
                 dither: dither,
                 red: red,
-                copies: parseInt(document.getElementById('copies').value) || 1,
-                cut_mode: document.getElementById('cut-mode').value,
+                copies: copies,
+                cut_mode: document.getElementById('cut-mode-qrcode').value,
                 dpi_600: document.getElementById('dpi-600').value === 'true'
             }
         };
@@ -677,7 +848,10 @@ async function handleQRCodePrint(event) {
                 alignment: qrTextAlignment
             };
         }
-        
+        if (copies >= LARGE_BATCH_THRESHOLD) {
+            requestBody.confirm_large_batch = true;
+        }
+
         const response = await fetch('/api/v1/qrcode/print', {
             method: 'POST',
             headers: {
@@ -685,20 +859,20 @@ async function handleQRCodePrint(event) {
             },
             body: JSON.stringify(requestBody)
         });
-        
+
         // Reset button state
         submitBtn.disabled = false;
         submitBtn.innerHTML = originalBtnText;
-        
+
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.message || `Error: ${response.status}`);
+            await throwPrintError(response);
         }
-        
+
         const data = await response.json();
-        
-        showNotification('QR code printed successfully', 'success');
+
+        showNotification('Added to print queue', 'success');
         console.log('Print result:', data);
+        if (typeof refreshJobs === 'function') refreshJobs();
     } catch (error) {
         console.error('Error printing QR code:', error);
         showNotification(`Error printing QR code: ${error.message}`, 'error');
@@ -740,13 +914,16 @@ async function handleLabelPrint(event) {
         if (!printerUri || !printerModel || !labelSize) {
             throw new Error('Printer settings are incomplete');
         }
-        
+
+        const copies = readCopies('copies-label');
+        if (!await confirmLargeBatch(copies)) return;
+
         // Show loading state
         const submitBtn = event.target.querySelector('button[type="submit"]');
         const originalBtnText = submitBtn.innerHTML;
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Printing...';
-        
+
         // Prepare request body with new API structure
         const requestBody = {
             qr: {
@@ -771,11 +948,14 @@ async function handleLabelPrint(event) {
                 threshold: parseFloat(threshold),
                 dither: dither,
                 red: red,
-                copies: parseInt(document.getElementById('copies').value) || 1,
-                cut_mode: document.getElementById('cut-mode').value,
+                copies: copies,
+                cut_mode: document.getElementById('cut-mode-label').value,
                 dpi_600: document.getElementById('dpi-600').value === 'true'
             }
         };
+        if (copies >= LARGE_BATCH_THRESHOLD) {
+            requestBody.confirm_large_batch = true;
+        }
 
         const response = await fetch('/api/v1/label/text-qrcode', {
             method: 'POST',
@@ -784,23 +964,113 @@ async function handleLabelPrint(event) {
             },
             body: JSON.stringify(requestBody)
         });
-        
+
         // Reset button state
         submitBtn.disabled = false;
         submitBtn.innerHTML = originalBtnText;
-        
+
         if (!response.ok) {
-            const errorData = await response.json();
-            throw new Error(errorData.message || `Error: ${response.status}`);
+            await throwPrintError(response);
         }
         
         const data = await response.json();
         
-        showNotification('Label printed successfully', 'success');
+        showNotification('Added to print queue', 'success');
         console.log('Print result:', data);
+        if (typeof refreshJobs === 'function') refreshJobs();
     } catch (error) {
         console.error('Error printing label:', error);
         showNotification(`Error printing label: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Handle text + image print form submission
+ * @param {Event} event - Form submit event
+ */
+async function handleTextImagePrint(event) {
+    event.preventDefault();
+
+    try {
+        const imageInput = document.getElementById('textimage-input');
+        const text = document.getElementById('textimage-text').value;
+        const fontSize = document.getElementById('textimage-font-size').value;
+        const alignment = document.getElementById('textimage-alignment').value;
+        const position = document.getElementById('textimage-position').value;
+
+        if (!imageInput.files || imageInput.files.length === 0) {
+            throw new Error('No image selected');
+        }
+
+        if (!text) {
+            throw new Error('Text is required');
+        }
+
+        // Get printer settings
+        const printerUri = document.getElementById('printer-uri').value;
+        const printerModel = document.getElementById('printer-model').value;
+        const labelSize = document.getElementById('label-size').value;
+        const rotate = document.getElementById('rotate').value;
+        const threshold = document.getElementById('threshold').value;
+        const dither = document.getElementById('dither').value === 'true';
+        const red = document.getElementById('red').value === 'true';
+
+        if (!printerUri || !printerModel || !labelSize) {
+            throw new Error('Printer settings are incomplete');
+        }
+
+        const copies = readCopies('copies-textimage');
+        if (!await confirmLargeBatch(copies)) return;
+
+        // Show loading state
+        const submitBtn = event.target.querySelector('button[type="submit"]');
+        const originalBtnText = submitBtn.innerHTML;
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Printing...';
+
+        const formData = new FormData();
+        formData.append('image', imageInput.files[0]);
+        formData.append('text', text);
+        formData.append('font_size', fontSize);
+        formData.append('alignment', alignment);
+        formData.append('position', position);
+        formData.append('settings', JSON.stringify({
+            printer_uri: printerUri,
+            printer_model: printerModel,
+            label_size: labelSize,
+            rotate: parseInt(rotate),
+            threshold: parseFloat(threshold),
+            dither: dither,
+            red: red,
+            copies: copies,
+            cut_mode: document.getElementById('cut-mode-textimage').value,
+            dpi_600: document.getElementById('dpi-600').value === 'true'
+        }));
+        if (copies >= LARGE_BATCH_THRESHOLD) {
+            formData.append('confirm_large_batch', 'true');
+        }
+
+        const response = await fetch('/api/v1/label/text-image', {
+            method: 'POST',
+            body: formData
+        });
+
+        // Reset button state
+        submitBtn.disabled = false;
+        submitBtn.innerHTML = originalBtnText;
+
+        if (!response.ok) {
+            await throwPrintError(response);
+        }
+
+        const data = await response.json();
+
+        showNotification('Added to print queue', 'success');
+        console.log('Print result:', data);
+        if (typeof refreshJobs === 'function') refreshJobs();
+    } catch (error) {
+        console.error('Error printing text + image:', error);
+        showNotification(`Error printing text + image: ${error.message}`, 'error');
     }
 }
 
@@ -826,7 +1096,13 @@ async function handleSaveSettings(event) {
         const dpi600 = document.getElementById('dpi-600').value === 'true';
         const keepAliveEnabled = document.getElementById('keep-alive-enabled').value === 'true';
         const keepAliveInterval = parseInt(document.getElementById('keep-alive-interval').value);
-        
+        const keepAliveMode = document.getElementById('keep-alive-mode').value;
+        const keepAliveDurationVal = parseInt(document.getElementById('keep-alive-duration-value').value) || 0;
+        const keepAliveDurationUnit = document.getElementById('keep-alive-duration-unit').value;
+        const keepAliveDurationSeconds = keepAliveDurationUnit === 'hours'
+            ? keepAliveDurationVal * 3600
+            : keepAliveDurationVal * 60;
+
         if (!printerUri || !printerModel || !labelSize) {
             throw new Error('Printer URI, model, and label size are required');
         }
@@ -860,7 +1136,9 @@ async function handleSaveSettings(event) {
                 cut_mode: cutMode,
                 dpi_600: dpi600,
                 keep_alive_enabled: keepAliveEnabled,
-                keep_alive_interval: keepAliveInterval
+                keep_alive_interval: keepAliveInterval,
+                keep_alive_mode: keepAliveMode,
+                keep_alive_duration_seconds: keepAliveDurationSeconds
             })
         });
         
@@ -926,7 +1204,9 @@ function clearServerPreview() {
     const serverImg = document.getElementById('preview-server');
     if (serverImg) {
         serverImg.classList.add('d-none');
-        serverImg.src = '';
+        // Use removeAttribute rather than src='' — an empty src makes the
+        // browser try to load the page URL and logs a spurious ERR_INVALID_URL.
+        serverImg.removeAttribute('src');
     }
 }
 
@@ -1148,5 +1428,628 @@ async function updateKeepAlive(enabled, interval) {
     } catch (error) {
         console.error('Error updating keep alive:', error);
         showNotification(`Error updating keep alive: ${error.message}`, 'error');
+    }
+}
+
+// ===================== Print queue =====================
+//
+// The print endpoints queue jobs that are processed asynchronously. The Queue
+// panel lists those jobs, polled while it is the active tab. refreshJobs() does
+// a single GET + render; startJobsPolling()/stopJobsPolling() (in core.js)
+// control the interval.
+
+const JOB_STATUS_META = {
+    queued:    { label: 'Queued',    cls: 'queued' },
+    printing:  { label: 'Printing',  cls: 'printing' },
+    done:      { label: 'Done',      cls: 'done' },
+    failed:    { label: 'Failed',    cls: 'failed' },
+    cancelled: { label: 'Cancelled', cls: 'cancelled' }
+};
+
+/**
+ * Escape a string for safe insertion into innerHTML.
+ */
+function escapeHtml(value) {
+    if (value == null) return '';
+    return String(value)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+/**
+ * Format a timestamp into a compact relative ("12s ago") string with the
+ * absolute time as a title. Accepts ISO strings or epoch seconds/ms.
+ */
+function formatJobTime(value) {
+    if (!value) return { text: '', title: '' };
+    let date;
+    if (typeof value === 'number') {
+        date = new Date(value < 1e12 ? value * 1000 : value);
+    } else {
+        date = new Date(value);
+    }
+    if (isNaN(date.getTime())) {
+        return { text: String(value), title: String(value) };
+    }
+    const diffMs = Date.now() - date.getTime();
+    const sec = Math.round(diffMs / 1000);
+    let text;
+    if (sec < 5) {
+        text = 'just now';
+    } else if (sec < 60) {
+        text = `${sec}s ago`;
+    } else if (sec < 3600) {
+        text = `${Math.floor(sec / 60)}m ago`;
+    } else if (sec < 86400) {
+        text = `${Math.floor(sec / 3600)}h ago`;
+    } else {
+        text = `${Math.floor(sec / 86400)}d ago`;
+    }
+    return { text, title: date.toLocaleString() };
+}
+
+/**
+ * Update the sidebar badge with the number of active (queued + printing) jobs.
+ */
+function updateQueueBadge(jobs) {
+    const badge = document.getElementById('queue-badge');
+    if (!badge) return;
+    const active = jobs.filter(j => j.status === 'queued' || j.status === 'printing').length;
+    if (active > 0) {
+        badge.textContent = String(active);
+        badge.hidden = false;
+    } else {
+        badge.hidden = true;
+    }
+}
+
+// Cache of the most recently rendered jobs, keyed by id, so per-row actions
+// (e.g. Open) can read the job's `params` without an extra round-trip.
+const jobsById = {};
+
+/**
+ * Render the list of jobs into the Queue panel.
+ */
+function renderJobs(jobs) {
+    const list = document.getElementById('queue-list');
+    if (!list) return;
+
+    // Refresh the id -> job cache for action handlers.
+    for (const key in jobsById) delete jobsById[key];
+    if (Array.isArray(jobs)) {
+        jobs.forEach(job => { if (job && job.id != null) jobsById[job.id] = job; });
+    }
+
+    if (!Array.isArray(jobs) || jobs.length === 0) {
+        list.innerHTML =
+            '<div class="queue-empty">' +
+            '<i class="bi bi-inbox"></i>' +
+            '<p>No print jobs yet</p>' +
+            '</div>';
+        return;
+    }
+
+    const rows = jobs.map(job => {
+        const meta = JOB_STATUS_META[job.status] || { label: job.status || 'unknown', cls: 'queued' };
+        const time = formatJobTime(job.finished_at || job.started_at || job.created_at);
+        const spinner = job.status === 'printing'
+            ? '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> '
+            : '';
+        const cancelBtn = job.status === 'queued'
+            ? `<button type="button" class="btn-ghost btn-sm queue-cancel" data-action="cancel" data-job-id="${escapeHtml(job.id)}"><i class="bi bi-x-lg"></i> Cancel</button>`
+            : '';
+        const reprintBtns = job.can_reprint === true
+            ? `<button type="button" class="btn-ghost btn-sm queue-reprint" data-action="reprint" data-job-id="${escapeHtml(job.id)}"><i class="bi bi-arrow-clockwise"></i> Reprint</button>` +
+              `<button type="button" class="btn-ghost btn-sm queue-open" data-action="open" data-job-id="${escapeHtml(job.id)}"><i class="bi bi-box-arrow-up-right"></i> Open</button>`
+            : '';
+        // Delete is available for any job that is not currently printing.
+        const deleteBtn = job.status !== 'printing'
+            ? `<button type="button" class="btn-ghost btn-sm queue-delete" data-action="delete" data-job-id="${escapeHtml(job.id)}" data-job-status="${escapeHtml(job.status || '')}" title="Delete job"><i class="bi bi-trash3"></i></button>`
+            : '';
+        const errorRow = (job.status === 'failed' && job.error)
+            ? `<div class="queue-error">${escapeHtml(job.error)}</div>`
+            : '';
+
+        return (
+            `<div class="queue-item">` +
+                `<div class="queue-item-main">` +
+                    `<span class="queue-status ${meta.cls}">${spinner}${escapeHtml(meta.label)}</span>` +
+                    `<span class="queue-type">${escapeHtml(job.type || '')}</span>` +
+                    `<span class="queue-label" title="${escapeHtml(job.label || '')}">${escapeHtml(job.label || '—')}</span>` +
+                    `<span class="queue-time" title="${escapeHtml(time.title)}">${escapeHtml(time.text)}</span>` +
+                    `<span class="queue-actions">${reprintBtns}${cancelBtn}${deleteBtn}</span>` +
+                `</div>` +
+                errorRow +
+            `</div>`
+        );
+    });
+
+    list.innerHTML = rows.join('');
+}
+
+/**
+ * Fetch the current jobs and render them. Also refreshes the sidebar badge.
+ */
+async function refreshJobs() {
+    try {
+        const response = await fetch('/api/v1/jobs');
+        if (!response.ok) {
+            throw new Error(`Failed to load jobs: ${response.status}`);
+        }
+        const data = await response.json();
+        const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+        renderJobs(jobs);
+        updateQueueBadge(jobs);
+    } catch (error) {
+        console.error('Error loading jobs:', error);
+    }
+    // Keep the queue control state (pause/resume + paused badge) in sync,
+    // folded into the same poll so we don't add a second fast interval.
+    refreshQueueState();
+}
+
+/**
+ * Reflect the queue control state (paused/running) in the header controls: the
+ * Pause/Resume toggle's label + icon and the "Queue paused" badge.
+ * @param {{paused?: boolean}} state
+ */
+function applyQueueState(state) {
+    const paused = !!(state && state.paused);
+
+    const toggle = document.getElementById('queue-pause-toggle');
+    if (toggle) {
+        toggle.innerHTML = paused
+            ? '<i class="bi bi-play-fill"></i> Resume'
+            : '<i class="bi bi-pause-fill"></i> Pause';
+        toggle.setAttribute('aria-pressed', paused ? 'true' : 'false');
+        toggle.title = paused ? 'Resume the queue' : 'Pause the queue';
+    }
+
+    const badge = document.getElementById('queue-paused-badge');
+    if (badge) badge.hidden = !paused;
+}
+
+/**
+ * Fetch the current queue control state (paused/queued/printing counts) and
+ * reflect it in the header controls. Folded into the polling loop alongside
+ * refreshJobs so it stays in sync without a second fast interval.
+ */
+async function refreshQueueState() {
+    try {
+        const response = await fetch('/api/v1/jobs/queue');
+        if (!response.ok) {
+            throw new Error(`Failed to load queue state: ${response.status}`);
+        }
+        const state = await response.json();
+        applyQueueState(state);
+    } catch (error) {
+        console.error('Error loading queue state:', error);
+    }
+}
+
+/**
+ * Toggle the queue between paused and running, then refresh state + list.
+ * Reads the current state from the toggle button's aria-pressed flag.
+ */
+async function toggleQueuePause() {
+    const toggle = document.getElementById('queue-pause-toggle');
+    const paused = toggle && toggle.getAttribute('aria-pressed') === 'true';
+    const endpoint = paused ? 'resume' : 'pause';
+    try {
+        const response = await fetch(`/api/v1/jobs/${endpoint}`, { method: 'POST' });
+        if (!response.ok) {
+            throw new Error(`Error: ${response.status}`);
+        }
+        const state = await response.json();
+        applyQueueState(state);
+        showNotification(paused ? 'Queue resumed' : 'Queue paused', 'success');
+    } catch (error) {
+        console.error('Error toggling queue:', error);
+        showNotification(`Error toggling queue: ${error.message}`, 'error');
+        refreshQueueState();
+    } finally {
+        refreshJobs();
+    }
+}
+
+/**
+ * Stop the queue: pause it and cancel all waiting jobs. Confirms first, then
+ * surfaces how many jobs were cancelled.
+ */
+async function stopQueue() {
+    const confirmed = await confirmDialog(
+        'Stop the queue and cancel all waiting jobs?',
+        { title: 'Stop queue', confirmLabel: 'Stop' }
+    );
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch('/api/v1/jobs/stop', { method: 'POST' });
+        if (!response.ok) {
+            throw new Error(`Error: ${response.status}`);
+        }
+        const data = await response.json();
+        applyQueueState(data);
+        const n = data.cancelled || 0;
+        showNotification(`Stopped — ${n} job${n === 1 ? '' : 's'} cancelled`, 'success');
+    } catch (error) {
+        console.error('Error stopping queue:', error);
+        showNotification(`Error stopping queue: ${error.message}`, 'error');
+        refreshQueueState();
+    } finally {
+        refreshJobs();
+    }
+}
+
+/**
+ * Clear ALL jobs (including waiting ones): cancels every queued job and removes
+ * all jobs except one that may currently be printing. Confirms first.
+ */
+async function clearAllJobs() {
+    const confirmed = await confirmDialog(
+        'Delete ALL jobs, including waiting ones?',
+        { title: 'Clear all', confirmLabel: 'Delete all' }
+    );
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch('/api/v1/jobs/clear-all', { method: 'POST' });
+        if (!response.ok) {
+            throw new Error(`Error: ${response.status}`);
+        }
+        const data = await response.json();
+        const n = data.cleared || 0;
+        showNotification(`Cleared ${n} job${n === 1 ? '' : 's'}`, 'success');
+    } catch (error) {
+        console.error('Error clearing all jobs:', error);
+        showNotification(`Error clearing all jobs: ${error.message}`, 'error');
+    } finally {
+        refreshJobs();
+    }
+}
+
+/**
+ * Delete a single job (queued OR finished). A queued job is confirmed first; an
+ * already-finished job is deleted without a prompt to keep it quick. A printing
+ * job cannot be deleted (the server returns removed:false).
+ * @param {string} jobId
+ * @param {string} status - the job's current status (for the confirm decision)
+ */
+async function deleteJob(jobId, status) {
+    if (status === 'queued') {
+        const confirmed = await confirmDialog('Delete this waiting job?', {
+            title: 'Delete job',
+            confirmLabel: 'Delete'
+        });
+        if (!confirmed) return;
+    }
+
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/delete`, {
+            method: 'POST'
+        });
+        if (!response.ok) {
+            throw new Error(`Error: ${response.status}`);
+        }
+        const data = await response.json();
+        if (!data.removed) {
+            showNotification('Job could not be deleted', 'warning');
+        }
+    } catch (error) {
+        console.error('Error deleting job:', error);
+        showNotification(`Error deleting job: ${error.message}`, 'error');
+    } finally {
+        refreshJobs();
+    }
+}
+
+/**
+ * Cancel a queued job, then refresh the list.
+ * @param {string} jobId
+ */
+async function cancelJob(jobId) {
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, {
+            method: 'POST'
+        });
+        if (!response.ok) {
+            throw new Error(`Error: ${response.status}`);
+        }
+        const data = await response.json();
+        if (data.cancelled) {
+            showNotification('Job cancelled', 'success');
+        } else {
+            showNotification('Job could not be cancelled', 'warning');
+        }
+    } catch (error) {
+        console.error('Error cancelling job:', error);
+        showNotification(`Error cancelling job: ${error.message}`, 'error');
+    } finally {
+        refreshJobs();
+    }
+}
+
+/**
+ * Show a Bootstrap confirmation dialog and resolve to true/false based on the
+ * user's choice. Falls back to a native confirm() if Bootstrap or the modal
+ * markup is unavailable.
+ * @param {string} message - The question shown to the user.
+ * @param {Object} [options]
+ * @param {string} [options.title] - Modal title.
+ * @param {string} [options.confirmLabel] - Confirm button label.
+ * @returns {Promise<boolean>}
+ */
+function confirmDialog(message, options = {}) {
+    const modalEl = document.getElementById('confirmModal');
+    if (!modalEl || !(window.bootstrap && bootstrap.Modal)) {
+        return Promise.resolve(window.confirm(message));
+    }
+
+    return new Promise(resolve => {
+        const messageEl = document.getElementById('confirm-message');
+        const okBtn = document.getElementById('confirm-ok');
+        const titleEl = document.getElementById('confirmModalLabel');
+
+        if (messageEl) messageEl.textContent = message;
+        if (titleEl) titleEl.textContent = options.title || 'Confirm';
+        if (okBtn) okBtn.textContent = options.confirmLabel || 'Confirm';
+
+        const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
+        let confirmed = false;
+
+        const onOk = () => {
+            confirmed = true;
+            modal.hide();
+        };
+        const onHidden = () => {
+            if (okBtn) okBtn.removeEventListener('click', onOk);
+            modalEl.removeEventListener('hidden.bs.modal', onHidden);
+            resolve(confirmed);
+        };
+
+        if (okBtn) okBtn.addEventListener('click', onOk);
+        modalEl.addEventListener('hidden.bs.modal', onHidden);
+        modal.show();
+    });
+}
+
+/**
+ * Re-queue a previous job for printing via its persisted params, then refresh.
+ * Asks the user to confirm before re-queuing.
+ * @param {string} jobId
+ */
+async function reprintJob(jobId) {
+    const confirmed = await confirmDialog('Really reprint this job?', {
+        title: 'Reprint Job',
+        confirmLabel: 'Reprint'
+    });
+    if (!confirmed) return;
+
+    try {
+        const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/reprint`, {
+            method: 'POST'
+        });
+        if (!response.ok) {
+            let message = `Error: ${response.status}`;
+            try {
+                const errorData = await response.json();
+                message = errorData.message || message;
+            } catch (e) { /* non-JSON body */ }
+            throw new Error(message);
+        }
+        showNotification('Re-queued for printing', 'success');
+    } catch (error) {
+        console.error('Error re-printing job:', error);
+        showNotification(`Error re-printing job: ${error.message}`, 'error');
+    } finally {
+        refreshJobs();
+    }
+}
+
+/**
+ * Helper: set a form field's value if the element exists.
+ */
+function setFieldValue(id, value) {
+    const el = document.getElementById(id);
+    if (el && value != null) el.value = value;
+}
+
+/**
+ * Helper: set a select rendered as a boolean ('true'/'false') if the element
+ * exists and the value is a boolean.
+ */
+function setBoolField(id, value) {
+    if (typeof value !== 'boolean') return;
+    const el = document.getElementById(id);
+    if (el) el.value = value ? 'true' : 'false';
+}
+
+/**
+ * Populate the shared printer/render settings fields from a settings object.
+ * Robust against missing fields and missing settings.
+ */
+function applySettingsToForm(settings) {
+    if (!settings || typeof settings !== 'object') return;
+    setFieldValue('printer-uri', settings.printer_uri);
+    setFieldValue('printer-model', settings.printer_model);
+    setFieldValue('label-size', settings.label_size);
+    setFieldValue('rotate', settings.rotate != null ? String(settings.rotate) : null);
+    setFieldValue('threshold', settings.threshold != null ? String(settings.threshold) : null);
+    setBoolField('dither', settings.dither);
+    setBoolField('red', settings.red);
+    setFieldValue('copies', settings.copies != null ? String(settings.copies) : null);
+    setFieldValue('cut-mode', settings.cut_mode);
+    setBoolField('dpi-600', settings.dpi_600);
+}
+
+/**
+ * Activate a compose tab by its trigger button id (Bootstrap Tab + click
+ * fallback) and close the mobile drawer if present.
+ */
+function activateComposeTab(tabId) {
+    const tabBtn = document.getElementById(tabId);
+    if (tabBtn) {
+        if (window.bootstrap && bootstrap.Tab) {
+            new bootstrap.Tab(tabBtn).show();
+        } else {
+            tabBtn.click();
+        }
+    }
+    // Close the off-canvas drawer on mobile.
+    const rail = document.getElementById('rail');
+    if (rail && rail.classList.contains('open') &&
+        window.matchMedia('(max-width: 768px)').matches) {
+        rail.classList.remove('open');
+        const railScrim = document.getElementById('rail-scrim');
+        if (railScrim) railScrim.hidden = true;
+        const railToggle = document.getElementById('rail-toggle');
+        if (railToggle) railToggle.setAttribute('aria-expanded', 'false');
+    }
+}
+
+/**
+ * Helper: dispatch an event on a field if it exists.
+ */
+function dispatchOn(id, eventName) {
+    const el = document.getElementById(id);
+    if (el) el.dispatchEvent(new Event(eventName, { bubbles: true }));
+}
+
+/**
+ * Load a persisted job's params back into the matching compose form and switch
+ * to its tab so the user only needs to press "Print". For image/pdf jobs the
+ * persisted file is fetched from the server.
+ * @param {string} jobId
+ */
+async function openJob(jobId) {
+    let job = jobsById[jobId];
+
+    // Fall back to a fresh fetch if the job (or its params) is not cached.
+    if (!job || !job.params) {
+        try {
+            const response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+            if (response.ok) {
+                job = await response.json();
+            }
+        } catch (e) {
+            console.error('Error loading job:', e);
+        }
+    }
+
+    if (!job || !job.params) {
+        showNotification('Job details are no longer available', 'error');
+        return;
+    }
+
+    const params = job.params;
+    const type = params.type;
+    const settings = params.settings || {};
+
+    try {
+        if (type === 'text') {
+            applySettingsToForm(settings);
+            setFieldValue('text-input', params.text);
+            setFieldValue('text-font-size', settings.font_size != null ? String(settings.font_size) : null);
+            setFieldValue('text-alignment', settings.alignment);
+            activateComposeTab('text-tab');
+            dispatchOn('text-input', 'input');
+        } else if (type === 'qrcode') {
+            applySettingsToForm(settings);
+            setFieldValue('qr-data', params.data);
+            setFieldValue('qr-size', settings.size != null ? String(settings.size) : null);
+            setFieldValue('qr-error-correction', settings.error_correction);
+            activateComposeTab('qrcode-tab');
+            dispatchOn('qr-data', 'input');
+        } else if (type === 'label') {
+            applySettingsToForm(settings);
+            setFieldValue('label-text-content', params.text);
+            setFieldValue('label-qr-data', params.data);
+            setFieldValue('label-text-font-size', settings.font_size != null ? String(settings.font_size) : null);
+            setFieldValue('label-text-alignment', settings.alignment);
+            setFieldValue('label-qr-position', settings.qr_position);
+            setFieldValue('label-qr-error-correction', settings.error_correction);
+            activateComposeTab('label-tab');
+            dispatchOn('label-text-content', 'input');
+        } else if (type === 'image') {
+            applySettingsToForm(settings);
+            setFieldValue('image-mode', settings.image_mode);
+            const loaded = await loadJobFileIntoInput(jobId, 'image-input', params.filename || 'reprint-image');
+            if (!loaded) return;
+            activateComposeTab('image-tab');
+            dispatchOn('image-input', 'change');
+        } else if (type === 'pdf') {
+            applySettingsToForm(settings);
+            setFieldValue('pdf-pages', params.pages);
+            setFieldValue('pdf-scale-mode', params.scale_mode);
+            const loaded = await loadJobFileIntoInput(jobId, 'pdf-input', params.filename || 'reprint.pdf');
+            if (!loaded) return;
+            activateComposeTab('pdf-tab');
+            dispatchOn('pdf-input', 'change');
+        } else {
+            showNotification('Unsupported job type', 'error');
+            return;
+        }
+    } catch (error) {
+        console.error('Error opening job:', error);
+        showNotification(`Error opening job: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Fetch a job's persisted file and place it into the given file input via a
+ * DataTransfer. Returns true on success, false on failure (e.g. expired file).
+ * @param {string} jobId
+ * @param {string} inputId
+ * @param {string} fileName
+ */
+async function loadJobFileIntoInput(jobId, inputId, fileName) {
+    const input = document.getElementById(inputId);
+    if (!input) return false;
+
+    let response;
+    try {
+        response = await fetch(`/api/v1/jobs/${encodeURIComponent(jobId)}/file`);
+    } catch (e) {
+        showNotification('File no longer available (expired)', 'error');
+        return false;
+    }
+
+    if (response.status === 404) {
+        showNotification('File no longer available (expired)', 'error');
+        return false;
+    }
+    if (!response.ok) {
+        showNotification('File no longer available (expired)', 'error');
+        return false;
+    }
+
+    const blob = await response.blob();
+    const file = new File([blob], fileName, { type: blob.type });
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    input.files = dt.files;
+    return true;
+}
+
+/**
+ * Clear all finished jobs (done/failed/cancelled) from the queue.
+ */
+async function clearFinishedJobs() {
+    try {
+        const response = await fetch('/api/v1/jobs/clear', { method: 'POST' });
+        if (!response.ok) {
+            throw new Error(`Error: ${response.status}`);
+        }
+        const data = await response.json();
+        const n = data.cleared || 0;
+        showNotification(`Cleared ${n} finished job${n === 1 ? '' : 's'}`, 'success');
+    } catch (error) {
+        console.error('Error clearing jobs:', error);
+        showNotification(`Error clearing jobs: ${error.message}`, 'error');
+    } finally {
+        refreshJobs();
     }
 }

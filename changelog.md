@@ -5,6 +5,46 @@ All notable changes to the Brother QL Printer App will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking Changes
+- **Printing is now asynchronous (print queue).** The print endpoints (`/text/print`, `/image/print`, `/qrcode/print`, `/label/text-qrcode`, `/label/text-image`, `/pdf/print`) now enqueue the job and return **immediately**. The response shape is unchanged (`{ "success": true, "job_id": "...", "message": "..." }`), but its meaning changed:
+  - `success: true` now means **"queued"**, not "printed".
+  - A print **failure** no longer comes back as an HTTP error on the print call — the call still returns `200`, and the failure surfaces later as the job's status (`failed`).
+  - The `message` text changed (e.g. `"Print job queued"` instead of `"Text printed successfully"`).
+  - *Migration:* to confirm the actual print result, poll `GET /api/v1/jobs/{job_id}` and check `status` (`done` / `failed`). Fire-and-forget clients that do not inspect the result need no change.
+- **Large batches require explicit confirmation.** Any print request for **10 or more copies** must include `confirm_large_batch` (`true` for JSON endpoints, `"true"` for multipart). Without it the request is rejected with **HTTP 400** and code `CONFIRMATION_REQUIRED`.
+  - *Migration:* add `confirm_large_batch: true` to requests that print 10+ copies. Requests for fewer than 10 copies are unaffected.
+
+### Added
+- **USB / non-network printer support**: `usb://` and `file:///dev/usb/lpX` backends in addition to network printers; keep-alive is automatically disabled where it is not meaningful.
+- **Printer status & clock**: IPP-based printer status and reachability reporting, plus a printer clock readout.
+- **Health & deployment**: `GET /health` (liveness) and `GET /health/printer` (readiness) endpoints; the app now runs under gunicorn; optional API-key authentication via the `API_KEY` env var; configurable CORS via `CORS_ORIGINS`.
+- **Copies, cut & density options**: copies (1–100), cut modes (`each`/`end`/`none`) and density/quality options (600 dpi, HQ). Copies and cut are available directly in every compose section.
+- **PDF printing**: upload a PDF, select pages, fit/fill scaling, with per-page preview (`POST /pdf/print`, `POST /pdf/preview`) and a PDF compose tab.
+- **Share hand-off**: `POST /api/v1/share` (+ `GET /share/{token}`) to send a PDF or image from a phone (Apple Shortcuts / Android HTTP Shortcuts) straight into the print form.
+- **True-to-print live preview**: server-rendered previews for text, QR, combined and image labels (`/text/preview`, `/qrcode/preview`, `/label/preview`, `/image/preview`), backing the instant client-side preview.
+- **Print queue**: all jobs are queued and printed sequentially by a single background worker. `/jobs` endpoints to list, get, cancel, reprint, delete and download a job's file, plus a Queue panel. Reprint with the same settings or re-open a job's parameters; image/PDF job files persist for `JOB_FILE_TTL_SECONDS` (default 24 h).
+- **Queue controls**: pause/resume (`POST /jobs/pause`, `/jobs/resume`), an emergency stop that cancels all waiting jobs (`POST /jobs/stop`), delete a single job (`POST /jobs/{id}/delete`), clear every job (`POST /jobs/clear-all`), and a queue status endpoint (`GET /jobs/queue`).
+- **Text + Image labels**: `POST /label/text-image` endpoint and compose tab to print an uploaded image and a text block side by side.
+- **Large-batch confirmation guard**: any print request for 10 or more copies must include an explicit `confirm_large_batch` flag, otherwise it is rejected with HTTP 400 and the machine-readable code `CONFIRMATION_REQUIRED`. The UI confirms before submitting such a batch.
+- **Dynamic keep-alive**: keep-alive can run `forever` or in a `timed` mode that keeps the printer awake only for a configurable window after each print (`keep_alive_mode`, `keep_alive_duration_seconds`), plus an always-visible keep-alive toggle in the top bar.
+- **Configurable uploads**: ephemeral, configurable upload folder (`UPLOAD_FOLDER`) with TTL cleanup of staged job/share files (`JOB_FILE_TTL_SECONDS`, `SHARE_TTL_SECONDS`).
+- **Demo mode**: a bundled demo layer (`src/static/js/demo.js`) lets the static UI run on GitHub Pages with mocked API data and no backend, plus a `pages.yml` deploy workflow.
+- **Testing & tooling**: unit tests (URI validation, IPP client, settings, printer status) and project tooling (Dependabot, dependency audit, lint/test configuration).
+
+### Changed
+- Reworked the web UI into a "Console" layout: sidebar navigation, light/dark themes that follow the system preference, a fully responsive and iOS-friendly experience, and Settings as its own dedicated view.
+- Invalid input now returns HTTP 400 (instead of 500), and image uploads are hardened.
+- Expanded documentation for settings, environment variables and API endpoints.
+
+### Security
+- Optional API-key authentication; printer-URI scheme allowlist with an SSRF guard; path-traversal protection on served job/share files; image decompression-bomb limit.
+
+### Fixed
+- Keep-alive now writes to the printer's raw port (`9100`) instead of only reading status, so it can actually prevent the auto power-off on network printers.
+- Corrected the port example in `docker-compose.yml` (5000).
+
 ## [3.1.0] - 2025-08-18
 
 ### Added

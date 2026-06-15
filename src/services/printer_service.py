@@ -74,6 +74,11 @@ class PrinterService:
         # heartbeat never collides with an in-progress print job (the printer
         # accepts only one 9100 connection at a time).
         self._io_lock = threading.Lock()
+        # Timestamp of the last print attempt. The "timed" keep-alive mode keeps
+        # the printer awake for a configurable window after this moment, then
+        # pauses until the next print. Initialised to now so enabling keep-alive
+        # gives one window straight away.
+        self._last_print_at = time.time()
         # Single source of truth for the upload folder. Precedence:
         #   1. explicit constructor argument
         #   2. UPLOAD_FOLDER environment variable (lets operators relocate or
@@ -349,6 +354,178 @@ class PrinterService:
             raise PrinterError(f"Error printing image: {str(e)}") from e
         finally:
             self._cleanup_temp_files(temp_files)
+
+    def print_text_image(self, image_path: str, text: str, settings: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Print a label with an uploaded image and a text block side by side.
+
+        Mirrors the text+QR layout but uses an uploaded image instead of a
+        generated QR code. The image is placed on ``settings['image_position']``
+        ("left" or "right") and the text block on the opposite side. The
+        composed label then runs through the standard rotation/convert/send
+        pipeline so it honours all standard settings (label_size, rotate,
+        threshold, dither, red, copies, cut_mode).
+
+        Args:
+            image_path: Path to the uploaded image file.
+            text: Text content to render alongside the image.
+            settings: Dict containing layout and print settings. Recognised
+                layout keys: ``image_position`` ("left"/"right", default
+                "right"), ``text_alignment`` ("left"/"center"/"right", default
+                "left") and ``text_font_size`` (default 30).
+
+        Returns:
+            Dict containing the result of the print operation.
+
+        Raises:
+            PrinterError: If there's an error printing the label.
+            ImageProcessingError: If there's an error composing the label.
+            ValueError: If settings are invalid.
+        """
+        # Track only the artifacts generated *here* (composed label and its
+        # rotated derivative). The original uploaded ``image_path`` is owned by
+        # the controller and intentionally not tracked.
+        temp_files: List[str] = []
+        try:
+            job_id = f"textimage_{uuid.uuid4().hex[:8]}"
+
+            logger.info("Processing text+image print request", job_id=job_id, image_path=image_path)
+
+            # Compose the side-by-side label (image + text).
+            composed_path = self._create_text_image_label(image_path, text, settings)
+            temp_files.append(composed_path)
+            logger.info("Text+image label created", job_id=job_id, image_path=composed_path)
+
+            # Apply rotation if specified.
+            rotate = settings.get("rotate", 0)
+            if rotate != 0:
+                composed_path = self._apply_rotation(composed_path, rotate)
+                temp_files.append(composed_path)
+                logger.info("Rotation applied", job_id=job_id, rotate=rotate)
+
+            # Send to printer.
+            self._send_to_printer(composed_path, settings)
+            logger.info("Print job completed successfully", job_id=job_id)
+
+            return {
+                "success": True,
+                "job_id": job_id,
+                "message": "Text+image label printed successfully"
+            }
+        except (ValidationError, ValueError) as e:
+            # Pure input/validation problems (bad settings, invalid URI, ...)
+            # must surface as a client error (-> 400), not a printer fault.
+            logger.warning("Invalid input for text+image print", error=str(e))
+            raise ValidationError(f"Error printing text+image label: {str(e)}") from e
+        except Exception as e:
+            logger.error("Error printing text+image label", error=str(e), exc_info=True)
+            raise PrinterError(f"Error printing text+image label: {str(e)}") from e
+        finally:
+            self._cleanup_temp_files(temp_files)
+
+    def _create_text_image_label(self, image_path: str, text: str, settings: Dict[str, Any]) -> str:
+        """
+        Compose an uploaded image and a multi-line text block side by side.
+
+        Lays the image and text out on a 696px-wide label (image 1/3, text 2/3),
+        with the image on ``image_position`` ("left"/"right") and the text on the
+        opposite side. The uploaded image is scaled to the image area while
+        preserving its aspect ratio. The result is saved as a PNG.
+
+        Args:
+            image_path: Path to the uploaded image file.
+            text: Text content to render alongside the image.
+            settings: Dict containing layout settings.
+
+        Returns:
+            Path to the created label image file.
+
+        Raises:
+            ImageProcessingError: If there's an error composing the label.
+        """
+        try:
+            text_alignment = settings.get("text_alignment", "left")
+            image_position = settings.get("image_position", "right")
+            text_font_size = int(settings.get("text_font_size", settings.get("font_size", 30)))
+            font = ImageFont.truetype(self.font_path, text_font_size)
+
+            # Layout geometry: fixed 696px label, image 1/3, text 2/3.
+            width = 696
+            padding = 20
+            image_area_width = int(width * 1 / 3) - padding * 2
+            text_area_width = width - image_area_width - padding * 3
+
+            # Load the uploaded image, flattening transparency onto white, and
+            # scale it into the image area while preserving aspect ratio.
+            with Image.open(image_path) as src:
+                src.load()
+                if src.mode in ("RGBA", "LA", "P"):
+                    src = src.convert("RGBA")
+                    background = Image.new("RGB", src.size, "white")
+                    background.paste(src, mask=src.split()[-1])
+                    user_img = background
+                else:
+                    user_img = src.convert("RGB")
+
+                img_w, img_h = user_img.size
+                scale = image_area_width / img_w
+                scaled_size = (image_area_width, max(1, int(img_h * scale)))
+                user_img = user_img.resize(scaled_size, Image.Resampling.LANCZOS)
+
+            img_w, img_h = user_img.size
+
+            # Parse text into lines and measure each.
+            text_lines = text.split("\n")
+            line_spacing = 10
+            text_metrics = []
+            total_text_height = 0
+
+            dummy_img = Image.new("RGB", (width, 10), "white")
+            dummy_draw = ImageDraw.Draw(dummy_img)
+            for line in text_lines:
+                bbox = dummy_draw.textbbox((0, 0), line, font=font)
+                line_width = bbox[2] - bbox[0]
+                line_height = bbox[3] - bbox[1]
+                text_metrics.append((line, line_width, line_height))
+                total_text_height += line_height + line_spacing
+            total_text_height -= line_spacing  # No trailing spacing.
+
+            # Combined canvas: tall enough for the larger of image/text.
+            total_height = max(img_h, total_text_height) + padding * 2
+            new_img = Image.new("RGB", (width, total_height), "white")
+
+            # Determine horizontal positions based on image_position.
+            if image_position == "left":
+                img_x = padding
+                text_area_x = image_area_width + padding * 2
+            else:  # image on the right (default)
+                img_x = text_area_width + padding * 2
+                text_area_x = padding
+
+            # Paste image, vertically centered.
+            img_y = (total_height - img_h) // 2
+            new_img.paste(user_img, (img_x, img_y))
+
+            # Draw text, vertically centered, honouring alignment.
+            draw = ImageDraw.Draw(new_img)
+            text_y = (total_height - total_text_height) // 2
+            for line, line_width, line_height in text_metrics:
+                if text_alignment == "center":
+                    text_x = text_area_x + (text_area_width - line_width) // 2
+                elif text_alignment == "right":
+                    text_x = text_area_x + text_area_width - line_width
+                else:  # left alignment (default)
+                    text_x = text_area_x
+                draw.text((text_x, text_y), line, font=font, fill="black")
+                text_y += line_height + line_spacing
+
+            label_path = os.path.join(self.upload_folder, f"text_image_{uuid.uuid4().hex[:8]}.png")
+            new_img.save(label_path)
+
+            return label_path
+        except Exception as e:
+            logger.error("Error creating text+image label", error=str(e), exc_info=True)
+            raise ImageProcessingError(f"Error creating text+image label: {str(e)}")
 
     def print_pdf(self, pdf_path: str, settings: Dict[str, Any],
                   pages=None, scale_mode: str = "fit") -> Dict[str, Any]:
@@ -926,6 +1103,10 @@ class PrinterService:
                 backend = backend_factory(guess_backend(printer_uri))["backend_class"](printer_uri)
                 backend.write(instructions)
                 backend.dispose()
+
+            # Record print activity so the "timed" keep-alive mode extends its
+            # awake window from this moment.
+            self._last_print_at = time.time()
 
             logger.info("Print job sent to printer",
                        printer_uri=printer_uri,
@@ -1711,6 +1892,7 @@ class PrinterService:
         consecutive_failures = 0
         max_backoff = 300  # Maximum backoff in seconds (5 minutes)
         last_ok: Optional[bool] = None  # for state-change (INFO/WARN) logging
+        last_active: Optional[bool] = None  # for timed-window pause/resume logging
         
         while not stop_event.is_set():
             try:
@@ -1725,6 +1907,29 @@ class PrinterService:
                     if stop_event.wait(backoff_time - interval):  # Subtract interval because we'll wait again at the end
                         break
                 
+                # Dynamic keep-alive window. In "timed" mode we only keep the
+                # printer awake for `keep_alive_duration_seconds` after the last
+                # print; outside that window we pause the heartbeat (letting the
+                # printer sleep) until the next print resets the timer. In
+                # "forever" mode (or duration<=0) we always ping. Settings are
+                # re-read each tick so changes take effect live.
+                ka = settings_service.get_settings()
+                ka_mode = ka.get("keep_alive_mode", "forever")
+                try:
+                    ka_duration = int(ka.get("keep_alive_duration_seconds", 0) or 0)
+                except (TypeError, ValueError):
+                    ka_duration = 0
+                if ka_mode == "timed" and ka_duration > 0 and (time.time() - self._last_print_at) > ka_duration:
+                    if last_active is not False:
+                        logger.info("Keep alive paused: no print within the configured window",
+                                    printer_uri=printer_uri, window_seconds=ka_duration)
+                        last_active = False
+                    stop_event.wait(interval)
+                    continue
+                if last_active is False:
+                    logger.info("Keep alive resumed after print activity", printer_uri=printer_uri)
+                last_active = True
+
                 logger.debug("Sending keep alive ping", ip_address=ip_address)
 
                 # PRIMARY: write a harmless ESC @ to port 9100. A status *read*

@@ -88,6 +88,12 @@ function setupEventListeners() {
             checkPrinterStatus();
         });
     }
+
+    // Always-visible keep-alive toggle in the navbar
+    const navbarKeepAlive = document.getElementById('navbar-keepalive');
+    if (navbarKeepAlive && typeof toggleKeepAliveFromNavbar === 'function') {
+        navbarKeepAlive.addEventListener('click', toggleKeepAliveFromNavbar);
+    }
     
     // Settings card toggle
     const settingsHeader = document.querySelector('.settings-card .card-header');
@@ -148,6 +154,16 @@ function setupEventListeners() {
                 updateQRCodePreview();
             } else if (targetId === '#label-panel') {
                 updateLabelPreview();
+            } else if (targetId === '#textimage-panel') {
+                // The textimage change handler only fires on file selection, so
+                // re-show the already-loaded image (if any) on tab switch.
+                const previewImage = document.getElementById('preview-image');
+                const textImageInput = document.getElementById('textimage-input');
+                if (previewImage && previewImage.dataset.originalSrc &&
+                    textImageInput && textImageInput.files && textImageInput.files.length > 0) {
+                    previewImage.classList.remove('d-none');
+                    hideOtherPreviews('preview-image');
+                }
             } else if (targetId === '#pdf-panel') {
                 const pdfInput = document.getElementById('pdf-input');
                 if (pdfInput && pdfInput.files && pdfInput.files.length > 0) {
@@ -308,6 +324,18 @@ function setupEventListeners() {
         });
     }
     
+    // Text + Image print form
+    const textImageForm = document.getElementById('textimage-form');
+    if (textImageForm) {
+        textImageForm.addEventListener('submit', handleTextImagePrint);
+
+        // Show the selected image in the shared preview on selection.
+        const textImageInput = document.getElementById('textimage-input');
+        if (textImageInput) {
+            textImageInput.addEventListener('change', handleTextImagePreview);
+        }
+    }
+
     // PDF print form
     const pdfForm = document.getElementById('pdf-form');
     if (pdfForm) {
@@ -339,6 +367,14 @@ function setupEventListeners() {
         settingsForm.addEventListener('submit', handleSaveSettings);
     }
 
+    // Keep-alive mode -> toggle the duration controls' visibility/state.
+    const keepAliveMode = document.getElementById('keep-alive-mode');
+    if (keepAliveMode && typeof updateKeepAliveModeUI === 'function') {
+        keepAliveMode.addEventListener('change', updateKeepAliveModeUI);
+        // Apply once on initial load (settings load also calls this).
+        updateKeepAliveModeUI();
+    }
+
     // Settings fields that change the rendered output should refresh the
     // server preview of whichever compose tab is currently active.
     ['rotate', 'threshold', 'dither', 'label-size', 'printer-model'].forEach(id => {
@@ -351,8 +387,109 @@ function setupEventListeners() {
         });
     });
 
+    // ---- Print queue wiring (polling + actions) ----
+    setupQueue();
+
     // ---- Console layout wiring (sidebar drawer + preview relocation) ----
     setupConsoleLayout();
+}
+
+// Interval handle for the Queue polling loop; null while not polling.
+let jobsPollTimer = null;
+
+/**
+ * Start polling the print queue (~every 1500ms) while the Queue panel is
+ * active. Refreshes immediately, then on an interval. No-op if already running.
+ */
+function startJobsPolling() {
+    if (jobsPollTimer !== null) return;
+    if (typeof refreshJobs === 'function') refreshJobs();
+    jobsPollTimer = setInterval(() => {
+        if (typeof refreshJobs === 'function') refreshJobs();
+    }, 1500);
+}
+
+/**
+ * Stop the queue polling loop (called when leaving the Queue panel) so it does
+ * not keep hitting the API in the background.
+ */
+function stopJobsPolling() {
+    if (jobsPollTimer !== null) {
+        clearInterval(jobsPollTimer);
+        jobsPollTimer = null;
+    }
+}
+
+/**
+ * Wire up the print queue: start/stop polling on Queue tab show/hide, the
+ * "Clear finished" button, and per-job Cancel buttons (event delegation).
+ */
+function setupQueue() {
+    // Start/stop polling based on which tab becomes active.
+    document.querySelectorAll('button[data-bs-toggle="tab"]').forEach(tabEl => {
+        tabEl.addEventListener('shown.bs.tab', event => {
+            const targetId = event.target.getAttribute('data-bs-target');
+            if (targetId === '#queue-panel') {
+                startJobsPolling();
+            } else {
+                stopJobsPolling();
+            }
+        });
+    });
+
+    // "Clear finished" button.
+    const clearBtn = document.getElementById('queue-clear');
+    if (clearBtn) {
+        clearBtn.addEventListener('click', () => {
+            if (typeof clearFinishedJobs === 'function') clearFinishedJobs();
+        });
+    }
+
+    // Queue control bar: Pause/Resume toggle, Stop, Clear all.
+    const pauseToggle = document.getElementById('queue-pause-toggle');
+    if (pauseToggle) {
+        pauseToggle.addEventListener('click', () => {
+            if (typeof toggleQueuePause === 'function') toggleQueuePause();
+        });
+    }
+    const stopBtn = document.getElementById('queue-stop');
+    if (stopBtn) {
+        stopBtn.addEventListener('click', () => {
+            if (typeof stopQueue === 'function') stopQueue();
+        });
+    }
+    const clearAllBtn = document.getElementById('queue-clear-all');
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', () => {
+            if (typeof clearAllJobs === 'function') clearAllJobs();
+        });
+    }
+
+    // Per-job action buttons (Cancel / Reprint / Open) via event delegation,
+    // since the rows are re-rendered on every poll.
+    const list = document.getElementById('queue-list');
+    if (list) {
+        list.addEventListener('click', event => {
+            const btn = event.target.closest('[data-action]');
+            if (!btn) return;
+            const action = btn.getAttribute('data-action');
+            const jobId = btn.getAttribute('data-job-id');
+            if (!jobId) return;
+            if (action === 'cancel' && typeof cancelJob === 'function') {
+                cancelJob(jobId);
+            } else if (action === 'reprint' && typeof reprintJob === 'function') {
+                reprintJob(jobId);
+            } else if (action === 'open' && typeof openJob === 'function') {
+                openJob(jobId);
+            } else if (action === 'delete' && typeof deleteJob === 'function') {
+                deleteJob(jobId, btn.getAttribute('data-job-status'));
+            }
+        });
+    }
+
+    // Keep the sidebar badge fresh from load on, even before the Queue tab is
+    // first opened.
+    if (typeof refreshJobs === 'function') refreshJobs();
 }
 
 /**
