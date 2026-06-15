@@ -37,26 +37,23 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **🌙 Dark Mode**: Modern interface with automatic dark mode support based on system preferences.
 
-- **🧪 Live Demo**: The static UI can be hosted on GitHub Pages with a built-in demo mode that mocks the API with sample data — no backend or printer required — so anyone can explore the interface.
-
 - **📚 Swagger Documentation**: Explore and test the API using the built-in Swagger UI documentation.
 
 - **🔄 Error Handling**: Robust error handling with informative messages and toast notifications.
 
 ## 📸 Screenshots
 
-### Text Printing
-![Text Printing](doc/images/Screenshot_01_text_print.png)
+### Desktop
+![Desktop UI](doc/images/screenshot_desktop.png)
 
-### Image Printing
-![Image Printing](doc/images/Screenshot_03_Image_print.png)
-
+### Dark Mode
+![Dark mode UI](doc/images/screenshot_dark.png)
 
 ### QR Code
-![QR Code](doc/images/Screenshot_04_QR_Code.png)
+![QR Code label](doc/images/screenshot_qr.png)
 
-### Text and QR Code
-![Text and QR Code](doc/images/Screenshot_05_Text_QR.png)
+### Mobile
+![Mobile UI](doc/images/screenshot_mobile.png)
 
 
 ## 🏗️ Architecture
@@ -516,14 +513,6 @@ curl -i -F "file=@label.pdf" http://localhost:5000/api/v1/share
 On a phone, create a Shortcut that takes the shared file and performs a "Get contents of URL" `POST` to `http://<host>:5000/api/v1/share` with the file as a form field named `file`, then opens the returned URL.
 
 Staged files live in `uploads/shared/` and are automatically removed after `SHARE_TTL_SECONDS` (default `3600`, i.e. 1 hour).
-
-## 🧪 Demo on GitHub Pages
-
-The UI is a static single-page app, so it can be published to GitHub Pages as an interactive demo. A bundled demo layer (`src/static/js/demo.js`) activates automatically on a `*.github.io` host (or locally with `?demo` in the URL) and mocks the entire API with sample data — settings populate, the queue is pre-filled, printing is simulated and previews use the fast client-side render. Nothing is sent to a real printer.
-
-To deploy it, enable **Pages → Source: GitHub Actions** in the repository settings; the included `.github/workflows/pages.yml` workflow publishes `src/static/` on every push to `main`. PDF printing is disabled in the demo because it requires the local backend.
-
-> **Note:** The demo only showcases the interface. Actual printing always needs the Python backend running on the same network as the printer — a browser cannot talk to the printer directly.
 
 ## 📝 License
 
