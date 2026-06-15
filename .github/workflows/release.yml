@@ -21,7 +21,10 @@ jobs:
           git config --global user.email "ci@github-actions.com"
           git config --global user.name "GitHub Actions CI"
 
-      # Versionsnummer und Release Notes aus changelog.md extrahieren
+      # Extract the version and release notes from the first changelog section.
+      # Supports both final releases (e.g. 4.0.0) and pre-releases with a suffix
+      # (e.g. 4.0.0-dev, 4.0.0-rc.1) so the dev branch can publish pre-releases.
+      # The dev branch is published as a pre-release (see the Create Release step).
       - name: Extract Version and Release Notes
         id: changelog
         run: |
@@ -30,25 +33,30 @@ jobs:
             exit 1
           fi
 
-          # Branch prüfen
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            # Reguläres Release (erstes "## [version]")
-            VERSION=$(grep -m 1 -o '## \[\([0-9]\+\.[0-9]\+\.[0-9]\+\)\]' changelog.md | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
-            NOTES=$(awk '/^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {if (NR > 1) exit; next} {print}' changelog.md)
-          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            # Beta-Release (erstes "## [version]")
-            VERSION=$(grep -m 1 -o '## \[\([0-9]\+\.[0-9]\+\.[0-9]\+\)\]' changelog.md | grep -o '[0-9]\+\.[0-9]\+\.[0-9]\+')
-            NOTES=$(awk '/^## \[[0-9]+\.[0-9]+\.[0-9]+\]/ {if (NR > 1) exit; next} {print}' changelog.md)
-          else
+          if [[ "${{ github.ref }}" != "refs/heads/main" && "${{ github.ref }}" != "refs/heads/dev" ]]; then
             echo "ERROR: Unsupported branch ${{ github.ref }}" >&2
             exit 1
           fi
 
+          # Version = first "## [x.y.z]" heading, with an optional pre-release
+          # suffix (e.g. -dev, -rc.1). Notes = body of that exact version section
+          # (keyed off the resolved version, so a leading "## [Unreleased]" or
+          # any other non-version heading is skipped safely).
+          VER_RE='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'
+          VERSION=$(grep -m1 -oE "## \[${VER_RE}\]" changelog.md | grep -oE "${VER_RE}")
+
           if [ -z "$VERSION" ]; then
-            echo "ERROR: Could not extract version from changelog.md" >&2
+            echo "ERROR: Could not extract a version from changelog.md" >&2
             exit 1
           fi
 
+          NOTES=$(awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { f = 1; next }
+            f && /^## \[/ { exit }
+            f { print }
+          ' changelog.md)
+
+          echo "Resolved version: $VERSION (pre-release: ${{ github.ref == 'refs/heads/dev' }})"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
           echo "NOTES<<EOF" >> $GITHUB_ENV
           echo "$NOTES" >> $GITHUB_ENV
