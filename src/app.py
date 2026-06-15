@@ -9,7 +9,7 @@ from flask_cors import CORS
 from pathlib import Path
 
 # Application version (surfaced by the /health liveness endpoint)
-APP_VERSION = os.environ.get("APP_VERSION", "3.1.0")
+APP_VERSION = os.environ.get("APP_VERSION", "4.0.0-dev")
 
 from src.utils.error_handlers import register_error_handlers
 from src.utils.pillow_patch import apply_pillow_patch
