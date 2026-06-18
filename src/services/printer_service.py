@@ -850,6 +850,47 @@ class PrinterService:
         finally:
             self._cleanup_temp_files(temp_files)
 
+    @staticmethod
+    def _wrap_text_to_width(text: str, font: "ImageFont.FreeTypeFont", max_width: int) -> List[str]:
+        """Word-wrap ``text`` so each line fits within ``max_width`` pixels.
+
+        Splits on existing newlines (blank lines preserved for visual spacing),
+        wraps at word boundaries, and hard-breaks any single word that is itself
+        wider than ``max_width``. Returns the list of lines to render. The app
+        owns the font/metrics, so this produces an exact fit the client cannot.
+        """
+        if max_width <= 0:
+            return text.split("\n")
+        lines: List[str] = []
+        for paragraph in text.split("\n"):
+            if paragraph == "":
+                lines.append("")
+                continue
+            current = ""
+            for word in paragraph.split(" "):
+                candidate = word if not current else current + " " + word
+                if font.getlength(candidate) <= max_width:
+                    current = candidate
+                    continue
+                if current:
+                    lines.append(current)
+                    current = ""
+                if font.getlength(word) <= max_width:
+                    current = word
+                else:
+                    # Hard-break a word wider than the whole line.
+                    chunk = ""
+                    for ch in word:
+                        if font.getlength(chunk + ch) <= max_width:
+                            chunk += ch
+                        else:
+                            if chunk:
+                                lines.append(chunk)
+                            chunk = ch
+                    current = chunk
+            lines.append(current)
+        return lines
+
     def _create_text_label(self, html_text: str, settings: Dict[str, Any]) -> str:
         """
         Create a label image from HTML text.
@@ -902,7 +943,17 @@ class PrinterService:
             width = 696  # Fixed label width
             font_size = int(settings.get("font_size", 50))
             alignment = settings.get("alignment", "left")
-            
+
+            # Auto-wrap long lines to the label width (default on) so text is
+            # never silently truncated. Disable with settings.text_wrap = false.
+            if settings.get("text_wrap", True):
+                wrap_font = ImageFont.truetype(self.font_path, font_size)
+                lines = [
+                    wrapped
+                    for line in lines
+                    for wrapped in self._wrap_text_to_width(line, wrap_font, width - 20)
+                ]
+
             # Create a dummy image to calculate text dimensions
             dummy_image = Image.new("RGB", (width, 10), "white")
             dummy_draw = ImageDraw.Draw(dummy_image)
@@ -1420,33 +1471,33 @@ class PrinterService:
         text_font_size = settings.get("text_font_size", settings.get("font_size", 30))
         font = ImageFont.truetype(self.font_path, text_font_size)
 
-        # Parse side_text into lines
-        side_text_lines = side_text.split('\n')
+        # Fix the label to the standard 62 mm width (696 px), split into a text
+        # column (2/3) and a QR column (1/3), then wrap the text to its column
+        # (default on) so long names stay readable instead of being truncated or
+        # ballooning the label. Disable with settings.text_wrap = false.
+        padding = 20
+        total_width = 696
+        text_area_width = int(total_width * 2 / 3) - padding * 2
+        qr_area_width = total_width - text_area_width - padding * 3
 
-        # Calculate text dimensions for each line
+        if settings.get("text_wrap", True):
+            side_text_lines = self._wrap_text_to_width(side_text, font, text_area_width)
+        else:
+            side_text_lines = side_text.split('\n')
+
+        # Measure each (wrapped) line.
         text_metrics = []
-        max_text_width = 0
         total_text_height = 0
         line_spacing = 10
-
         dummy_draw = ImageDraw.Draw(qr_img)
         for line in side_text_lines:
             bbox = dummy_draw.textbbox((0, 0), line, font=font)
             line_width = bbox[2] - bbox[0]
             line_height = bbox[3] - bbox[1]
-            max_text_width = max(max_text_width, line_width)
             text_metrics.append((line, line_width, line_height))
             total_text_height += line_height + line_spacing
-
-        # Remove extra line spacing from the last line
+        # Remove extra line spacing after the last line.
         total_text_height -= line_spacing
-
-        # Calculate dimensions for the combined image
-        # Text takes 2/3, QR code takes 1/3
-        padding = 20
-        total_width = max(qr_width + max_text_width + padding * 3, 696)  # Ensure minimum width
-        text_area_width = int(total_width * 2/3) - padding * 2
-        qr_area_width = total_width - text_area_width - padding * 3
 
         # Resize QR code to fit in the 1/3 area while keeping it square
         # Use the width as the limiting factor for both dimensions
@@ -1507,58 +1558,54 @@ class PrinterService:
         text_font_size = settings.get("text_font_size", settings.get("font_size", 30))
         font = ImageFont.truetype(self.font_path, text_font_size)
 
-        # Calculate text dimensions
-        dummy_draw = ImageDraw.Draw(qr_img)
-        bbox = dummy_draw.textbbox((0, 0), text, font=font)
-        text_width = bbox[2] - bbox[0]
-        text_height = bbox[3] - bbox[1]
-
-        # Create a new image with space for text
-        padding = 20  # Padding between QR code and text
-
-        # Determine layout based on text position
-        if text_position == "top":
-            # Text above QR code
-            new_height = qr_height + text_height + padding
-            new_img = Image.new("RGB", (qr_width, new_height), "white")
-
-            # Draw text at the top
-            draw = ImageDraw.Draw(new_img)
-
-            # Calculate text position based on alignment
-            if text_alignment == "center":
-                x = (qr_width - text_width) // 2
-            elif text_alignment == "right":
-                x = qr_width - text_width - 10
-            else:  # left alignment
-                x = 10
-
-            y = padding // 2
-            draw.text((x, y), text, font=font, fill="black")
-
-            # Paste QR code below text
-            new_img.paste(qr_img, (0, text_height + padding))
+        # Wrap the caption to the QR width (default on) so long captions are
+        # never truncated; disable with settings.text_wrap = false.
+        margin = 10
+        if settings.get("text_wrap", True):
+            text_lines = self._wrap_text_to_width(text, font, qr_width - margin * 2)
         else:
-            # Text below QR code (default)
-            new_height = qr_height + text_height + padding
-            new_img = Image.new("RGB", (qr_width, new_height), "white")
+            text_lines = text.split('\n')
 
-            # Paste QR code at the top
-            new_img.paste(qr_img, (0, 0))
+        # Measure each line of the (possibly wrapped) caption.
+        dummy_draw = ImageDraw.Draw(qr_img)
+        line_spacing = 6
+        line_metrics = []
+        text_block_height = 0
+        for line in text_lines:
+            bbox = dummy_draw.textbbox((0, 0), line, font=font)
+            line_width = bbox[2] - bbox[0]
+            line_height = bbox[3] - bbox[1]
+            if not line:
+                line_height = sum(font.getmetrics())  # give blank lines a real gap
+            line_metrics.append((line, line_width, line_height))
+            text_block_height += line_height + line_spacing
+        text_block_height = max(0, text_block_height - line_spacing)
 
-            # Draw text below QR code
-            draw = ImageDraw.Draw(new_img)
+        padding = 20  # Padding between QR code and text
+        new_height = qr_height + text_block_height + padding
+        new_img = Image.new("RGB", (qr_width, new_height), "white")
+        draw = ImageDraw.Draw(new_img)
 
-            # Calculate text position based on alignment
+        if text_position == "top":
+            text_top = padding // 2
+            qr_top = text_block_height + padding
+        else:  # bottom (default)
+            qr_top = 0
+            text_top = qr_height + padding // 2
+
+        new_img.paste(qr_img, (0, qr_top))
+
+        # Draw each caption line with the requested horizontal alignment.
+        y = text_top
+        for line, line_width, line_height in line_metrics:
             if text_alignment == "center":
-                x = (qr_width - text_width) // 2
+                x = (qr_width - line_width) // 2
             elif text_alignment == "right":
-                x = qr_width - text_width - 10
+                x = qr_width - line_width - margin
             else:  # left alignment
-                x = 10
-
-            y = qr_height + padding // 2
-            draw.text((x, y), text, font=font, fill="black")
+                x = margin
+            draw.text((x, y), line, font=font, fill="black")
+            y += line_height + line_spacing
 
         return new_img
     

@@ -18,6 +18,7 @@ from src.services.settings_service import settings_service
 from src.services.pdf_renderer import render_pdf_thumbnails
 from src.utils.exceptions import ValidationError, PrinterError, ConfirmationRequiredError
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
+from src.utils.dry_run import is_dry_run, build_dry_run_response
 
 logger = structlog.get_logger()
 
@@ -79,6 +80,10 @@ def print_pdf() -> Dict[str, Any]:
         enforce_large_batch_confirmation(
             settings.get("copies", 1), is_confirmed(request.form.get("confirm_large_batch"))
         )
+
+        # Dry run: validate settings + reachability, but do not save/print.
+        if is_dry_run(request.form.get("dry_run")):
+            return build_dry_run_response(settings, None)
 
         # Persist the uploaded PDF under uploads/jobs/ so it survives the print
         # and is available for reprint/open. TTL cleanup in the queue service

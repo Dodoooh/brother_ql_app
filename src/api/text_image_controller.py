@@ -20,6 +20,7 @@ from src.utils.exceptions import (
     ConfirmationRequiredError,
 )
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
+from src.utils.dry_run import is_dry_run, build_dry_run_response
 
 # Reuse the image controller's persistent-upload helpers to avoid duplication.
 from src.api.image_controller import (
@@ -103,6 +104,10 @@ def print_text_image() -> Dict[str, Any]:
         enforce_large_batch_confirmation(
             settings.get("copies", 1), is_confirmed(request.form.get("confirm_large_batch"))
         )
+
+        # Dry run: validate settings + reachability, but do not save/print.
+        if is_dry_run(request.form.get("dry_run")):
+            return build_dry_run_response(settings, None)
 
         # Persist the uploaded image under uploads/jobs/ so it survives the
         # print and is available for reprint/open. TTL cleanup in the queue

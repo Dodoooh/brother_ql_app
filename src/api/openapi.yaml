@@ -216,6 +216,12 @@ paths:
                     settings.copies >= 10, otherwise the request is rejected
                     with code CONFIRMATION_REQUIRED.
                   example: "true"
+                dry_run:
+                  type: string
+                  description: >-
+                    Set to "true" to validate only (check settings + printer
+                    reachability) without saving or printing.
+                  example: "true"
               required:
                 - image
       responses:
@@ -309,6 +315,12 @@ paths:
                     Set to "true" to confirm large batches. Required when
                     settings.copies >= 10, otherwise the request is rejected
                     with code CONFIRMATION_REQUIRED.
+                  example: "true"
+                dry_run:
+                  type: string
+                  description: >-
+                    Set to "true" to validate only (check settings + printer
+                    reachability) without saving or printing.
                   example: "true"
               required:
                 - file
@@ -553,6 +565,12 @@ paths:
                     Set to "true" to confirm large batches. Required when
                     settings.copies >= 10, otherwise the request is rejected
                     with code CONFIRMATION_REQUIRED.
+                  example: "true"
+                dry_run:
+                  type: string
+                  description: >-
+                    Set to "true" to validate only (check settings + printer
+                    reachability) without saving or printing.
                   example: "true"
               required:
                 - image
@@ -1171,6 +1189,13 @@ components:
             Confirm large batches. Required (true) when settings.copies >= 10,
             otherwise the request is rejected with code CONFIRMATION_REQUIRED.
           default: false
+        dry_run:
+          type: boolean
+          description: >-
+            Validate only: render the label and check printer reachability, but
+            do not print or enqueue. Returns { ok, dry_run, printer_reachable,
+            would_print: { label_size, copies, width_px, height_px } }.
+          default: false
       required:
         - text
         
@@ -1256,6 +1281,13 @@ components:
             Confirm large batches. Required (true) when settings.copies >= 10,
             otherwise the request is rejected with code CONFIRMATION_REQUIRED.
           default: false
+        dry_run:
+          type: boolean
+          description: >-
+            Validate only: render the label and check printer reachability, but
+            do not print or enqueue. Returns { ok, dry_run, printer_reachable,
+            would_print: { label_size, copies, width_px, height_px } }.
+          default: false
       required:
         - qr
         - text
@@ -1340,6 +1372,13 @@ components:
           description: >-
             Confirm large batches. Required (true) when settings.copies >= 10,
             otherwise the request is rejected with code CONFIRMATION_REQUIRED.
+          default: false
+        dry_run:
+          type: boolean
+          description: >-
+            Validate only: render the label and check printer reachability, but
+            do not print or enqueue. Returns { ok, dry_run, printer_reachable,
+            would_print: { label_size, copies, width_px, height_px } }.
           default: false
       required:
         - qr

@@ -10,6 +10,7 @@ from src.services.queue_service import print_queue
 from src.services.settings_service import settings_service
 from src.utils.exceptions import ValidationError, PrinterError, ConfirmationRequiredError
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
+from src.utils.dry_run import is_dry_run, build_dry_run_response
 
 logger = structlog.get_logger()
 
@@ -66,7 +67,8 @@ def print_text_qrcode_label(body: Dict[str, Any]) -> Dict[str, Any]:
         combined_settings["qr_position"] = qr_position
         combined_settings["text_alignment"] = text_alignment
         combined_settings["text_font_size"] = text_font_size
-        
+        combined_settings["text_wrap"] = text_settings.get("wrap", True)
+
         # Add QR code settings
         if qr_settings:
             combined_settings["qr_version"] = qr_settings.get("version", 1)
@@ -75,6 +77,11 @@ def print_text_qrcode_label(body: Dict[str, Any]) -> Dict[str, Any]:
             combined_settings["qr_border"] = qr_settings.get("border", 4)
             combined_settings["error_correction"] = qr_settings.get("error_correction", "M")
         
+        # Dry run: render + reachability check, but do not print or enqueue.
+        if is_dry_run(body.get("dry_run")):
+            data_url = printer_service.render_label_preview(combined_settings)
+            return build_dry_run_response(combined_settings, data_url)
+
         # Enqueue the combined text+QR print job; printed later in the worker.
         def job(data=qr_data, settings=combined_settings):
             printer_service.print_qr_code(data, settings)

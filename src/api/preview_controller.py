@@ -138,6 +138,7 @@ def preview_qrcode(body: Dict[str, Any]) -> Dict[str, Any]:
                 combined_settings["text_position"] = text_position
                 combined_settings["text_font_size"] = text_settings.get("font_size", 30)
                 combined_settings["text_alignment"] = text_settings.get("alignment", "center")
+                combined_settings["text_wrap"] = text_settings.get("wrap", True)
 
         image = printer_service.render_qrcode_preview(combined_settings)
         return _preview_response(image)
@@ -194,6 +195,7 @@ def preview_label(body: Dict[str, Any]) -> Dict[str, Any]:
         combined_settings["qr_position"] = qr_position
         combined_settings["text_alignment"] = text_alignment
         combined_settings["text_font_size"] = text_font_size
+        combined_settings["text_wrap"] = text_settings.get("wrap", True)
 
         if qr_settings:
             combined_settings["qr_version"] = qr_settings.get("version", 1)
