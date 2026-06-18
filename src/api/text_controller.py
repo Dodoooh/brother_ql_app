@@ -7,6 +7,7 @@ from typing import Dict, Any
 
 from src.services.printer_service import printer_service
 from src.services.queue_service import print_queue
+from src.services.settings_service import settings_service
 from src.utils.exceptions import ValidationError, PrinterError, ResourceNotFoundError, ConfirmationRequiredError
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 
@@ -35,7 +36,7 @@ def print_text(body: Dict[str, Any]) -> Dict[str, Any]:
         
         # Extract and validate parameters
         text = body.get("text")
-        settings = body.get("settings", {})
+        settings = settings_service.resolve_print_settings(body.get("settings"))
         
         if not text:
             raise ValidationError("text is required", "text")

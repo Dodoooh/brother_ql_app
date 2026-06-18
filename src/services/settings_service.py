@@ -296,6 +296,40 @@ class SettingsService:
             # Return a deep copy so callers cannot mutate the cached state.
             return copy.deepcopy(self._cached_settings)
 
+    # Settings keys a print/preview request may inherit from the saved config
+    # when omitted. keep_alive_*/ipp_port/printers are excluded (not per-print).
+    _INHERITABLE_PRINT_KEYS = (
+        "printer_uri", "printer_model", "label_size", "font_size", "alignment",
+        "rotate", "threshold", "dither", "compress", "red", "copies",
+        "cut_mode", "dpi_600", "hq",
+    )
+
+    def resolve_print_settings(self, request_settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        Merge a request's (possibly partial or missing) ``settings`` with the
+        saved configuration, so callers no longer have to repeat the printer
+        config on every request.
+
+        The saved config supplies defaults for the inheritable print keys
+        (printer URI/model/label size and rendering options); any field present
+        in ``request_settings`` overrides the saved value. Extra keys carried by
+        the request (e.g. side-by-side layout hints) are preserved as-is.
+
+        Args:
+            request_settings: The ``settings`` object from the request, or None.
+
+        Returns:
+            A new settings dict with inherited defaults filled in.
+        """
+        saved = self.get_settings()
+        merged: Dict[str, Any] = {}
+        for key in self._INHERITABLE_PRINT_KEYS:
+            if saved.get(key) is not None:
+                merged[key] = saved[key]
+        if request_settings:
+            merged.update(request_settings)
+        return merged
+
     def update_settings(self, settings_update: Dict[str, Any]) -> bool:
         """
         Merges partial updates with current settings and saves the result.

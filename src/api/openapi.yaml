@@ -557,7 +557,6 @@ paths:
               required:
                 - image
                 - text
-                - settings
       responses:
         '200':
           description: Label printed successfully
@@ -1174,7 +1173,6 @@ components:
           default: false
       required:
         - text
-        - settings
         
     TextQRCodeLabelRequest:
       type: object
@@ -1261,7 +1259,6 @@ components:
       required:
         - qr
         - text
-        - settings
 
     QRCodePrintRequest:
       type: object
@@ -1346,10 +1343,15 @@ components:
           default: false
       required:
         - qr
-        - settings
 
     PrintSettings:
       type: object
+      description: >-
+        Per-request print settings. All fields are optional: any field omitted
+        (or the whole settings object) is filled from the app's saved
+        configuration, so the common case "print on the configured printer"
+        needs no settings at all. Fields present in the request override the
+        saved defaults.
       properties:
         printer_uri:
           type: string
@@ -1420,10 +1422,8 @@ components:
           description: High quality printing
           example: true
           default: true
-      required:
-        - printer_uri
-        - printer_model
-        - label_size
+      # No required fields: a request may omit settings (or individual fields)
+      # and the app fills them from its saved configuration (request overrides).
 
     Settings:
       type: object
@@ -1572,6 +1572,11 @@ components:
 
     PreviewResponse:
       type: object
+      description: >-
+        Default JSON wrapper for a rendered preview. To receive the raw PNG
+        bytes instead (no JSON parsing / base64 decoding), send the request with
+        `Accept: image/png`; the binary response then carries the pixel size in
+        the `X-Label-Width-Px` and `X-Label-Height-Px` headers.
       properties:
         image:
           type: string

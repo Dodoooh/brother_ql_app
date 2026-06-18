@@ -14,6 +14,7 @@ from flask import request, current_app
 
 from src.services.printer_service import printer_service
 from src.services.queue_service import print_queue
+from src.services.settings_service import settings_service
 from src.services.pdf_renderer import render_pdf_thumbnails
 from src.utils.exceptions import ValidationError, PrinterError, ConfirmationRequiredError
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
@@ -53,7 +54,7 @@ def print_pdf() -> Dict[str, Any]:
         # Parse settings JSON
         settings_json = request.form.get('settings', '{}')
         try:
-            settings = json.loads(settings_json)
+            settings = settings_service.resolve_print_settings(json.loads(settings_json))
         except json.JSONDecodeError:
             raise ValidationError("Invalid settings JSON", "settings")
 

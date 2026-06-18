@@ -10,23 +10,50 @@ controllers so the preview is faithful to the real print.
 
 import os
 import json
+import base64
 import uuid
 import structlog
-from typing import Dict, Any
+from io import BytesIO
+from typing import Any, Dict, Union
 
 from werkzeug.datastructures import FileStorage
 from werkzeug.utils import secure_filename
 
-from flask import request, current_app
+from flask import request, current_app, Response
 from PIL import Image, UnidentifiedImageError
 
 from src.services.printer_service import printer_service
+from src.services.settings_service import settings_service
 from src.utils.exceptions import ValidationError, PrinterError
 
 logger = structlog.get_logger()
 
 # Guard against decompression-bomb DoS, consistent with the image print path.
 Image.MAX_IMAGE_PIXELS = 50_000_000
+
+
+def _preview_response(data_url: str) -> Union[Dict[str, Any], Response]:
+    """Shape the rendered preview based on the request's ``Accept`` header.
+
+    With ``Accept: image/png`` (and not ``application/json``) the raw PNG bytes
+    are returned directly so a consumer can pipe them straight to an ``<img>``
+    without parsing JSON or decoding base64; the pixel dimensions are exposed as
+    ``X-Label-Width-Px`` / ``X-Label-Height-Px`` headers. Otherwise the default
+    JSON wrapper ``{"image": "data:image/png;base64,..."}`` is returned (keeping
+    existing clients, including the bundled UI, working unchanged).
+    """
+    accept = (request.headers.get("Accept") or "").lower()
+    if "image/png" in accept and "application/json" not in accept:
+        png = base64.b64decode(data_url.split(",", 1)[1])
+        headers = {}
+        try:
+            with Image.open(BytesIO(png)) as im:
+                headers["X-Label-Width-Px"] = str(im.width)
+                headers["X-Label-Height-Px"] = str(im.height)
+        except Exception:  # noqa: BLE001 - headers are best-effort metadata
+            pass
+        return Response(png, mimetype="image/png", headers=headers)
+    return {"image": data_url}
 
 
 def preview_text(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -45,7 +72,7 @@ def preview_text(body: Dict[str, Any]) -> Dict[str, Any]:
 
         # Extract and validate parameters (same as /text/print).
         text = body.get("text")
-        settings = body.get("settings", {})
+        settings = settings_service.resolve_print_settings(body.get("settings"))
 
         if not text:
             raise ValidationError("text is required", "text")
@@ -53,7 +80,7 @@ def preview_text(body: Dict[str, Any]) -> Dict[str, Any]:
             raise ValidationError("settings is required", "settings")
 
         image = printer_service.render_text_preview(text, settings)
-        return {"image": image}
+        return _preview_response(image)
     except (ValidationError, ValueError) as e:
         logger.warning("Validation error rendering text preview", error=str(e))
         if isinstance(e, ValidationError):
@@ -84,7 +111,7 @@ def preview_qrcode(body: Dict[str, Any]) -> Dict[str, Any]:
         # Extract and validate parameters (same as /qrcode/print).
         qr_settings = body.get("qr", {})
         text_settings = body.get("text", {})
-        settings = body.get("settings", {})
+        settings = settings_service.resolve_print_settings(body.get("settings"))
 
         data = qr_settings.get("data")
         if not data:
@@ -113,7 +140,7 @@ def preview_qrcode(body: Dict[str, Any]) -> Dict[str, Any]:
                 combined_settings["text_alignment"] = text_settings.get("alignment", "center")
 
         image = printer_service.render_qrcode_preview(combined_settings)
-        return {"image": image}
+        return _preview_response(image)
     except (ValidationError, ValueError) as e:
         logger.warning("Validation error rendering QR code preview", error=str(e))
         if isinstance(e, ValidationError):
@@ -145,7 +172,7 @@ def preview_label(body: Dict[str, Any]) -> Dict[str, Any]:
         # Extract and validate parameters (same as /label/text-qrcode).
         qr_settings = body.get("qr", {})
         text_settings = body.get("text", {})
-        settings = body.get("settings", {})
+        settings = settings_service.resolve_print_settings(body.get("settings"))
 
         qr_data = qr_settings.get("data")
         if not qr_data:
@@ -176,7 +203,7 @@ def preview_label(body: Dict[str, Any]) -> Dict[str, Any]:
             combined_settings["error_correction"] = qr_settings.get("error_correction", "M")
 
         image = printer_service.render_label_preview(combined_settings)
-        return {"image": image}
+        return _preview_response(image)
     except (ValidationError, ValueError) as e:
         logger.warning("Validation error rendering label preview", error=str(e))
         if isinstance(e, ValidationError):
@@ -216,7 +243,7 @@ def preview_image() -> Dict[str, Any]:
         # Parse settings JSON.
         settings_json = request.form.get('settings', '{}')
         try:
-            settings = json.loads(settings_json)
+            settings = settings_service.resolve_print_settings(json.loads(settings_json))
         except json.JSONDecodeError:
             raise ValidationError("Invalid settings JSON", "settings")
 
@@ -235,7 +262,7 @@ def preview_image() -> Dict[str, Any]:
             raise ValidationError("Uploaded file is not a valid image", "image")
 
         image = printer_service.render_image_preview(image_path, settings)
-        return {"image": image}
+        return _preview_response(image)
     except (ValidationError, ValueError) as e:
         logger.warning("Validation error rendering image preview", error=str(e))
         if isinstance(e, ValidationError):
