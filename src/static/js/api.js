@@ -250,7 +250,8 @@ async function handleTextPrint(event) {
                     rotate: parseInt(rotate),
                     threshold: parseFloat(threshold),
                     dither: dither,
-                    red: red
+                    red: red,
+                    auto_fit: (document.getElementById('text-auto-fit') || {}).checked !== false
                 }
             })
         });

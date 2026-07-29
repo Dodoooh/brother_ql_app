@@ -385,12 +385,8 @@ class PrinterService:
             if auto_fit and is_die_cut and max_height:
                 line_spacing_est = 5
                 while font_size > 8:
-                    est = 20 + sum(
-                        dummy_draw.textbbox((0, 0), ln, font=font)[3]
-                        - dummy_draw.textbbox((0, 0), ln, font=font)[1]
-                        + line_spacing_est
-                        for ln in wrapped
-                    )
+                    a, d = font.getmetrics()
+                    est = 20 + len(wrapped) * (a + d + line_spacing_est)
                     if est <= max_height:
                         break
                     font_size -= 2
@@ -399,11 +395,17 @@ class PrinterService:
 
             lines = wrapped
 
+            max_ascent, max_descent = font.getmetrics()
+            # Use the font's own line height rather than the ink bbox. bbox
+            # measures only the glyphs present, so a line without descenders
+            # ("FULL WIDTH TEST") measures short -- but draw.text() still
+            # positions from the ascent line and reserves descent space, so the
+            # final line's descenders fell off the bottom of the canvas.
+            line_height = max_ascent + max_descent
+
             for line in lines:
                 bbox = dummy_draw.textbbox((0, 0), line, font=font)
                 line_width = bbox[2] - bbox[0]
-                line_height = bbox[3] - bbox[1]
-                max_ascent, max_descent = font.getmetrics()
                 total_height += line_height + line_spacing
                 line_metrics.append((line, max_ascent, max_descent, line_height, line_width))
             

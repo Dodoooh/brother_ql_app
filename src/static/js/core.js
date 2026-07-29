@@ -103,8 +103,10 @@ function setupEventListeners() {
         
         if (textInput && textFontSize && textAlignment) {
             const labelSizeEl = document.getElementById('label-size');
-            [textInput, textFontSize, textAlignment, labelSizeEl].filter(Boolean).forEach(el => {
+            const autoFitEl = document.getElementById('text-auto-fit');
+            [textInput, textFontSize, textAlignment, labelSizeEl, autoFitEl].filter(Boolean).forEach(el => {
                 el.addEventListener('input', updateTextPreview);
+                el.addEventListener('change', updateTextPreview);
             });
         }
     }

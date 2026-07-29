@@ -102,6 +102,7 @@ function updateTextPreview() {
             label_size: (document.getElementById('label-size') || {}).value || '62',
             font_size: parseInt(textFontSize.value, 10) || 50,
             alignment: textAlignment.value,
+            auto_fit: (document.getElementById('text-auto-fit') || {}).checked !== false,
         };
 
         // Ask the server for the actual label bitmap rather than approximating
