@@ -129,7 +129,7 @@ paths:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/TextPrintRequest'
+              $ref: '#/components/schemas/TextPreviewRequest'
       responses:
         '200':
           description: Rendered label image
@@ -437,6 +437,37 @@ components:
         - text
         - settings
         
+    TextPreviewRequest:
+      type: object
+      description: >
+        Same shape as TextPrintRequest but without printer requirements --
+        rendering only needs the label geometry, so a preview can be produced
+        before a printer is configured.
+      properties:
+        text:
+          type: string
+          description: Text to render, can include HTML formatting
+          example: "<b>Hello World!</b>"
+        settings:
+          type: object
+          properties:
+            label_size:
+              type: string
+              description: Label identifier, e.g. "62" or "29x62"
+              default: "62"
+            font_size:
+              type: integer
+              default: 50
+            alignment:
+              type: string
+              enum: [left, center, right]
+              default: left
+            rotate:
+              type: integer
+              default: 0
+      required:
+        - text
+
     TextQRCodeLabelRequest:
       type: object
       properties:
