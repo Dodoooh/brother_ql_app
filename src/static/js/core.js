@@ -102,7 +102,8 @@ function setupEventListeners() {
         const textAlignment = document.getElementById('text-alignment');
         
         if (textInput && textFontSize && textAlignment) {
-            [textInput, textFontSize, textAlignment].forEach(el => {
+            const labelSizeEl = document.getElementById('label-size');
+            [textInput, textFontSize, textAlignment, labelSizeEl].filter(Boolean).forEach(el => {
                 el.addEventListener('input', updateTextPreview);
             });
         }

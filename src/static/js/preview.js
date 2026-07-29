@@ -73,45 +73,67 @@ function hideOtherPreviews(exceptId) {
 /**
  * Update text preview
  */
+let _previewTimer = null;
+
 function updateTextPreview() {
     const textInput = document.getElementById('text-input');
     const textFontSize = document.getElementById('text-font-size');
     const textAlignment = document.getElementById('text-alignment');
     const previewText = document.getElementById('preview-text');
     const previewPlaceholder = document.getElementById('preview-placeholder');
-    
-    if (textInput && textFontSize && textAlignment && previewText) {
-        const text = textInput.value.trim();
-        const fontSize = textFontSize.value;
-        const alignment = textAlignment.value;
-        
-        // Show or hide elements based on content
-        if (text) {
-            // Format text with HTML
-            const formattedText = text
-                .replace(/\n/g, '<br>')
-                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\*(.*?)\*/g, '<em>$1</em>');
-            
-            // Update preview
-            previewText.innerHTML = formattedText;
-            previewText.style.fontSize = `${fontSize}px`;
-            previewText.style.textAlign = alignment;
-            previewText.classList.remove('d-none');
-            
-            // Hide placeholder and other previews
-            if (previewPlaceholder) previewPlaceholder.classList.add('d-none');
-            hideOtherPreviews('preview-text');
-        } else {
-            // Hide text preview if empty
-            previewText.classList.add('d-none');
-            
-            // Show placeholder if all previews are empty
-            if (areAllPreviewsEmpty() && previewPlaceholder) {
-                previewPlaceholder.classList.remove('d-none');
-            }
+
+    if (!(textInput && textFontSize && textAlignment && previewText)) return;
+
+    const text = textInput.value.trim();
+
+    if (!text) {
+        previewText.classList.add('d-none');
+        previewText.innerHTML = '';
+        if (areAllPreviewsEmpty() && previewPlaceholder) {
+            previewPlaceholder.classList.remove('d-none');
         }
+        return;
     }
+
+    // Debounce: rendering happens server-side, so avoid a request per keystroke.
+    if (_previewTimer) clearTimeout(_previewTimer);
+    _previewTimer = setTimeout(() => {
+        const settings = {
+            label_size: (document.getElementById('label-size') || {}).value || '62',
+            font_size: parseInt(textFontSize.value, 10) || 50,
+            alignment: textAlignment.value,
+        };
+
+        // Ask the server for the actual label bitmap rather than approximating
+        // it with CSS. Browser font metrics and wrapping do not match Pillow's,
+        // so a styled-DOM preview disagrees with what actually prints.
+        fetch('api/v1/text/preview', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: text, settings: settings }),
+        })
+            .then(r => {
+                if (!r.ok) throw new Error('preview failed: ' + r.status);
+                return r.blob();
+            })
+            .then(blob => {
+                const url = URL.createObjectURL(blob);
+                previewText.innerHTML =
+                    '<img src="' + url + '" alt="Label preview" ' +
+                    'style="max-width:100%;height:auto;image-rendering:pixelated;">';
+                previewText.classList.remove('d-none');
+                if (previewPlaceholder) previewPlaceholder.classList.add('d-none');
+                hideOtherPreviews('preview-text');
+            })
+            .catch(err => {
+                console.error('Preview error:', err);
+                // Fall back to plain text so the field still shows something.
+                previewText.textContent = text;
+                previewText.classList.remove('d-none');
+                if (previewPlaceholder) previewPlaceholder.classList.add('d-none');
+                hideOtherPreviews('preview-text');
+            });
+    }, 300);
 }
 
 /**
