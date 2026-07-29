@@ -17,6 +17,65 @@ from brother_ql.conversion import convert
 from brother_ql.backends import backend_factory, guess_backend
 
 
+def get_label_height(label_size):
+    """Return (height_px, is_die_cut) for a label identifier.
+
+    Continuous ("endless") rolls report height 0 -- their length is unlimited,
+    so a label can grow downward. Die-cut labels have a fixed height that the
+    content must fit inside.
+    """
+    if not label_size:
+        return (0, False)
+    try:
+        from brother_ql.labels import ALL_LABELS, FormFactor
+        for label in ALL_LABELS:
+            if label.identifier == str(label_size):
+                die_cut = label.form_factor in (
+                    FormFactor.DIE_CUT, FormFactor.ROUND_DIE_CUT)
+                return (label.dots_printable[1], die_cut)
+    except Exception:
+        pass
+    return (0, False)
+
+
+def wrap_line_to_width(draw, text, font, max_width):
+    """Split `text` into lines that each fit within `max_width` pixels.
+
+    Wraps on word boundaries; a single word longer than the label is broken
+    character-by-character so it is never silently cropped.
+    """
+    if not text:
+        return [""]
+    if draw.textbbox((0, 0), text, font=font)[2] <= max_width:
+        return [text]
+
+    lines, current = [], ""
+    for word in text.split(" "):
+        candidate = word if not current else current + " " + word
+        if draw.textbbox((0, 0), candidate, font=font)[2] <= max_width:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+            current = ""
+        # A word too wide even on its own: break it up.
+        if draw.textbbox((0, 0), word, font=font)[2] > max_width:
+            piece = ""
+            for ch in word:
+                if draw.textbbox((0, 0), piece + ch, font=font)[2] <= max_width:
+                    piece += ch
+                else:
+                    if piece:
+                        lines.append(piece)
+                    piece = ch
+            current = piece
+        else:
+            current = word
+    if current:
+        lines.append(current)
+    return lines or [""]
+
+
 def get_label_width(label_size, default=696):
     """Return the printable width in pixels for a label size identifier.
 
@@ -301,8 +360,46 @@ class PrinterService:
             line_spacing = 5
             line_metrics = []
             
+            font = ImageFont.truetype(self.font_path, font_size)
+
+            # Wrap to the label width. Continuous tape has effectively unlimited
+            # length, so the canvas grows downward to fit rather than the text
+            # being cropped at the edge.
+            text_area = width - 20  # 10px margin either side
+
+            def wrap_all(f):
+                out = []
+                for line in lines:
+                    out.extend(wrap_line_to_width(dummy_draw, line, f, text_area))
+                return out
+
+            # auto_fit shrinks the font until the wrapped text fits the label's
+            # fixed height. It only applies to die-cut labels -- on continuous
+            # tape there is nothing to shrink to fit, so the setting is ignored
+            # and the label simply grows.
+            auto_fit = settings.get("auto_fit", True)
+            max_height, is_die_cut = get_label_height(settings.get("label_size"))
+
+            wrapped = wrap_all(font)
+
+            if auto_fit and is_die_cut and max_height:
+                line_spacing_est = 5
+                while font_size > 8:
+                    est = 20 + sum(
+                        dummy_draw.textbbox((0, 0), ln, font=font)[3]
+                        - dummy_draw.textbbox((0, 0), ln, font=font)[1]
+                        + line_spacing_est
+                        for ln in wrapped
+                    )
+                    if est <= max_height:
+                        break
+                    font_size -= 2
+                    font = ImageFont.truetype(self.font_path, font_size)
+                    wrapped = wrap_all(font)
+
+            lines = wrapped
+
             for line in lines:
-                font = ImageFont.truetype(self.font_path, font_size)
                 bbox = dummy_draw.textbbox((0, 0), line, font=font)
                 line_width = bbox[2] - bbox[0]
                 line_height = bbox[3] - bbox[1]

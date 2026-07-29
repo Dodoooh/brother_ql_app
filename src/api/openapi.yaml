@@ -465,6 +465,12 @@ components:
             rotate:
               type: integer
               default: 0
+            auto_fit:
+              type: boolean
+              description: >
+                Shrink the font until the text fits a die-cut label's fixed
+                height. Ignored on continuous tape, which simply grows.
+              default: true
       required:
         - text
 
@@ -648,6 +654,12 @@ components:
           example: "62"
           default: "62"
           enum: ["12", "12+17", "18", "29", "38", "50", "54", "62", "62red", "102", "103", "104", "17x54", "17x87", "23x23", "29x42", "29x90", "39x90", "39x48", "52x29", "54x29", "60x86", "62x29", "62x100", "102x51", "102x152", "103x164", "d12", "d24", "d58", "pt12", "pt18", "pt24", "pt36"]
+        auto_fit:
+          type: boolean
+          description: >
+            Shrink the font until the text fits a die-cut label's fixed height.
+            Ignored on continuous tape, which grows to fit instead.
+          default: true
         rotate:
           type: integer
           description: Rotation angle in degrees
