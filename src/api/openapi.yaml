@@ -115,6 +115,36 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /text/preview:
+    post:
+      summary: Render a text label without printing
+      description: >
+        Returns the exact PNG that would be sent to the printer, so a client can
+        show a true preview instead of approximating the layout in HTML/CSS.
+      operationId: api.text_controller.preview_text
+      tags:
+        - text
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TextPrintRequest'
+      responses:
+        '200':
+          description: Rendered label image
+          content:
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
   /text/print:
     post:
       summary: Print text on a label
