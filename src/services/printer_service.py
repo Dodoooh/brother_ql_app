@@ -357,7 +357,10 @@ class PrinterService:
             
             # Calculate total height and line metrics
             total_height = 10
-            line_spacing = 5
+            # ascent+descent is the font's full line box and already includes
+            # the gap below the baseline, so no extra leading is needed. (When
+            # line height was measured from the ink bbox this was 5.)
+            line_spacing = 0
             line_metrics = []
             
             font = ImageFont.truetype(self.font_path, font_size)
@@ -383,7 +386,7 @@ class PrinterService:
             wrapped = wrap_all(font)
 
             if auto_fit and is_die_cut and max_height:
-                line_spacing_est = 5
+                line_spacing_est = 0
                 while font_size > 8:
                     a, d = font.getmetrics()
                     est = 20 + len(wrapped) * (a + d + line_spacing_est)
