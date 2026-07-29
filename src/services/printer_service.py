@@ -411,6 +411,18 @@ class PrinterService:
             
             # Create the actual image
             total_height += 10
+
+            # A die-cut label is a fixed physical size, so the canvas is pinned
+            # to its real height regardless of content. Continuous tape has no
+            # such bound and grows to whatever the text needs.
+            #
+            # With auto_fit on, the font was already stepped down so the text
+            # fits. With it off, the user has asked to keep their font size, so
+            # overflow is clipped -- but the canvas still matches the label,
+            # rather than silently growing into a size the printer cannot cut.
+            if is_die_cut and max_height:
+                total_height = max_height
+
             image = Image.new("RGB", (width, total_height), "white")
             draw = ImageDraw.Draw(image)
             
