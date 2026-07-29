@@ -16,6 +16,26 @@ from brother_ql.raster import BrotherQLRaster
 from brother_ql.conversion import convert
 from brother_ql.backends import backend_factory, guess_backend
 
+
+def get_label_width(label_size, default=696):
+    """Return the printable width in pixels for a label size identifier.
+
+    brother_ql knows the true printable width of every supported roll, so look
+    it up rather than assuming one. Falls back to `default` (62mm) for unknown
+    or missing identifiers.
+    """
+    if not label_size:
+        return default
+    try:
+        from brother_ql.labels import ALL_LABELS
+        for label in ALL_LABELS:
+            if label.identifier == str(label_size):
+                return label.dots_printable[0]
+    except Exception:
+        pass
+    return default
+
+
 # Import pysnmp for SNMP-based printer communication
 try:
     from pysnmp.hlapi import (
@@ -197,7 +217,7 @@ class PrinterService:
             logger.info("Processing image print request", job_id=job_id, image_path=image_path)
             
             # Resize image to fit label width
-            resized_path = self._resize_image(image_path)
+            resized_path = self._resize_image(image_path, settings.get("label_size"))
             logger.info("Image resized", job_id=job_id, resized_path=resized_path)
             
             # Apply rotation if specified
@@ -268,7 +288,7 @@ class PrinterService:
                 lines.append("".join(current_line))
             
             # Create image
-            width = 696  # Fixed label width
+            width = get_label_width(settings.get("label_size"))
             font_size = int(settings.get("font_size", 50))
             alignment = settings.get("alignment", "left")
             
@@ -316,7 +336,7 @@ class PrinterService:
             logger.error("Error creating text label", error=str(e), exc_info=True)
             raise ImageProcessingError(f"Error creating text label: {str(e)}")
     
-    def _resize_image(self, image_path: str) -> str:
+    def _resize_image(self, image_path: str, label_size: str = None) -> str:
         """
         Resize an image to fit the label width.
         
@@ -330,7 +350,7 @@ class PrinterService:
             ImageProcessingError: If there's an error resizing the image.
         """
         try:
-            max_width = 696  # Fixed label width
+            max_width = get_label_width(label_size)
             
             with Image.open(image_path) as img:
                 # Calculate new dimensions
@@ -707,7 +727,7 @@ class PrinterService:
                 # Calculate dimensions for the combined image
                 # Text takes 2/3, QR code takes 1/3
                 padding = 20
-                total_width = max(qr_width + max_text_width + padding * 3, 696)  # Ensure minimum width
+                total_width = max(qr_width + max_text_width + padding * 3, get_label_width(settings.get("label_size")))
                 text_area_width = int(total_width * 2/3) - padding * 2
                 qr_area_width = total_width - text_area_width - padding * 3
                 
