@@ -553,11 +553,15 @@ class PrinterService:
             qlr.exception_on_warning = True
             
             # Convert image to printer instructions
+            # rotate=0, NOT the caller's value: rotation is already applied to
+            # the image by _apply_rotation before it gets here. Passing it again
+            # makes brother_ql rotate a second time, undoing the first and
+            # producing a label at the original orientation and size.
             instructions = convert(
                 qlr=qlr,
                 images=[image_path],
                 label=label_size,
-                rotate=rotate,
+                rotate=0,
                 threshold=threshold,
                 dither=dither,
                 compress=compress,
