@@ -275,15 +275,20 @@ class PrinterService:
             
             logger.info("Processing image print request", job_id=job_id, image_path=image_path)
             
-            # Resize image to fit label width
-            resized_path = self._resize_image(image_path, settings.get("label_size"))
-            logger.info("Image resized", job_id=job_id, resized_path=resized_path)
-            
-            # Apply rotation if specified
+            # Rotate BEFORE resizing. Resizing fits the image to the label
+            # width; rotating afterwards swaps the axes, leaving the image
+            # narrower than the label so the printer scales it back up -- which
+            # visually undoes the rotation. Rotating first means the resize
+            # fits whichever edge is actually going across the tape.
             rotate = settings.get("rotate", 0)
+            source_path = image_path
             if rotate != 0:
-                resized_path = self._apply_rotation(resized_path, rotate)
+                source_path = self._apply_rotation(image_path, rotate)
                 logger.info("Rotation applied", job_id=job_id, rotate=rotate)
+
+            # Resize image to fit label width
+            resized_path = self._resize_image(source_path, settings.get("label_size"))
+            logger.info("Image resized", job_id=job_id, resized_path=resized_path)
             
             # Send to printer
             self._send_to_printer(resized_path, settings)
