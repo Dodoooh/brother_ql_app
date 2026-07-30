@@ -39,6 +39,57 @@ from src.utils.uri_validation import validate_printer_uri
 
 logger = structlog.get_logger()
 
+# Printable width of 62 mm tape. Used as the fallback for label identifiers
+# brother_ql does not know, which is what the app assumed unconditionally
+# before, so unknown media keeps behaving as it always did.
+DEFAULT_LABEL_WIDTH_PX = 696
+
+# Auto-fit never shrinks below this; past it the text is unreadable anyway and
+# clipping is the more honest outcome.
+MIN_AUTO_FIT_FONT_SIZE = 8
+
+
+def get_label_geometry(label_size: Optional[str]) -> Tuple[int, int, bool]:
+    """Return ``(printable_width_px, printable_height_px, is_die_cut)`` for a roll.
+
+    brother_ql already knows the true printable area of every supported label,
+    so look it up rather than assuming one. Continuous ("endless") rolls report
+    a height of 0: their length is unbounded, so a label may grow downwards.
+    Die-cut labels are a fixed physical size that the content has to fit inside
+    -- ``convert()`` rejects any other height outright.
+
+    Args:
+        label_size: Label identifier, e.g. "62", "50" or "62x29".
+
+    Returns:
+        Tuple of printable width in pixels, printable height in pixels (0 for
+        continuous tape) and whether the label is die-cut.
+    """
+    if label_size:
+        try:
+            from brother_ql.labels import ALL_LABELS, FormFactor
+
+            for label in ALL_LABELS:
+                if label.identifier == str(label_size):
+                    die_cut = label.form_factor in (
+                        FormFactor.DIE_CUT,
+                        FormFactor.ROUND_DIE_CUT,
+                    )
+                    width, height = label.dots_printable
+                    return (width, height, die_cut)
+        except Exception:
+            logger.warning(
+                "Could not resolve label geometry, falling back to 62 mm",
+                label_size=label_size,
+                exc_info=True,
+            )
+    return (DEFAULT_LABEL_WIDTH_PX, 0, False)
+
+
+def get_label_width(label_size: Optional[str]) -> int:
+    """Return the printable width in pixels for a label identifier."""
+    return get_label_geometry(label_size)[0]
+
 
 class _CutAtEndRaster(BrotherQLRaster):
     """BrotherQLRaster that forces "auto-cut every N labels".
@@ -323,17 +374,22 @@ class PrinterService:
 
             logger.info("Processing image print request", job_id=job_id, image_path=image_path)
 
+            # Rotate before resizing. Resizing fits the image to the label
+            # width, so rotating afterwards swaps the axes and leaves the image
+            # narrower than the label -- convert() then scales it back up to
+            # fill the tape, which visually undoes the rotation. Rotating first
+            # means the resize fits whichever edge really runs across the tape.
+            rotate = settings.get("rotate", 0)
+            source_path = image_path
+            if rotate != 0:
+                source_path = self._apply_rotation(image_path, rotate)
+                temp_files.append(source_path)
+                logger.info("Rotation applied", job_id=job_id, rotate=rotate)
+
             # Resize image to fit label width
-            resized_path = self._resize_image(image_path)
+            resized_path = self._resize_image(source_path, settings.get("label_size"))
             temp_files.append(resized_path)
             logger.info("Image resized", job_id=job_id, resized_path=resized_path)
-
-            # Apply rotation if specified
-            rotate = settings.get("rotate", 0)
-            if rotate != 0:
-                resized_path = self._apply_rotation(resized_path, rotate)
-                temp_files.append(resized_path)
-                logger.info("Rotation applied", job_id=job_id, rotate=rotate)
 
             # Send to printer
             self._send_to_printer(resized_path, settings)
@@ -449,8 +505,8 @@ class PrinterService:
             text_font_size = int(settings.get("text_font_size", settings.get("font_size", 30)))
             font = ImageFont.truetype(self.font_path, text_font_size)
 
-            # Layout geometry: fixed 696px label, image 1/3, text 2/3.
-            width = 696
+            # Layout geometry: the roll's printable width, image 1/3, text 2/3.
+            width = get_label_width(settings.get("label_size"))
             padding = 20
             image_area_width = int(width * 1 / 3) - padding * 2
             text_area_width = width - image_area_width - padding * 3
@@ -599,14 +655,17 @@ class PrinterService:
                 page_image.convert("L").save(temp_png)
                 temp_files.append(temp_png)
 
-                # Fit the page to the label width (same path as image printing).
-                resized_path = self._resize_image(temp_png)
-                temp_files.append(resized_path)
-
-                # Apply rotation if requested.
+                # Rotate first, then fit: resizing to the label width before
+                # rotating leaves the page narrower than the tape and convert()
+                # scales it back up, undoing the rotation.
+                page_source = temp_png
                 if rotate != 0:
-                    resized_path = self._apply_rotation(resized_path, rotate)
-                    temp_files.append(resized_path)
+                    page_source = self._apply_rotation(temp_png, rotate)
+                    temp_files.append(page_source)
+
+                # Fit the page to the label width (same path as image printing).
+                resized_path = self._resize_image(page_source, settings.get("label_size"))
+                temp_files.append(resized_path)
 
                 # Send to the printer (inherits copies/cut_mode/dpi/red/etc.).
                 self._send_to_printer(resized_path, settings)
@@ -827,13 +886,15 @@ class PrinterService:
             job_id = f"preview_image_{uuid.uuid4().hex[:8]}"
             logger.info("Rendering image preview", job_id=job_id, image_path=image_path)
 
-            resized_path = self._resize_image(image_path)
-            temp_files.append(resized_path)
-
+            # Same order as printing (rotate, then fit) so the preview matches.
             rotate = settings.get("rotate", 0)
+            source_path = image_path
             if rotate != 0:
-                resized_path = self._apply_rotation(resized_path, rotate)
-                temp_files.append(resized_path)
+                source_path = self._apply_rotation(image_path, rotate)
+                temp_files.append(source_path)
+
+            resized_path = self._resize_image(source_path, settings.get("label_size"))
+            temp_files.append(resized_path)
 
             with Image.open(resized_path) as img:
                 preview = self._to_print_appearance(img, settings)
@@ -891,6 +952,21 @@ class PrinterService:
             lines.append(current)
         return lines
 
+    @staticmethod
+    def _widest_word(lines: List[str], font: "ImageFont.FreeTypeFont") -> float:
+        """Width in pixels of the widest single word across ``lines``.
+
+        Used to decide whether wrapping would have to hard-break a word, which
+        is the point where a narrow roll needs a smaller font rather than more
+        line breaks.
+        """
+        widest = 0.0
+        for line in lines:
+            for word in line.replace("\n", " ").split(" "):
+                if word:
+                    widest = max(widest, font.getlength(word))
+        return widest
+
     def _create_text_label(self, html_text: str, settings: Dict[str, Any]) -> str:
         """
         Create a label image from HTML text.
@@ -939,47 +1015,94 @@ class PrinterService:
             if current_line:
                 lines.append("".join(current_line))
             
-            # Create image
-            width = 696  # Fixed label width
+            # Render at the loaded roll's true printable width. Anything else is
+            # rescaled by convert() on the way to the printer, which silently
+            # changes the effective font size and softens the result.
+            width, label_height, is_die_cut = get_label_geometry(settings.get("label_size"))
             font_size = int(settings.get("font_size", 50))
             alignment = settings.get("alignment", "left")
+            text_area = width - 20  # 10 px margin on either side
 
-            # Auto-wrap long lines to the label width (default on) so text is
-            # never silently truncated. Disable with settings.text_wrap = false.
-            if settings.get("text_wrap", True):
-                wrap_font = ImageFont.truetype(self.font_path, font_size)
-                lines = [
+            wrap = settings.get("text_wrap", True)
+            font = ImageFont.truetype(self.font_path, font_size)
+
+            def wrap_all(current_font):
+                # Auto-wrap long lines to the label width (default on) so text is
+                # never silently truncated. Disable with settings.text_wrap = false.
+                if not wrap:
+                    return list(lines)
+                return [
                     wrapped
                     for line in lines
-                    for wrapped in self._wrap_text_to_width(line, wrap_font, width - 20)
+                    for wrapped in self._wrap_text_to_width(line, current_font, text_area)
                 ]
+
+            wrapped = wrap_all(font)
+
+            # auto_fit shrinks the font until the text fits the medium. What
+            # "fits" means depends on the medium, so the two cases differ.
+            if settings.get("auto_fit", True) and wrap:
+                if is_die_cut and label_height:
+                    # Fixed physical height: shrink until the wrapped text fits
+                    # inside it.
+                    while font_size > MIN_AUTO_FIT_FONT_SIZE:
+                        ascent, descent = font.getmetrics()
+                        if 20 + len(wrapped) * (ascent + descent) <= label_height:
+                            break
+                        font_size -= 2
+                        font = ImageFont.truetype(self.font_path, font_size)
+                        wrapped = wrap_all(font)
+                else:
+                    # Continuous tape grows downwards, so height is never the
+                    # constraint -- width is. On a narrow roll a single word can
+                    # be wider than the whole label, and hard-breaking it turns a
+                    # sentence into a column of letters metres long. Shrink until
+                    # every word fits a line of its own instead.
+                    while (font_size > MIN_AUTO_FIT_FONT_SIZE
+                           and self._widest_word(lines, font) > text_area):
+                        font_size -= 2
+                        font = ImageFont.truetype(self.font_path, font_size)
+                    wrapped = wrap_all(font)
+
+            lines = wrapped
 
             # Create a dummy image to calculate text dimensions
             dummy_image = Image.new("RGB", (width, 10), "white")
             dummy_draw = ImageDraw.Draw(dummy_image)
-            
-            # Calculate total height and line metrics
+
+            # Measure with the font's own line box instead of the ink bounding
+            # box. The bbox covers only the glyphs actually present, so a line
+            # without descenders measures short -- but draw.text() still
+            # positions from the ascent line and reserves descent space, which
+            # pushed the final line's descenders off the bottom of the canvas.
+            # ascent+descent already includes the gap below the baseline, so no
+            # extra leading is added on top.
+            ascent, descent = font.getmetrics()
+            line_height = ascent + descent
+
             total_height = 10
-            line_spacing = 5
             line_metrics = []
-            
             for line in lines:
-                font = ImageFont.truetype(self.font_path, font_size)
                 bbox = dummy_draw.textbbox((0, 0), line, font=font)
-                line_width = bbox[2] - bbox[0]
-                line_height = bbox[3] - bbox[1]
-                max_ascent, max_descent = font.getmetrics()
-                total_height += line_height + line_spacing
-                line_metrics.append((line, max_ascent, max_descent, line_height, line_width))
-            
-            # Create the actual image
+                total_height += line_height
+                line_metrics.append((line, bbox[2] - bbox[0]))
+
             total_height += 10
+
+            # A die-cut label is a fixed physical size, so pin the canvas to it:
+            # convert() raises "Bad image dimensions" for anything else. With
+            # auto_fit on the font was already stepped down to fit; with it off
+            # the requested size is honoured and the overflow is clipped, rather
+            # than inventing a label the printer cannot cut.
+            if is_die_cut and label_height:
+                total_height = label_height
+
             image = Image.new("RGB", (width, total_height), "white")
             draw = ImageDraw.Draw(image)
-            
+
             # Draw text
             y = 10
-            for line_text, max_ascent, max_descent, line_height, line_width in line_metrics:
+            for line_text, line_width in line_metrics:
                 if alignment == "center":
                     x = (width - line_width) // 2
                 elif alignment == "right":
@@ -987,8 +1110,8 @@ class PrinterService:
                 else:
                     x = 10
                 draw.text((x, y), line_text, font=font, fill="black")
-                y += line_height + line_spacing
-            
+                y += line_height
+
             # Save image
             image_path = os.path.join(self.upload_folder, f"text_label_{uuid.uuid4().hex[:8]}.png")
             image.save(image_path)
@@ -998,22 +1121,24 @@ class PrinterService:
             logger.error("Error creating text label", error=str(e), exc_info=True)
             raise ImageProcessingError(f"Error creating text label: {str(e)}")
     
-    def _resize_image(self, image_path: str) -> str:
+    def _resize_image(self, image_path: str, label_size: Optional[str] = None) -> str:
         """
         Resize an image to fit the label width.
-        
+
         Args:
             image_path: Path to the image file.
-            
+            label_size: Label identifier the image is destined for. Defaults to
+                62 mm tape when not given.
+
         Returns:
             Path to the resized image file.
-            
+
         Raises:
             ImageProcessingError: If there's an error resizing the image.
         """
         try:
-            max_width = 696  # Fixed label width
-            
+            max_width = get_label_width(label_size)
+
             with Image.open(image_path) as img:
                 # Calculate new dimensions
                 aspect_ratio = img.height / img.width
@@ -1076,7 +1201,8 @@ class PrinterService:
         printer_uri = settings.get("printer_uri")
         printer_model = settings.get("printer_model")
         label_size = settings.get("label_size")
-        rotate = settings.get("rotate", 0)
+        # settings["rotate"] is deliberately not read here: callers apply the
+        # rotation to the image themselves before handing it over.
         dither = settings.get("dither", False)
         compress = settings.get("compress", False)
         red = settings.get("red", False)
@@ -1134,12 +1260,19 @@ class PrinterService:
                 cut = True
             qlr.exception_on_warning = True
 
-            # Convert image(s) to printer instructions
+            # Convert image(s) to printer instructions.
+            #
+            # rotate=0, NOT the caller's value: every path into this method has
+            # already rotated the image with _apply_rotation. Passing the angle
+            # on makes convert() rotate a second time, returning the image to
+            # its original orientation before fitting it to the tape -- so the
+            # logs report "Rotation applied" while the label comes out
+            # unrotated.
             instructions = convert(
                 qlr=qlr,
                 images=images,
                 label=label_size,
-                rotate=rotate,
+                rotate=0,
                 threshold=threshold,
                 dither=dither,
                 compress=compress,
@@ -1471,12 +1604,12 @@ class PrinterService:
         text_font_size = settings.get("text_font_size", settings.get("font_size", 30))
         font = ImageFont.truetype(self.font_path, text_font_size)
 
-        # Fix the label to the standard 62 mm width (696 px), split into a text
+        # Fix the label to the loaded roll's printable width, split into a text
         # column (2/3) and a QR column (1/3), then wrap the text to its column
         # (default on) so long names stay readable instead of being truncated or
         # ballooning the label. Disable with settings.text_wrap = false.
         padding = 20
-        total_width = 696
+        total_width = get_label_width(settings.get("label_size"))
         text_area_width = int(total_width * 2 / 3) - padding * 2
         qr_area_width = total_width - text_area_width - padding * 3
 

@@ -41,11 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reworked the web UI into a "Console" layout: sidebar navigation, light/dark themes that follow the system preference, a fully responsive and iOS-friendly experience, and Settings as its own dedicated view.
 - Invalid input now returns HTTP 400 (instead of 500), and image uploads are hardened.
 - Expanded documentation for settings, environment variables and API endpoints.
+- **Python 3.11 is now the minimum** (was 3.9, which reached end of life in October 2025). The Docker image moves to `python:3.11-slim`. Running from source on 3.9 or 3.10 is no longer supported. This also unblocks current Pillow, urllib3 and requests releases.
+- Dependencies: Pillow 10.4.0 → 12.3.0, flask-cors 4.0.0 → 6.0.5, gunicorn 21.2.0 → 23.0.0. `marshmallow`, `pydantic` and `python-dotenv` were unused and have been dropped; `pytest`/`pytest-cov` moved to `requirements-dev.txt` so test tooling stays out of the runtime image.
 
 ### Security
 - Optional API-key authentication; printer-URI scheme allowlist with an SSRF guard; path-traversal protection on served job/share files; image decompression-bomb limit.
 
 ### Fixed
+- **Labels are rendered at the loaded roll's real printable width** instead of a hardcoded 696 px (62 mm). Narrower media was previously drawn too wide and rescaled on the way to the printer, so the requested font size never matched what came out — on 50 mm tape everything printed about 20% small and soft. Affects text, images, PDF pages and the combined text+QR and text+image layouts (thanks to MSanteler).
+- **Text on die-cut labels works at all.** The canvas is now pinned to the label's fixed physical height, which `brother_ql` requires; before, any other height was rejected outright.
+- **Rotation now has an effect.** The image was rotated once by the app and a second time by `brother_ql`, which returned it to its original orientation — the log said "Rotation applied" and the label came out unrotated. Image and PDF prints also rotate before being fitted to the label, instead of after, which used to leave them narrower than the tape and scaled back up.
+- Descenders on the last line are no longer clipped: line height is measured from the font's ascent+descent rather than the ink bounding box, which only covers the glyphs actually present.
+- Text on narrow continuous rolls no longer degrades into a column of single letters. With the true width in play, a word can be wider than a 12 mm or P-touch label; the new `auto_fit` setting (on by default) shrinks the font until every word fits a line instead of hard-breaking it. On die-cut labels it shrinks to the fixed height instead. Disable per request with `settings.auto_fit: false`.
 - Keep-alive now writes to the printer's raw port (`9100`) instead of only reading status, so it can actually prevent the auto power-off on network printers.
 - Corrected the port example in `docker-compose.yml` (5000).
 

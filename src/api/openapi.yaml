@@ -1409,6 +1409,20 @@ components:
           example: "62"
           default: "62"
           enum: ["12", "12+17", "18", "29", "38", "50", "54", "62", "62red", "102", "103", "104", "17x54", "17x87", "23x23", "29x42", "29x90", "39x90", "39x48", "52x29", "54x29", "60x86", "62x29", "62x100", "102x51", "102x152", "103x164", "d12", "d24", "d58", "pt12", "pt18", "pt24", "pt36"]
+        text_wrap:
+          type: boolean
+          description: >
+            Wrap text at word boundaries to the label width instead of letting
+            it run past the edge. On by default.
+          default: true
+        auto_fit:
+          type: boolean
+          description: >
+            Shrink the font until the text fits the medium. On a die-cut label
+            that means fitting its fixed height; on continuous tape, which grows
+            instead, it means shrinking until no single word has to be broken
+            mid-word. Only applies while text_wrap is on.
+          default: true
         rotate:
           type: integer
           description: Rotation angle in degrees
