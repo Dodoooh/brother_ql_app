@@ -72,9 +72,6 @@ tests/
 *~
 
 # --- Internal tooling / planning files (NEVER ship these) ---
-.claude/
-CLAUDE.md
-CLAUDE.local.md
 .planning/
 
 # --- Local docker overrides ---

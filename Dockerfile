@@ -32,8 +32,13 @@ RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 # Create necessary directories (including /app/data for volume mount point)
 RUN mkdir -p /app/uploads /app/data /app/src/config
 
-# Copy application code
-COPY . .
+# Copy application code. Only the files the container actually runs -- tests,
+# docs, screenshots and CI config have no business in the published image.
+COPY src/ ./src/
+COPY wsgi.py ./
+# CC BY-NC-SA 4.0 requires the licence notice to travel with the distribution,
+# and a published image counts as one.
+COPY LICENSE ./
 
 # Set permissions and ownership
 # Give execute permissions to entrypoint, ensure appuser owns necessary dirs
