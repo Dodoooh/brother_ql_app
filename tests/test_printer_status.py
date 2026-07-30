@@ -28,7 +28,7 @@ def _reachable_ipp(**overrides):
 def test_reachable_ipp_reports_available():
     with patch("src.services.printer_service.guess_backend", return_value="network"), \
          patch("src.services.printer_service.get_printer_attributes", return_value=_reachable_ipp()):
-        result = printer_service.check_printer_status("tcp://10.50.60.20", "QL-820NWB")
+        result = printer_service.check_printer_status("tcp://192.168.1.100", "QL-820NWB")
 
     assert result["available"] is True
     details = result["details"]
@@ -52,7 +52,7 @@ def test_unreachable_ipp_and_tcp_reports_not_available():
     with patch("src.services.printer_service.guess_backend", return_value="network"), \
          patch("src.services.printer_service.get_printer_attributes", return_value=unreachable), \
          patch.object(printer_service, "_tcp_reachable", return_value=False):
-        result = printer_service.check_printer_status("tcp://10.50.60.20", "QL-800")
+        result = printer_service.check_printer_status("tcp://192.168.1.100", "QL-800")
 
     assert result["available"] is False
     assert result["status"] == "Printer not reachable"
@@ -71,7 +71,7 @@ def test_tcp_fallback_reachable_when_ipp_fails():
     with patch("src.services.printer_service.guess_backend", return_value="network"), \
          patch("src.services.printer_service.get_printer_attributes", return_value=unreachable), \
          patch.object(printer_service, "_tcp_reachable", return_value=True):
-        result = printer_service.check_printer_status("tcp://10.50.60.20", "QL-800")
+        result = printer_service.check_printer_status("tcp://192.168.1.100", "QL-800")
 
     assert result["available"] is True
     assert result["details"]["source"] == "tcp"

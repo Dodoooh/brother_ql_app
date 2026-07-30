@@ -18,7 +18,7 @@ from src.services.settings_service import SettingsService
 
 def _valid_settings(**overrides):
     base = {
-        "printer_uri": "tcp://10.50.60.20",
+        "printer_uri": "tcp://192.168.1.100",
         "printer_model": "QL-800",
         "label_size": "62",
         "font_size": 50,
@@ -35,7 +35,7 @@ def _valid_settings(**overrides):
             {
                 "id": "default",
                 "name": "Default Printer",
-                "printer_uri": "tcp://10.50.60.20",
+                "printer_uri": "tcp://192.168.1.100",
                 "printer_model": "QL-800",
                 "label_size": "62",
             }
@@ -69,8 +69,8 @@ def test_get_settings_uses_mtime_cache(tmp_path):
         # Same unchanged file -> only ONE disk load across both calls.
         assert load.call_count == 1
 
-    assert first["printer_uri"] == "tcp://10.50.60.20"
-    assert second["printer_uri"] == "tcp://10.50.60.20"
+    assert first["printer_uri"] == "tcp://192.168.1.100"
+    assert second["printer_uri"] == "tcp://192.168.1.100"
 
 
 def test_cache_refreshes_after_save_settings(tmp_path):

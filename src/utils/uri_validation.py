@@ -17,7 +17,7 @@ Design goals
 ------------
 * Allow only the schemes the app actually supports: ``tcp://`` and ``usb://``.
 * Keep real-world LAN usage working: Brother label printers live on private
-  RFC1918 networks (e.g. ``tcp://10.50.60.20``) or are addressed by hostname,
+  RFC1918 networks (e.g. ``tcp://192.168.1.100``) or are addressed by hostname,
   so those MUST remain valid.
 * Block only the genuinely dangerous targets for ``tcp://``: link-local /
   cloud-metadata (169.254.0.0/16), loopback (127.0.0.0/8, ::1) and the
@@ -71,7 +71,7 @@ def validate_printer_uri(uri: str) -> None:
         return
 
     # --- tcp:// ------------------------------------------------------------
-    # Extract the host. urlparse() puts "10.50.60.20" of "tcp://10.50.60.20"
+    # Extract the host. urlparse() puts "192.168.1.100" of "tcp://192.168.1.100"
     # into .hostname (lower-cased, port stripped, brackets removed for IPv6).
     host = parsed.hostname
 

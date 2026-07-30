@@ -62,9 +62,27 @@ jobs:
           echo "$NOTES" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
 
+      # Stable versions belong to main. The dev branch publishes pre-releases
+      # only (4.0.0-dev, 4.1.0-rc.1, ...).
+      #
+      # Without this, bumping the changelog to a final version and pushing it to
+      # dev creates the tag on the dev commit as a pre-release. The subsequent
+      # merge to main then finds the tag already taken, skips, and the release
+      # that should mark main never happens.
+      - name: Skip stable versions on dev
+        id: check_branch
+        run: |
+          if [[ "${{ github.ref }}" == "refs/heads/dev" && "${{ env.VERSION }}" != *-* ]]; then
+            echo "Version ${{ env.VERSION }} is a stable release and belongs to main. Skipping on dev."
+            echo "SKIP=true" >> $GITHUB_ENV
+          else
+            echo "SKIP=false" >> $GITHUB_ENV
+          fi
+
       # Überprüfen, ob der Tag bereits im Remote existiert
       - name: Check if Tag Exists in Remote
         id: check_remote_tag
+        if: env.SKIP == 'false'
         run: |
           if git ls-remote --tags origin | grep -q "refs/tags/${{ env.VERSION }}"; then
             echo "Tag ${{ env.VERSION }} already exists in remote."
@@ -75,21 +93,21 @@ jobs:
 
       # Schritt überspringen, wenn Tag im Remote existiert
       - name: Skip if Tag Exists
-        if: env.EXISTS == 'true'
+        if: env.SKIP == 'false' && env.EXISTS == 'true'
         run: |
           echo "Tag ${{ env.VERSION }} already exists in remote. Skipping release."
           exit 0
 
       # Neuen Git-Tag erstellen und pushen
       - name: Create and Push Tag
-        if: env.EXISTS == 'false'
+        if: env.SKIP == 'false' && env.EXISTS == 'false'
         run: |
           git tag -a ${{ env.VERSION }} -m "Release ${{ env.VERSION }}"
           git push origin ${{ env.VERSION }}
 
       # GitHub Release erstellen
       - name: Create GitHub Release
-        if: env.EXISTS == 'false'
+        if: env.SKIP == 'false' && env.EXISTS == 'false'
         uses: actions/create-release@v1
         with:
           tag_name: ${{ env.VERSION }}

@@ -132,13 +132,13 @@ def test_get_printer_attributes_reachable_on_200():
     conn.getresponse.return_value = _make_response(200, _good_ipp_payload())
 
     with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn) as ctor:
-        result = get_printer_attributes("10.50.60.20", port=631, timeout=0.1)
+        result = get_printer_attributes("192.168.1.100", port=631, timeout=0.1)
 
     assert result["reachable"] is True
     assert result["printer_state"] == "idle"          # enum 3 mapped via PRINTER_STATE
     assert result["make_and_model"] == "Brother QL-800"
     assert "error" not in result
-    ctor.assert_called_with("10.50.60.20", 631, timeout=0.1)
+    ctor.assert_called_with("192.168.1.100", 631, timeout=0.1)
     conn.close.assert_called()
 
 
@@ -147,7 +147,7 @@ def test_get_printer_attributes_unreachable_on_connection_error():
     conn.request.side_effect = OSError("connection refused")
 
     with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn):
-        result = get_printer_attributes("10.50.60.20", port=631, timeout=0.1)
+        result = get_printer_attributes("192.168.1.100", port=631, timeout=0.1)
 
     assert result["reachable"] is False
     assert "connection refused" in result["error"]
@@ -172,7 +172,7 @@ def test_get_printer_attributes_unreachable_when_all_paths_fail():
     conn.getresponse.return_value = _make_response(500, b"")
 
     with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn):
-        result = get_printer_attributes("10.50.60.20", timeout=0.1)
+        result = get_printer_attributes("192.168.1.100", timeout=0.1)
 
     assert result["reachable"] is False
     assert result["error"] == "HTTP 500"

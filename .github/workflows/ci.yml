@@ -5,6 +5,12 @@ on:
     branches:
       - main
       - dev
+  # Run the checks on pull requests too, so a merge into main is not the first
+  # time anything is verified. Contributor PRs get the same treatment.
+  pull_request:
+    branches:
+      - main
+      - dev
 
 jobs:
   # Run lint, tests and a dependency vulnerability scan before building the
@@ -73,6 +79,10 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     needs: test
+    # Push events only. A pull request has no branch ref to derive a tag from,
+    # and its Docker Hub credentials are not available anyway -- pull requests
+    # are meant to be verified by the `test` job, not to publish anything.
+    if: github.event_name == 'push'
 
     steps:
       # Checkout des Codes

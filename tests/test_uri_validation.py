@@ -16,7 +16,7 @@ from src.utils.uri_validation import validate_printer_uri
 @pytest.mark.parametrize(
     "uri",
     [
-        "tcp://10.50.60.20",          # private RFC1918 IP -> printers live here
+        "tcp://192.168.1.100",          # private RFC1918 IP -> printers live here
         "tcp://192.168.1.5:9100",     # private IP with explicit port
         "tcp://printer.local",        # hostname (no DNS resolution performed)
         "usb://0x04f9:0x209c",        # USB device addressing
@@ -29,7 +29,7 @@ def test_valid_uris_accepted(uri):
 
 def test_valid_uri_with_surrounding_whitespace():
     # Leading/trailing whitespace is stripped before validation.
-    assert validate_printer_uri("  tcp://10.50.60.20  ") is None
+    assert validate_printer_uri("  tcp://192.168.1.100  ") is None
 
 
 # --- Rejected URIs -----------------------------------------------------------
