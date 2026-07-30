@@ -535,6 +535,7 @@ Contributions are welcome! Please open an issue or submit a pull request.
 Special thanks to our contributors:
 
 - **DL6ER** - For adding support for additional printer models, label types, and adding USB printer support
+- **[MSanteler](https://github.com/MSanteler)** - For finding and diagnosing the hardcoded label width, which meant every roll narrower than 62 mm printed at the wrong scale
 
 ## 📄 Changelog
 

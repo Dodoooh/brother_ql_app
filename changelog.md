@@ -5,7 +5,7 @@ All notable changes to the Brother QL Printer App will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.0.0-dev] - 2026-06-15
+## [4.0.0-dev] - 2026-07-30
 
 ### Breaking Changes
 - **Printing is now asynchronous (print queue).** The print endpoints (`/text/print`, `/image/print`, `/qrcode/print`, `/label/text-qrcode`, `/label/text-image`, `/pdf/print`) now enqueue the job and return **immediately**. The response shape is unchanged (`{ "success": true, "job_id": "...", "message": "..." }`), but its meaning changed:
@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Optional API-key authentication; printer-URI scheme allowlist with an SSRF guard; path-traversal protection on served job/share files; image decompression-bomb limit.
 
 ### Fixed
-- **Labels are rendered at the loaded roll's real printable width** instead of a hardcoded 696 px (62 mm). Narrower media was previously drawn too wide and rescaled on the way to the printer, so the requested font size never matched what came out — on 50 mm tape everything printed about 20% small and soft. Affects text, images, PDF pages and the combined text+QR and text+image layouts (thanks to MSanteler).
+- **Labels are rendered at the loaded roll's real printable width** instead of a hardcoded 696 px (62 mm). Narrower media was previously drawn too wide and rescaled on the way to the printer, so the requested font size never matched what came out — on 50 mm tape everything printed about 20% small and soft. Affects text, images, PDF pages and the combined text+QR and text+image layouts (reported and diagnosed by [MSanteler](https://github.com/MSanteler) in [#18](https://github.com/dodoooh/brother_ql_app/pull/18)).
 - **Text on die-cut labels works at all.** The canvas is now pinned to the label's fixed physical height, which `brother_ql` requires; before, any other height was rejected outright.
 - **Rotation now has an effect.** The image was rotated once by the app and a second time by `brother_ql`, which returned it to its original orientation — the log said "Rotation applied" and the label came out unrotated. Image and PDF prints also rotate before being fitted to the label, instead of after, which used to leave them narrower than the tape and scaled back up.
 - Descenders on the last line are no longer clipped: line height is measured from the font's ascent+descent rather than the ink bounding box, which only covers the glyphs actually present.
