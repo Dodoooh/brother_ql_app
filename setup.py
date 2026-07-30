@@ -10,13 +10,10 @@ setup(
         # Core
         "Flask<2.3.0,>=2.0.0",
         "connexion[swagger-ui]==2.14.2",
-        "python-dotenv==1.0.0",
-        "marshmallow==3.20.1",
-        "pydantic==2.4.2",
-        "flask-cors==4.0.0",
+        "flask-cors==6.0.5",
         # Printer communication
         "brother-ql-inventree==1.3",
-        "Pillow==10.4.0",
+        "Pillow==12.3.0",
         "pysnmp==4.4.12",
         "pyasn1==0.4.8",
         "qrcode==7.4.2",
@@ -24,5 +21,5 @@ setup(
         # Logging
         "structlog==23.1.0",
     ],
-    python_requires=">=3.9",
+    python_requires=">=3.11",
 )

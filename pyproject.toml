@@ -3,7 +3,7 @@
 
 [tool.ruff]
 line-length = 120
-target-version = "py39"
+target-version = "py311"
 # Common noise from data/runtime dirs is excluded.
 extend-exclude = ["uploads", "data", "build", "dist"]
 
@@ -23,7 +23,7 @@ ignore = ["E501"]
 [tool.mypy]
 # Soft entry point for static typing: not strict yet, so untyped/3rd-party
 # code doesn't block. Tighten (e.g. disallow_untyped_defs, strict) over time.
-python_version = "3.9"
+python_version = "3.11"
 ignore_missing_imports = true
 warn_unused_ignores = true
 exclude = ["uploads", "data", "build", "dist"]

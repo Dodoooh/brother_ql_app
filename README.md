@@ -122,7 +122,7 @@ Open your browser and navigate to [http://localhost:5000](http://localhost:5000)
 
 ### Prerequisites
 
-- Python 3.8+
+- Python 3.11+
 - pip
 - Git
 

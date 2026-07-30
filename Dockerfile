@@ -1,4 +1,7 @@
-FROM python:3.9-slim
+# 3.11 and not 3.12: pysnmp 4.4.12 builds on asyncore and packbits (a
+# brother-ql dependency) ships an sdist that uses distutils -- both removed in
+# 3.12. 3.9 is EOL and locks the image out of the current Pillow/urllib3.
+FROM python:3.11-slim
 
 # Set working directory
 WORKDIR /app
