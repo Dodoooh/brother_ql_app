@@ -189,7 +189,7 @@ function setupEventListeners() {
         const textInput = document.getElementById('text-input');
         const textFontSize = document.getElementById('text-font-size');
         const textAlignment = document.getElementById('text-alignment');
-        
+
         if (textInput && textFontSize && textAlignment) {
             [textInput, textFontSize, textAlignment].forEach(el => {
                 el.addEventListener('input', updateTextPreview);
@@ -197,6 +197,14 @@ function setupEventListeners() {
                 el.addEventListener('input', () => requestServerPreview('text'));
             });
         }
+
+        // Orientation and vertical alignment only change the rendered label,
+        // not the client-side mock preview, so they just refresh the
+        // server-rendered one.
+        ['text-orientation', 'text-vertical-alignment'].forEach(id => {
+            const el = document.getElementById(id);
+            if (el) el.addEventListener('change', () => requestServerPreview('text'));
+        });
     }
     
     // Image print form
@@ -373,6 +381,30 @@ function setupEventListeners() {
         keepAliveMode.addEventListener('change', updateKeepAliveModeUI);
         // Apply once on initial load (settings load also calls this).
         updateKeepAliveModeUI();
+    }
+
+    // Searchable label picker on top of the (hidden) native label dropdown.
+    // It writes to #label-size and fires "change", so every listener below
+    // keeps working unchanged.
+    if (typeof setupLabelPicker === 'function') {
+        setupLabelPicker();
+    }
+
+    // Label type -> only continuous rolls have a length to run text along, so
+    // the orientation control follows the selected medium.
+    const labelSize = document.getElementById('label-size');
+    if (labelSize && typeof updateTextOrientationUI === 'function') {
+        labelSize.addEventListener('change', updateTextOrientationUI);
+        // Apply once on initial load (settings load also calls this).
+        updateTextOrientationUI();
+    }
+
+    // Label type -> round die-cut media is previewed as a circle, with the
+    // corners the die-cut discards marked as such.
+    if (labelSize && typeof updatePreviewMediumUI === 'function') {
+        labelSize.addEventListener('change', updatePreviewMediumUI);
+        // Apply once on initial load (settings load also calls this).
+        updatePreviewMediumUI();
     }
 
     // Settings fields that change the rendered output should refresh the

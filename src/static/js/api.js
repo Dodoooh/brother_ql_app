@@ -4,6 +4,24 @@
 // copies or more. The UI mirrors that threshold with a confirm dialog.
 const LARGE_BATCH_THRESHOLD = 10;
 
+// Label type identifiers that describe die-cut media (e.g. "62x29", "d24").
+// Everything else is a continuous roll.
+const DIE_CUT_LABEL_PATTERN = /^(d\d+|\d+x\d+)$/;
+
+// Round die-cut media ("d24" = 24 mm round). The captured group is the diameter
+// in mm. Rectangular die-cut types ("62x29") deliberately do not match.
+const ROUND_LABEL_PATTERN = /^d(\d+)$/;
+
+/**
+ * Diameter in mm of a round die-cut label type.
+ * @param {string} labelSize - label type identifier, e.g. "d24" or "62x29"
+ * @returns {?number} the diameter in mm, or null for non-round media
+ */
+function roundLabelDiameterMm(labelSize) {
+    const match = ROUND_LABEL_PATTERN.exec(labelSize || '');
+    return match ? parseInt(match[1], 10) : null;
+}
+
 /**
  * Read a panel's copies value (clamped to a sane integer >= 1).
  * @param {string} copiesId - element id of the panel's copies input
@@ -68,6 +86,15 @@ async function loadSettings() {
         document.getElementById('label-size').value = settings.label_size || '62';
         document.getElementById('text-font-size').value = settings.font_size || '50';
         document.getElementById('text-alignment').value = settings.alignment || 'left';
+        document.getElementById('text-vertical-alignment').value = settings.vertical_alignment || 'middle';
+        document.getElementById('text-orientation').value = settings.orientation || 'across';
+        // Reflect the loaded label type in the label picker, in the orientation
+        // control's state and in the preview panel (round media is previewed as
+        // a circle). The assignment above does not fire "change", so the
+        // followers are called directly.
+        if (typeof syncLabelPicker === 'function') syncLabelPicker();
+        updateTextOrientationUI();
+        if (typeof updatePreviewMediumUI === 'function') updatePreviewMediumUI();
         document.getElementById('rotate').value = settings.rotate || '0';
         document.getElementById('threshold').value = settings.threshold || '70';
         document.getElementById('dither').value = settings.dither ? 'true' : 'false';
@@ -141,6 +168,20 @@ function updateKeepAliveModeUI() {
     durationField.style.display = timed ? '' : 'none';
     if (valueEl) valueEl.disabled = !timed;
     if (unitEl) unitEl.disabled = !timed;
+}
+
+/**
+ * Toggle the disabled state of the text orientation control based on the
+ * selected label type. Lengthwise text only makes sense on continuous rolls;
+ * on die-cut media the backend falls back to "across", so the control is
+ * disabled (and visually muted) there.
+ */
+function updateTextOrientationUI() {
+    const labelSizeEl = document.getElementById('label-size');
+    const orientationEl = document.getElementById('text-orientation');
+    if (!labelSizeEl || !orientationEl) return;
+
+    orientationEl.disabled = DIE_CUT_LABEL_PATTERN.test(labelSizeEl.value);
 }
 
 /**
@@ -361,7 +402,9 @@ async function handleTextPrint(event) {
         const text = document.getElementById('text-input').value;
         const fontSize = document.getElementById('text-font-size').value;
         const alignment = document.getElementById('text-alignment').value;
-        
+        const verticalAlignment = document.getElementById('text-vertical-alignment').value;
+        const orientation = document.getElementById('text-orientation').value;
+
         // Get printer settings
         const printerUri = document.getElementById('printer-uri').value;
         const printerModel = document.getElementById('printer-model').value;
@@ -396,6 +439,8 @@ async function handleTextPrint(event) {
                 label_size: labelSize,
                 font_size: parseInt(fontSize),
                 alignment: alignment,
+                vertical_alignment: verticalAlignment,
+                orientation: orientation,
                 rotate: parseInt(rotate),
                 threshold: parseFloat(threshold),
                 dither: dither,
@@ -1087,6 +1132,8 @@ async function handleSaveSettings(event) {
         const labelSize = document.getElementById('label-size').value;
         const fontSize = document.getElementById('text-font-size').value;
         const alignment = document.getElementById('text-alignment').value;
+        const verticalAlignment = document.getElementById('text-vertical-alignment').value;
+        const orientation = document.getElementById('text-orientation').value;
         const rotate = document.getElementById('rotate').value;
         const threshold = document.getElementById('threshold').value;
         const dither = document.getElementById('dither').value === 'true';
@@ -1128,6 +1175,8 @@ async function handleSaveSettings(event) {
                 label_size: labelSize,
                 font_size: parseInt(fontSize),
                 alignment: alignment,
+                vertical_alignment: verticalAlignment,
+                orientation: orientation,
                 rotate: parseInt(rotate),
                 threshold: parseFloat(threshold),
                 dither: dither,
@@ -1201,9 +1250,10 @@ function collectPreviewSettings() {
  * placeholder underneath then becomes visible again.
  */
 function clearServerPreview() {
+    const stage = document.getElementById('preview-stage');
     const serverImg = document.getElementById('preview-server');
+    if (stage) stage.classList.add('d-none');
     if (serverImg) {
-        serverImg.classList.add('d-none');
         // Use removeAttribute rather than src='' — an empty src makes the
         // browser try to load the page URL and logs a spurious ERR_INVALID_URL.
         serverImg.removeAttribute('src');
@@ -1216,10 +1266,13 @@ function clearServerPreview() {
  * @param {string} dataUrl - data:image/png;base64,... returned by the API
  */
 function showServerPreview(dataUrl) {
+    const stage = document.getElementById('preview-stage');
     const serverImg = document.getElementById('preview-server');
-    if (!serverImg) return;
+    if (!serverImg || !stage) return;
     serverImg.src = dataUrl;
-    serverImg.classList.remove('d-none');
+    stage.classList.remove('d-none');
+    // Make sure the round/rectangular treatment matches the current label type.
+    if (typeof updatePreviewMediumUI === 'function') updatePreviewMediumUI();
 
     // Hide the instant client previews + placeholder; the server image wins.
     ['preview-text', 'preview-image', 'preview-qrcode', 'preview-label',
@@ -1246,7 +1299,9 @@ function buildPreviewRequest(mode) {
                 text: text,
                 settings: Object.assign({}, settings, {
                     font_size: parseInt(document.getElementById('text-font-size').value),
-                    alignment: document.getElementById('text-alignment').value
+                    alignment: document.getElementById('text-alignment').value,
+                    vertical_alignment: document.getElementById('text-vertical-alignment').value,
+                    orientation: document.getElementById('text-orientation').value
                 })
             }
         };
@@ -1883,6 +1938,11 @@ function applySettingsToForm(settings) {
     setFieldValue('copies', settings.copies != null ? String(settings.copies) : null);
     setFieldValue('cut-mode', settings.cut_mode);
     setBoolField('dpi-600', settings.dpi_600);
+    // Setting the value directly does not fire "change", so refresh the label
+    // picker's closed state (and the medium-dependent UI) by hand.
+    if (typeof syncLabelPicker === 'function') syncLabelPicker();
+    if (typeof updateTextOrientationUI === 'function') updateTextOrientationUI();
+    if (typeof updatePreviewMediumUI === 'function') updatePreviewMediumUI();
 }
 
 /**
@@ -1954,6 +2014,9 @@ async function openJob(jobId) {
             setFieldValue('text-input', params.text);
             setFieldValue('text-font-size', settings.font_size != null ? String(settings.font_size) : null);
             setFieldValue('text-alignment', settings.alignment);
+            setFieldValue('text-vertical-alignment', settings.vertical_alignment);
+            setFieldValue('text-orientation', settings.orientation);
+            updateTextOrientationUI();
             activateComposeTab('text-tab');
             dispatchOn('text-input', 'input');
         } else if (type === 'qrcode') {

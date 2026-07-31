@@ -135,7 +135,10 @@ paths:
   /text/print:
     post:
       summary: Print text on a label
-      description: Prints formatted text on a label with specified settings
+      description: >-
+        Prints formatted text on a label with specified settings. On continuous
+        media, settings.orientation can run the text lengthwise along the tape
+        so a long message prints as one continuous strip.
       operationId: api.text_controller.print_text
       tags:
         - text
@@ -1152,7 +1155,7 @@ components:
           description: Model of the Brother QL printer (e.g., QL-800, QL-810W, QL-820NWB)
           example: "QL-800"
           default: "QL-800"
-          enum: ["QL-500", "QL-550", "QL-560", "QL-570", "QL-580N", "QL-650TD", "QL-700", "QL-710W", "QL-720NW", "QL-800", "QL-810W", "QL-820NWB", "QL-1050", "QL-1060N", "QL-1100", "QL-1100NWB", "QL-1115NWB"]
+          enum: ["QL-500", "QL-550", "QL-560", "QL-570", "QL-580N", "QL-600", "QL-650TD", "QL-700", "QL-710W", "QL-720NW", "QL-800", "QL-810W", "QL-820NWB", "QL-1050", "QL-1060N", "QL-1100", "QL-1110NWB", "QL-1115NWB"]
       required:
         - printer_uri
         - printer_model
@@ -1402,7 +1405,7 @@ components:
           description: Model of the Brother QL printer
           example: "QL-800"
           default: "QL-800"
-          enum: ["QL-500", "QL-550", "QL-560", "QL-570", "QL-580N", "QL-650TD", "QL-700", "QL-710W", "QL-720NW", "QL-800", "QL-810W", "QL-820NWB", "QL-1050", "QL-1060N", "QL-1100", "QL-1100NWB", "QL-1115NWB"]
+          enum: ["QL-500", "QL-550", "QL-560", "QL-570", "QL-580N", "QL-600", "QL-650TD", "QL-700", "QL-710W", "QL-720NW", "QL-800", "QL-810W", "QL-820NWB", "QL-1050", "QL-1060N", "QL-1100", "QL-1110NWB", "QL-1115NWB"]
         label_size:
           type: string
           description: Size of the label
@@ -1423,6 +1426,54 @@ components:
             instead, it means shrinking until no single word has to be broken
             mid-word. Only applies while text_wrap is on.
           default: true
+        font_size:
+          type: integer
+          description: >
+            Point size the text is rendered at, overriding the saved default for
+            this request. With auto_fit on this is the starting size: the
+            renderer may shrink the text from here to make it fit the medium.
+          minimum: 10
+          maximum: 100
+          default: 50
+        alignment:
+          type: string
+          description: >
+            Placement of the text lines along the direction the text reads, the
+            horizontal alignment on an upright label, overriding the saved
+            default for this request. vertical_alignment places the block on the
+            other axis.
+          enum: ["left", "center", "right"]
+          default: "left"
+        vertical_alignment:
+          type: string
+          description: >
+            Position of the text block along the axis perpendicular to the
+            direction the text reads — the counterpart to alignment, which
+            places the lines horizontally. On die-cut labels, rectangular and
+            round alike, it moves the block within the label's fixed height. On
+            continuous media it applies only with orientation "lengthwise",
+            where it moves the block across the tape width; with the default
+            orientation "across" the label grows in length to fit the text
+            exactly, so there is no spare space to move within and the setting
+            has no effect. "middle" keeps the centred placement.
+          enum: ["top", "middle", "bottom"]
+          default: "middle"
+        orientation:
+          type: string
+          description: >
+            Direction the text runs on the tape. "across" is the default: the
+            text runs across the tape width and the label grows in length as
+            lines are added. "lengthwise" runs the text along the tape instead,
+            so the roll's printable width becomes the line height and the label
+            grows with the message — a long message prints as one continuous
+            strip rather than being wrapped into a narrow column. Lengthwise
+            only applies to continuous ("endless") media, where the length is
+            unbounded; die-cut labels have a fixed size in both directions, so
+            the setting is ignored there and rendering falls back to "across".
+            The text reads bottom-to-top when the strip is held vertically;
+            combine with rotate: 180 for the opposite reading direction.
+          enum: ["across", "lengthwise"]
+          default: "across"
         rotate:
           type: integer
           description: Rotation angle in degrees
@@ -1491,7 +1542,7 @@ components:
           description: Default printer model
           example: "QL-800"
           default: "QL-800"
-          enum: ["QL-500", "QL-550", "QL-560", "QL-570", "QL-580N", "QL-650TD", "QL-700", "QL-710W", "QL-720NW", "QL-800", "QL-810W", "QL-820NWB", "QL-1050", "QL-1060N", "QL-1100", "QL-1100NWB", "QL-1115NWB"]
+          enum: ["QL-500", "QL-550", "QL-560", "QL-570", "QL-580N", "QL-600", "QL-650TD", "QL-700", "QL-710W", "QL-720NW", "QL-800", "QL-810W", "QL-820NWB", "QL-1050", "QL-1060N", "QL-1100", "QL-1110NWB", "QL-1115NWB"]
         label_size:
           type: string
           description: Default label size
@@ -1511,6 +1562,34 @@ components:
           enum: [left, center, right]
           example: "left"
           default: "left"
+        vertical_alignment:
+          type: string
+          description: >-
+            Default position of the text block along the axis perpendicular to
+            the direction the text reads — the counterpart to alignment, which
+            places the lines horizontally. On die-cut labels, rectangular and
+            round alike, it moves the block within the label's fixed height. On
+            continuous media it applies only with orientation "lengthwise",
+            where it moves the block across the tape width; with the default
+            orientation "across" the label grows in length to fit the text
+            exactly, so there is no spare space to move within and the setting
+            has no effect.
+          enum: ["top", "middle", "bottom"]
+          example: "middle"
+          default: "middle"
+        orientation:
+          type: string
+          description: >-
+            Default direction the text runs on the tape. "across" runs the text
+            across the tape width, so the label grows in length as lines are
+            added; "lengthwise" runs it along the tape, so the roll's printable
+            width becomes the line height and a long message prints as one
+            continuous strip. Lengthwise only applies to continuous ("endless")
+            media; die-cut labels have a fixed size in both directions and fall
+            back to "across".
+          enum: ["across", "lengthwise"]
+          example: "across"
+          default: "across"
         rotate:
           type: integer
           description: Default rotation angle

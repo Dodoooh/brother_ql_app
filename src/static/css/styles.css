@@ -24,6 +24,14 @@
     --red: #DC2626;
     --label-bg: #FFFFFF;
     --label-ink: #0a0a0a;
+    /* Die-cut overlay. It always sits on the (white) label surface, so the veil
+       and hatch are identical in both themes; only the cut edge follows the
+       accent that reads best on white. The veil is paper-coloured on purpose:
+       it fades ink that falls outside the cut towards the paper it will never
+       reach, while the hatch marks the discarded area itself. */
+    --diecut-veil: rgba(255, 255, 255, 0.55);
+    --diecut-hatch: rgba(14, 20, 27, 0.28);
+    --diecut-edge: var(--accent);
     --radius: 12px;
     --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
     --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
@@ -50,6 +58,9 @@ body.dark-mode {
     --red: #F87171;
     --label-bg: #FFFFFF;
     --label-ink: #0a0a0a;
+    /* Dark theme brightens --accent for dark panels; on the white label the
+       dimmed accent keeps the cut edge readable. */
+    --diecut-edge: var(--accent-dim);
     --shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
 }
 
@@ -354,6 +365,9 @@ select:focus {
     border-color: var(--accent);
     box-shadow: 0 0 0 3px var(--accent-glow);
 }
+textarea:disabled,
+input:disabled,
+select:disabled { opacity: .55; cursor: not-allowed; }
 textarea { resize: vertical; min-height: 88px; line-height: 1.55; }
 input.mono { font-family: var(--mono); letter-spacing: 0.01em; }
 input[type=file] { padding: 8px 10px; cursor: pointer; }
@@ -502,20 +516,76 @@ body.dark-mode .btn-print { color: #06222B; }
     text-align: left;
 }
 .preview-image { display: block; max-height: 60vh; object-fit: contain; padding: 6px; }
-/* Server-rendered, true-to-print label preview. Same "label" look as
-   .preview-text (white card, shadow), but renders the exact 1-bit print
-   output crisply. When visible it sits on top of the client previews. */
-.preview-server {
+/* Server-rendered, true-to-print label preview. The stage carries the "label"
+   look (white card, shadow) so the die-cut overlay can be laid out exactly on
+   top of the image area; the image itself stays untouched and renders the exact
+   1-bit print output crisply. When visible it sits on top of the client
+   previews. */
+.preview-stage {
+    --preview-pad: 6px;
+    position: relative;
     display: block;
     background: var(--label-bg);
     border-radius: 6px;
     box-shadow: 0 18px 50px rgba(0, 0, 0, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.06);
     max-width: 100%;
+    padding: var(--preview-pad);
+}
+.preview-server {
+    display: block;
+    max-width: 100%;
     max-height: 60vh;
     object-fit: contain;
-    padding: 6px;
     image-rendering: crisp-edges;
     image-rendering: pixelated;
+}
+
+/* ---- Round die-cut media (d12 / d24 / d58) ----
+   The printer receives a square raster, but the label itself is punched out as
+   a circle: only the inscribed circle survives the die-cut. The overlay marks
+   the cut edge and veils + hatches everything outside it, so content escaping
+   the circle stays visible while clearly reading as "gets trimmed off".
+   The image below is never touched — this is presentation only. */
+.preview-die-cut { display: none; }
+.preview-stage.is-round {
+    /* Square media: capping the width caps the height too, which keeps the
+       overlay locked to the image box at any viewport size. */
+    max-width: min(100%, 60vh);
+}
+.preview-stage.is-round .preview-server { max-height: none; }
+.preview-stage.is-round .preview-die-cut {
+    display: block;
+    position: absolute;
+    inset: var(--preview-pad);
+    pointer-events: none;
+}
+.preview-stage.is-round .preview-die-cut::before,
+.preview-stage.is-round .preview-die-cut::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+}
+/* Discarded area: hatch + veil everywhere, masked away inside the circle. */
+.preview-stage.is-round .preview-die-cut::before {
+    background:
+        repeating-linear-gradient(45deg,
+            transparent 0 5px,
+            var(--diecut-hatch) 5px 6px),
+        var(--diecut-veil);
+    -webkit-mask-image: radial-gradient(circle closest-side at 50% 50%, transparent 99.5%, #000 100%);
+    mask-image: radial-gradient(circle closest-side at 50% 50%, transparent 99.5%, #000 100%);
+}
+/* The die-cut edge itself (unmasked, so the full ring stays visible). */
+.preview-stage.is-round .preview-die-cut::after {
+    border: 1px dashed var(--diecut-edge);
+    border-radius: 50%;
+}
+
+.preview-medium-hint {
+    margin-top: 14px;
+    max-width: 320px;
+    text-align: center;
+    line-height: 1.6;
 }
 .preview-qrcode { padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px; }
 .preview-qrcode img { display: block; max-width: 100%; height: auto; image-rendering: pixelated; }
@@ -938,3 +1008,204 @@ body.dark-mode .queue-badge { color: #06222B; }
     font-size: 13px;
 }
 .demo-notice i { color: var(--accent); }
+
+/* ===================== Label type picker ===================== */
+/* A search-first replacement for the raw label dropdown. The native
+   <select id="label-size"> stays in the DOM as the source of truth and is only
+   taken out of sight (and out of the tab order) once the picker is live. */
+
+.lp-native {
+    position: absolute;
+    width: 1px; height: 1px;
+    padding: 0; margin: -1px;
+    overflow: hidden;
+    clip: rect(0 0 0 0);
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
+}
+
+.label-picker { position: relative; }
+
+/* ---- Closed state ---- */
+.lp-trigger {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-align: left;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--ink);
+    border-radius: 9px;
+    padding: 9px 12px;
+    font-family: var(--sans);
+    cursor: pointer;
+    transition: border-color .14s, box-shadow .14s;
+}
+.lp-trigger:hover { border-color: var(--muted-dim); }
+.lp-trigger:focus-visible,
+.label-picker.is-open .lp-trigger {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-glow);
+}
+
+.lp-trigger-body {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+.lp-trigger-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lp-trigger-use {
+    font-size: 11.5px;
+    color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lp-trigger-codes {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--accent-strong);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.lp-chevron { flex: 0 0 auto; color: var(--muted-dim); font-size: 13px; }
+
+/* ---- Popover ---- */
+.lp-pop {
+    position: absolute;
+    z-index: 60;
+    top: calc(100% + 6px);
+    left: 0; right: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+    overflow: hidden;
+}
+.lp-pop[hidden] { display: none; }
+
+.lp-search {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 9px 12px;
+    background: var(--panel-2);
+    border-bottom: 1px solid var(--border-soft);
+}
+.lp-search i { flex: 0 0 auto; color: var(--muted-dim); font-size: 13px; }
+.lp-search input[type=text] {
+    flex: 1 1 auto;
+    width: 100%;
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    padding: 2px 0;
+    font-size: 13px;
+    color: var(--ink);
+}
+.lp-search input[type=text]:focus { border: 0; box-shadow: none; }
+
+.lp-list {
+    list-style: none;
+    margin: 0;
+    padding: 6px;
+    max-height: min(52vh, 360px);
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior: contain;
+}
+
+.lp-grouphead {
+    padding: 9px 10px 5px;
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.09em;
+    font-weight: 600;
+    color: var(--muted-dim);
+}
+.lp-list .lp-grouphead:first-child { padding-top: 4px; }
+
+.lp-opt {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 8px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+.lp-opt.is-active { background: var(--accent-soft); }
+.lp-opt[aria-selected="true"] { box-shadow: inset 0 0 0 1px var(--accent-dim); }
+
+.lp-opt-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 10px;
+}
+.lp-opt-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+}
+.lp-opt-codes {
+    flex: 0 0 auto;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--muted-dim);
+    white-space: nowrap;
+}
+.lp-opt[aria-selected="true"] .lp-opt-codes { color: var(--accent-strong); }
+/* Identifiers shared by several products list every code, wrapped, on a line
+   of its own rather than losing the tail to an ellipsis. */
+.lp-opt-codes--block {
+    white-space: normal;
+    margin-top: 3px;
+    line-height: 1.6;
+}
+.lp-opt-desc {
+    font-size: 11.5px;
+    color: var(--muted);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+.lp-flag {
+    align-self: flex-start;
+    margin-top: 3px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    font-size: 10px;
+    letter-spacing: 0.01em;
+    border: 1px solid var(--border);
+    background: var(--panel-2);
+    color: var(--muted);
+}
+.lp-flag--warn {
+    border-color: color-mix(in srgb, var(--red) 40%, var(--border));
+    color: var(--red);
+    background: transparent;
+}
+
+.lp-empty {
+    padding: 14px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+    border-top: 1px solid var(--border-soft);
+}
+.lp-empty[hidden] { display: none; }
+
+@media (max-width: 768px) {
+    /* Match the 16px rule that stops iOS from zooming into a focused field. */
+    .lp-search input[type=text] { font-size: 16px; }
+    .lp-opt-head { flex-wrap: wrap; gap: 2px 10px; }
+    .lp-list { max-height: 60vh; }
+}

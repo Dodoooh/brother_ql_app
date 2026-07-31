@@ -36,6 +36,42 @@ function initQRCodePlaceholders() {
 }
 
 /**
+ * Reflect the selected label medium in the preview panel.
+ *
+ * Round die-cut media (d12 / d24 / d58) is rendered by the printer as a square
+ * raster, but the label is punched out as a circle: only the inscribed circle
+ * ends up on the label. The server preview keeps showing the raster exactly as
+ * printed — this only adds the die-cut treatment around it (cut edge + veiled
+ * corners) and a hint naming the medium. Rectangular die-cut types ("62x29")
+ * and continuous rolls stay rectangular.
+ */
+function updatePreviewMediumUI() {
+    const labelSizeEl = document.getElementById('label-size');
+    const stage = document.getElementById('preview-stage');
+    const serverImg = document.getElementById('preview-server');
+    const hint = document.getElementById('preview-medium-hint');
+    if (!labelSizeEl) return;
+
+    const diameter = typeof roundLabelDiameterMm === 'function'
+        ? roundLabelDiameterMm(labelSizeEl.value)
+        : null;
+    const round = diameter !== null;
+
+    if (stage) stage.classList.toggle('is-round', round);
+    if (serverImg) {
+        serverImg.alt = round
+            ? 'Rendered label preview (round die-cut)'
+            : 'Rendered label preview';
+    }
+    if (hint) {
+        hint.textContent = round
+            ? `${diameter} mm round die-cut — only the circle ends up on the label, the hatched area is trimmed off`
+            : '';
+        hint.classList.toggle('d-none', !round);
+    }
+}
+
+/**
  * Check if all previews are empty/hidden
  */
 function areAllPreviewsEmpty() {

@@ -126,7 +126,7 @@
                                         <textarea id="text-input" rows="4" placeholder="Enter text to print..." spellcheck="false"></textarea>
                                         <div class="hint">Use **bold** or *italic* for formatting</div>
                                     </div>
-                                    <div class="grid-2">
+                                    <div class="grid-3">
                                         <div class="field">
                                             <label class="lbl" for="text-font-size">Font Size</label>
                                             <input type="number" id="text-font-size" class="mono" value="50" min="10" max="100">
@@ -139,6 +139,22 @@
                                                 <option value="right">Right</option>
                                             </select>
                                         </div>
+                                        <div class="field">
+                                            <label class="lbl" for="text-vertical-alignment">Vertical</label>
+                                            <select id="text-vertical-alignment">
+                                                <option value="top">Top</option>
+                                                <option value="middle">Middle</option>
+                                                <option value="bottom">Bottom</option>
+                                            </select>
+                                        </div>
+                                    </div>
+                                    <div class="field">
+                                        <label class="lbl" for="text-orientation">Orientation</label>
+                                        <select id="text-orientation">
+                                            <option value="across">Across the tape</option>
+                                            <option value="lengthwise">Along the tape (endless)</option>
+                                        </select>
+                                        <div class="hint">Along the tape needs an endless roll</div>
                                     </div>
                                     <div class="print-options">
                                         <div class="grid-2">
@@ -564,6 +580,7 @@
                                                 <option value="QL-560">QL-560</option>
                                                 <option value="QL-570">QL-570</option>
                                                 <option value="QL-580N">QL-580N</option>
+                                                <option value="QL-600">QL-600</option>
                                                 <option value="QL-650TD">QL-650TD</option>
                                                 <option value="QL-700">QL-700</option>
                                                 <option value="QL-710W">QL-710W</option>
@@ -574,7 +591,7 @@
                                                 <option value="QL-1050">QL-1050</option>
                                                 <option value="QL-1060N">QL-1060N</option>
                                                 <option value="QL-1100">QL-1100</option>
-                                                <option value="QL-1100NWB">QL-1100NWB</option>
+                                                <option value="QL-1110NWB">QL-1110NWB</option>
                                                 <option value="QL-1115NWB">QL-1115NWB</option>
                                             </select>
                                         </div>
@@ -585,7 +602,36 @@
 
                                     <div class="grid-2">
                                         <div class="field">
-                                            <label class="lbl" for="label-size">Label Type</label>
+                                            <label class="lbl" for="label-size" id="label-size-label">Label Type</label>
+
+                                            <!-- Searchable picker on top of the native select below.
+                                                 Hidden until labels.js takes over, so the plain
+                                                 dropdown keeps working without JavaScript. -->
+                                            <div class="label-picker" id="label-picker" hidden>
+                                                <button type="button" class="lp-trigger" id="label-picker-trigger"
+                                                        aria-haspopup="listbox" aria-expanded="false"
+                                                        aria-controls="label-picker-list" aria-labelledby="label-size-label label-picker-name">
+                                                    <span class="lp-trigger-body">
+                                                        <span class="lp-trigger-name" id="label-picker-name">Select a label type</span>
+                                                        <span class="lp-trigger-use" id="label-picker-use" hidden></span>
+                                                        <span class="lp-trigger-codes" id="label-picker-codes" hidden></span>
+                                                    </span>
+                                                    <i class="bi bi-chevron-expand lp-chevron" aria-hidden="true"></i>
+                                                </button>
+                                                <div class="lp-pop" id="label-picker-pop" hidden>
+                                                    <div class="lp-search">
+                                                        <i class="bi bi-search" aria-hidden="true"></i>
+                                                        <input type="text" id="label-picker-search" autocomplete="off"
+                                                               spellcheck="false" role="combobox" aria-expanded="false"
+                                                               aria-controls="label-picker-list" aria-autocomplete="list"
+                                                               aria-labelledby="label-size-label" aria-activedescendant=""
+                                                               placeholder="Search DK-11218, 62x29, round, shipping…">
+                                                    </div>
+                                                    <ul class="lp-list" id="label-picker-list" role="listbox" aria-labelledby="label-size-label"></ul>
+                                                    <div class="lp-empty" id="label-picker-empty" role="status" hidden></div>
+                                                </div>
+                                            </div>
+
                                             <select id="label-size">
                                                 <option value="12">12 mm (endless)</option>
                                                 <option value="12+17">12+17 mm (endless)</option>
@@ -622,6 +668,7 @@
                                                 <option value="pt24">pTouch 24mm (endless)</option>
                                                 <option value="pt36">pTouch 36mm (endless)</option>
                                             </select>
+                                            <div class="hint d-none" id="label-picker-note"></div>
                                         </div>
                                         <div class="field">
                                             <label class="lbl" for="rotate">Rotation</label>
@@ -733,7 +780,10 @@
                 </div>
                 <div class="panel-body">
                     <div class="preview-container">
-                        <img id="preview-server" class="preview-server d-none" src="" alt="Rendered label preview">
+                        <div id="preview-stage" class="preview-stage d-none">
+                            <img id="preview-server" class="preview-server" src="" alt="Rendered label preview">
+                            <span class="preview-die-cut" aria-hidden="true"></span>
+                        </div>
                         <div id="preview-text" class="preview-text d-none"></div>
                         <img id="preview-image" class="preview-image d-none" src="" alt="Image Preview">
                         <div id="preview-qrcode" class="preview-qrcode d-none"></div>
@@ -746,6 +796,7 @@
                             <i class="bi bi-card-image"></i>
                             <p>Enter content in the form to see a live preview</p>
                         </div>
+                        <div id="preview-medium-hint" class="hint preview-medium-hint d-none"></div>
                     </div>
                 </div>
             </section>
@@ -798,6 +849,7 @@
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <script src="js/demo.js"></script>
     <script src="js/utils.js"></script>
+    <script src="js/labels.js"></script>
     <script src="js/preview.js"></script>
     <script src="js/api.js"></script>
     <script src="js/core.js"></script>

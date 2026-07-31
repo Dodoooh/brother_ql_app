@@ -21,7 +21,7 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **👁️ Live Preview**: See how your labels will look before printing for all label types, with an instant client-side preview backed by a true-to-print server render.
 
-- **⚙️ Custom Settings**: Fine-tune font size, label size, alignment, rotation, threshold, dithering and red printing. Copies (1–100) and cut mode are available directly in every compose section.
+- **⚙️ Custom Settings**: Fine-tune font size, label size, alignment, rotation, threshold, dithering and red printing. Text can run across the tape or lengthwise along it on continuous rolls. Copies (1–100) and cut mode are available directly in every compose section.
 
 - **🗂 Print Queue**: Submit multiple jobs and have them printed sequentially. Pause/resume the queue, emergency-stop (cancel all waiting jobs), delete individual jobs, reprint with the same settings, or re-open a job's parameters — all from the Queue panel.
 
@@ -154,10 +154,12 @@ The application settings can be configured in the `data/settings.json` file. Thi
 
 - `printer_uri`: The URI of the printer to use (e.g., `tcp://192.168.1.100` when over network, or `file:///dev/usb/lp0` when using USB)
 - `printer_model`: The model of the printer (e.g., `QL-800`)
-- `label_size`: The size of the label to print (e.g., `62`)
+- `label_size`: The size of the label to print (e.g., `62`). Continuous rolls, rectangular die-cut labels (e.g. `62x29`) and round die-cut labels (`d12`, `d24`, `d58`) all work with every content type — text, images, PDF pages, QR codes and the combined layouts. On round media the content is laid out to the circle rather than to the square around it, so it is not clipped by the die cut
 - `font_size`: The default font size used for text printing (e.g., `50`)
 - `alignment`: The default text alignment (`left`, `center`, or `right`)
-- `rotate`: The rotation applied to the rendered label in degrees (`0`, `90`, `180`, or `270`)
+- `vertical_alignment`: How the text block sits across the label's height (`top`, `middle` — the default — or `bottom`), the counterpart to `alignment` along the width. Takes effect on die-cut labels and on continuous rolls set to `lengthwise`; a continuous roll printed `across` grows in length to fit the text exactly, so there is no spare height to move within
+- `orientation`: How text runs on the label — `across` (the default: text runs across the tape and the label grows in length) or `lengthwise` (text runs along the tape, so the roll's printable width becomes the line height). Text labels on continuous rolls only; die-cut labels always print `across`
+- `rotate`: The rotation applied to the rendered label in degrees (`0`, `90`, `180`, or `270`). `90` and `270` are currently not supported on rectangular die-cut labels, whose canvas is a fixed size in both directions
 - `threshold`: The black/white threshold used when converting the image (e.g., `70.0`)
 - `dither`: Whether to apply dithering when converting the image (`true`/`false`)
 - `compress`: Whether to enable printer-side compression (`true`/`false`)
@@ -279,6 +281,10 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 > **Raw PNG previews:** The preview endpoints (`/text/preview`, `/qrcode/preview`, `/label/preview`, `/image/preview`) return the JSON wrapper `{"image": "data:image/png;base64,…"}` by default. Send `Accept: image/png` to instead receive the raw PNG bytes (with `X-Label-Width-Px` / `X-Label-Height-Px` headers) — handy for piping a preview straight to an `<img>`.
 
 > **Automatic wrapping:** Long text is wrapped at word boundaries to fit the label (over-long words are hard-broken) instead of being truncated — for plain text, text+QR and QR captions, in both print and preview. It is on by default; disable per request with `text.wrap: false` (or `settings.text_wrap: false`).
+
+> **Lengthwise text:** Set `settings.orientation` to `lengthwise` on `/text/print` or `/text/preview` to run the text along the tape instead of across it: the roll's printable width becomes the line height and the tape grows with the message, so a long text on a narrow roll prints as one continuous strip instead of a shrunken column. The text reads bottom-to-top when the strip is held upright — add `rotate: 180` for the opposite direction. Continuous rolls only; die-cut labels have a fixed size in both directions and always render `across` (the default).
+
+> **Vertical alignment:** `settings.vertical_alignment` (`top`, `middle`, `bottom`) positions the text block across the label's height on `/text/print` and `/text/preview`, the counterpart to `alignment` along the width. It has room to work on die-cut labels — most visibly on round media such as `d24`, where a centred line leaves a lot of space above and below — and on continuous rolls set to `lengthwise`, where it moves the text across the tape width. On a continuous roll printed `across` (the default) the label grows in length to fit the text exactly, so there is no spare height and the setting has no effect. The default `middle` matches the previous behaviour.
 
 > **Dry run:** Add `dry_run: true` to any print request to validate it end-to-end (render + printer reachability) **without** printing or queueing — ideal for endless (62 mm) media and CI. The response is `{ "ok": true, "dry_run": true, "printer_reachable": …, "would_print": { "label_size", "copies", "width_px", "height_px" } }`.
 

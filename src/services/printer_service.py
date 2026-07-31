@@ -6,13 +6,14 @@ import os
 import sys
 import io
 import base64
+import math
 import uuid
 import structlog
 import threading
 import time
 import socket
 from datetime import datetime, timezone
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 import qrcode
 from brother_ql.raster import BrotherQLRaster
@@ -48,8 +49,77 @@ DEFAULT_LABEL_WIDTH_PX = 696
 # clipping is the more honest outcome.
 MIN_AUTO_FIT_FONT_SIZE = 8
 
+# Upper bound for a lengthwise label, in printer dots. The QL series prints at
+# 300 dpi, so this is a little under a metre of tape. Lengthwise rendering has
+# no width to wrap against, which means a long enough message would silently
+# unspool a good part of the roll; refusing is the cheaper failure.
+MAX_LENGTHWISE_LENGTH_PX = 11811
 
-def get_label_geometry(label_size: Optional[str]) -> Tuple[int, int, bool]:
+# A round label's printable area is a circle, but the media is fed and cut
+# mechanically, so the die cut never lands on exactly the same dot twice. Keep a
+# sliver of the rim clear so a rounding error or a slightly misregistered cut
+# takes white paper rather than the edge of a glyph.
+ROUND_LABEL_MARGIN_RATIO = 0.02
+MIN_ROUND_LABEL_MARGIN_PX = 2
+
+# Slack kept between a shifted text block and the chord it is measured against.
+# Moving a block towards the rim stops where the chord is exactly as wide as the
+# text, and "exactly" does not survive the trip through integer chord widths and
+# rounded draw coordinates: the block would be pushed one dot too far, fail its
+# own fit check and shrink the font for no visible reason. Two dots of slack
+# costs nothing and makes the placement land inside every time.
+ROUND_BLOCK_TRAVEL_SLACK_PX = 2
+
+# Where a text block sits on the axis perpendicular to its reading direction.
+# Only media with spare room on that axis can honour it: a die-cut label has a
+# fixed height, and a continuous roll rendered lengthwise has the tape width to
+# play with. Continuous tape rendered across grows to exactly fit the text, so
+# there is no slack to distribute and the setting is a no-op there.
+VERTICAL_ALIGNMENTS = ("top", "middle", "bottom")
+DEFAULT_VERTICAL_ALIGNMENT = "middle"
+
+# Clear space kept between a text block and the edge of a fixed-size label. The
+# die cut and the cutter both have a tolerance of a dot or two, so a block flush
+# against the very edge comes back trimmed however exact the render was.
+LABEL_EDGE_MARGIN_PX = 10
+
+
+class LabelGeometry(tuple):
+    """The printable geometry of one label, as a tuple with named access.
+
+    This *is* the historical ``(width, height, is_die_cut)`` 3-tuple -- it
+    compares and unpacks exactly like one, so existing callers are unaffected --
+    extended with the ``is_round`` flag. Round and rectangular die-cut media are
+    both a fixed size, but only the round ones have a *circular* printable area:
+    content laid out to the full square corners falls outside the die cut and is
+    simply not on the label the user peels off.
+
+    Attributes:
+        width: Printable width in pixels.
+        height: Printable height in pixels, 0 for continuous tape.
+        is_die_cut: Whether the label has a fixed physical size.
+        is_round: Whether the printable area is a circle of diameter ``width``.
+    """
+
+    def __new__(cls, width: int, height: int, is_die_cut: bool, is_round: bool = False):
+        geometry = tuple.__new__(cls, (int(width), int(height), bool(is_die_cut)))
+        geometry.is_round = bool(is_round)
+        return geometry
+
+    @property
+    def width(self) -> int:
+        return self[0]
+
+    @property
+    def height(self) -> int:
+        return self[1]
+
+    @property
+    def is_die_cut(self) -> bool:
+        return self[2]
+
+
+def get_label_geometry(label_size: Optional[str]) -> LabelGeometry:
     """Return ``(printable_width_px, printable_height_px, is_die_cut)`` for a roll.
 
     brother_ql already knows the true printable area of every supported label,
@@ -59,11 +129,12 @@ def get_label_geometry(label_size: Optional[str]) -> Tuple[int, int, bool]:
     -- ``convert()`` rejects any other height outright.
 
     Args:
-        label_size: Label identifier, e.g. "62", "50" or "62x29".
+        label_size: Label identifier, e.g. "62", "50", "62x29" or "d24".
 
     Returns:
-        Tuple of printable width in pixels, printable height in pixels (0 for
-        continuous tape) and whether the label is die-cut.
+        A :class:`LabelGeometry`: the printable width in pixels, the printable
+        height in pixels (0 for continuous tape) and whether the label is
+        die-cut, plus an ``is_round`` attribute for round die-cut media.
     """
     if label_size:
         try:
@@ -71,24 +142,158 @@ def get_label_geometry(label_size: Optional[str]) -> Tuple[int, int, bool]:
 
             for label in ALL_LABELS:
                 if label.identifier == str(label_size):
-                    die_cut = label.form_factor in (
-                        FormFactor.DIE_CUT,
-                        FormFactor.ROUND_DIE_CUT,
-                    )
+                    is_round = label.form_factor == FormFactor.ROUND_DIE_CUT
+                    die_cut = is_round or label.form_factor == FormFactor.DIE_CUT
                     width, height = label.dots_printable
-                    return (width, height, die_cut)
+                    return LabelGeometry(width, height, die_cut, is_round)
         except Exception:
             logger.warning(
                 "Could not resolve label geometry, falling back to 62 mm",
                 label_size=label_size,
                 exc_info=True,
             )
-    return (DEFAULT_LABEL_WIDTH_PX, 0, False)
+    return LabelGeometry(DEFAULT_LABEL_WIDTH_PX, 0, False, False)
 
 
 def get_label_width(label_size: Optional[str]) -> int:
     """Return the printable width in pixels for a label identifier."""
     return get_label_geometry(label_size)[0]
+
+
+def get_round_safe_radius(diameter: int) -> float:
+    """Return the radius content may occupy on a round label of ``diameter``.
+
+    Args:
+        diameter: The label's printable width in pixels (a round label's
+            printable area is square, so width and height are its diameter).
+
+    Returns:
+        The radius in pixels, shrunk by the die-cut registration margin.
+    """
+    margin = max(MIN_ROUND_LABEL_MARGIN_PX, int(round(diameter * ROUND_LABEL_MARGIN_RATIO)))
+    return max(1.0, diameter / 2.0 - margin)
+
+
+def get_vertical_alignment(settings: Dict[str, Any]) -> str:
+    """Return the requested vertical alignment, defaulting to ``middle``.
+
+    An unrecognised value falls back to the default rather than raising: this is
+    a layout hint, and a typo in it is not worth refusing a print over -- the
+    same treatment ``orientation`` gets.
+
+    Args:
+        settings: Print settings, possibly carrying ``vertical_alignment``.
+
+    Returns:
+        One of ``top``, ``middle`` or ``bottom``.
+    """
+    value = str(settings.get("vertical_alignment", DEFAULT_VERTICAL_ALIGNMENT)).lower()
+    return value if value in VERTICAL_ALIGNMENTS else DEFAULT_VERTICAL_ALIGNMENT
+
+
+def get_vertical_offset(available_height: int, block_height: int,
+                        vertical_alignment: str = DEFAULT_VERTICAL_ALIGNMENT,
+                        margin: int = LABEL_EDGE_MARGIN_PX) -> int:
+    """Return the y of a text block's first line inside ``available_height``.
+
+    The margin is respected in every direction: a block pinned flush against the
+    edge of a die-cut label is the part the cut tolerance eats, so ``top`` means
+    "as high as the label safely allows", not "at pixel zero". When the block is
+    taller than the space it has, the margin wins and the overflow is clipped
+    symmetrically, exactly as a centred block always was.
+
+    Args:
+        available_height: Height of the canvas the block is placed on.
+        block_height: Total height of the stack of lines.
+        vertical_alignment: One of ``top``, ``middle`` or ``bottom``.
+        margin: Clear space to keep against the top and bottom edges.
+
+    Returns:
+        The y coordinate the first line is drawn at.
+    """
+    if vertical_alignment == "top":
+        return margin
+    if vertical_alignment == "bottom":
+        return max(margin, available_height - block_height - margin)
+    return max(margin, (available_height - block_height) // 2)
+
+
+def get_round_block_top(radius: float, block_height: float, block_width: float,
+                        vertical_alignment: str = DEFAULT_VERTICAL_ALIGNMENT) -> float:
+    """Return the top of a text block, measured from a round label's centre.
+
+    Moving a block up or down a circle costs width, because the chord narrows
+    towards the rim. So the travel is bounded by the block's own width: a block
+    ``block_width`` wide only has the circle behind it while it stays within
+    ``sqrt(radius^2 - (block_width / 2)^2)`` of the centre line. Pushing past
+    that would print the ends of the lines onto the backing paper, which is the
+    whole failure mode round media exists to avoid.
+
+    A block that already fills that span has nothing left to shift, so it stays
+    centred -- and if it overflows, centring is what keeps the overflow
+    symmetric instead of dumping all of it on one edge.
+
+    Args:
+        radius: Usable radius in pixels (see :func:`get_round_safe_radius`).
+        block_height: Total height of the stack of lines, in pixels.
+        block_width: Width of the widest line in the stack, in pixels.
+        vertical_alignment: One of ``top``, ``middle`` or ``bottom``.
+
+    Returns:
+        The block's top edge as an offset from the label's centre (negative is
+        above the centre).
+    """
+    centred = -block_height / 2.0
+    if vertical_alignment not in ("top", "bottom"):
+        return centred
+    needed = block_width + ROUND_BLOCK_TRAVEL_SLACK_PX
+    half_span = math.sqrt(max(0.0, radius * radius - (needed / 2.0) ** 2))
+    if block_height >= 2 * half_span:
+        return centred
+    return -half_span if vertical_alignment == "top" else half_span - block_height
+
+
+def get_round_line_widths(radius: float, line_count: int, line_height: int,
+                          block_top: Optional[float] = None) -> List[int]:
+    """Return the usable width of each line of a stack on a round label.
+
+    A circle is only as wide as its chord at a given height, so a stack of lines
+    gets a different budget per line: the lines nearest the centre may use
+    nearly the full diameter while those towards the rim are pinched. This is
+    what keeps a single centred line big -- an inscribed square would hand it
+    only ``diameter / sqrt(2)`` (about 70 %) whatever the line height.
+
+    Because the budget depends on *where* the stack sits, the caller has to pass
+    the same ``block_top`` it will draw at (see :func:`get_round_block_top`).
+    Computing centred chords and then drawing the text somewhere else is how ink
+    ends up outside the die cut.
+
+    Args:
+        radius: Usable radius in pixels (see :func:`get_round_safe_radius`).
+        line_count: Number of lines in the stack.
+        line_height: Height of one line box in pixels.
+        block_top: Top of the stack as an offset from the label's centre.
+            Defaults to a stack centred on the label.
+
+    Returns:
+        One width per line, top to bottom. A line whose box falls entirely
+        outside the circle gets 0.
+    """
+    widths: List[int] = []
+    # Vertical offsets are measured from the centre of the label.
+    if block_top is None:
+        block_top = -(line_count * line_height) / 2.0
+    for index in range(line_count):
+        top = block_top + index * line_height
+        bottom = top + line_height
+        # The chord narrows towards the rim, so a line only fits if its *worst*
+        # edge fits -- the one furthest from the centre line.
+        offset = max(abs(top), abs(bottom))
+        if offset >= radius:
+            widths.append(0)
+        else:
+            widths.append(int(2 * math.sqrt(radius * radius - offset * offset)))
+    return widths
 
 
 class _CutAtEndRaster(BrotherQLRaster):
@@ -506,10 +711,14 @@ class PrinterService:
             font = ImageFont.truetype(self.font_path, text_font_size)
 
             # Layout geometry: the roll's printable width, image 1/3, text 2/3.
+            # The 20 px padding is kept for anything from 24 mm up, but scales
+            # down on narrow media: three gutters of 20 px are wider than a
+            # 12 mm roll's printable area, which left the image column with a
+            # negative width and crashed the resize.
             width = get_label_width(settings.get("label_size"))
-            padding = 20
-            image_area_width = int(width * 1 / 3) - padding * 2
-            text_area_width = width - image_area_width - padding * 3
+            padding = min(20, max(2, width // 20))
+            image_area_width = max(1, int(width * 1 / 3) - padding * 2)
+            text_area_width = max(1, width - image_area_width - padding * 3)
 
             # Load the uploaded image, flattening transparency onto white, and
             # scale it into the image area while preserving aspect ratio.
@@ -574,6 +783,13 @@ class PrinterService:
                     text_x = text_area_x
                 draw.text((text_x, text_y), line, font=font, fill="black")
                 text_y += line_height + line_spacing
+
+            # The composition is built at the roll's printable width and grows
+            # downwards, which only a continuous roll allows. Fit it to the
+            # medium so a die-cut label gets its exact canvas (and a round one
+            # keeps the block inside the circle) instead of a "Bad image
+            # dimensions" rejection.
+            new_img = self._fit_to_label(new_img, settings.get("label_size"))
 
             label_path = os.path.join(self.upload_folder, f"text_image_{uuid.uuid4().hex[:8]}.png")
             new_img.save(label_path)
@@ -953,6 +1169,89 @@ class PrinterService:
         return lines
 
     @staticmethod
+    def _wrap_text_to_widths(lines: List[str], font: "ImageFont.FreeTypeFont",
+                             widths: List[int]) -> List[str]:
+        """Word-wrap ``lines`` where every output line has its own width budget.
+
+        The sibling of :meth:`_wrap_text_to_width` for media whose usable width
+        is not constant: on a round label each line of the stack gets the
+        circle's chord at its own height, so the limit changes as the wrap
+        progresses. ``widths`` is indexed by output line; once it runs out (the
+        text wrapped into more lines than were budgeted for) the last entry is
+        reused, and the caller re-runs the wrap with the new line count.
+
+        Args:
+            lines: Input lines (existing breaks are preserved).
+            font: Font the text will be measured and drawn with.
+            widths: Usable width per output line, top to bottom.
+
+        Returns:
+            The wrapped lines.
+        """
+        if not widths:
+            return list(lines)
+
+        wrapped: List[str] = []
+
+        def limit_for_next_line() -> int:
+            return widths[min(len(wrapped), len(widths) - 1)]
+
+        for paragraph in lines:
+            if paragraph == "":
+                wrapped.append("")
+                continue
+            current = ""
+            for word in paragraph.split(" "):
+                limit = limit_for_next_line()
+                candidate = word if not current else current + " " + word
+                # A non-positive budget means this line is off the label
+                # entirely; wrapping harder cannot save it, and hard-breaking
+                # against it would loop forever, so take the text as-is and let
+                # auto-fit shrink the font.
+                if limit <= 0 or font.getlength(candidate) <= limit:
+                    current = candidate
+                    continue
+                if current:
+                    wrapped.append(current)
+                    current = ""
+                    limit = limit_for_next_line()
+                if limit <= 0 or font.getlength(word) <= limit:
+                    current = word
+                else:
+                    # Hard-break a word that is wider than the line it starts on.
+                    chunk = ""
+                    for character in word:
+                        if font.getlength(chunk + character) <= limit:
+                            chunk += character
+                            continue
+                        if chunk:
+                            wrapped.append(chunk)
+                            limit = limit_for_next_line()
+                        chunk = character
+                    current = chunk
+            wrapped.append(current)
+        return wrapped
+
+    @staticmethod
+    def _wrapping_broke_a_word(lines: List[str], wrapped: List[str]) -> bool:
+        """Whether wrapping had to split a word instead of breaking between words.
+
+        Hard-breaking always "fits", so any fitting rule that only asks whether
+        the lines are short enough is trivially satisfiable by chopping a word in
+        half. Comparing the word sequence before and after the wrap is what tells
+        the two apart: a break between words leaves the sequence untouched, a
+        break inside one does not.
+
+        Args:
+            lines: The input lines, before wrapping.
+            wrapped: The lines produced by the wrap.
+
+        Returns:
+            True if at least one word was split.
+        """
+        return " ".join(lines).split() != " ".join(wrapped).split()
+
+    @staticmethod
     def _widest_word(lines: List[str], font: "ImageFont.FreeTypeFont") -> float:
         """Width in pixels of the widest single word across ``lines``.
 
@@ -966,6 +1265,143 @@ class PrinterService:
                 if word:
                     widest = max(widest, font.getlength(word))
         return widest
+
+    def _render_round_text(self, lines: List[str], settings: Dict[str, Any],
+                           diameter: int) -> "Image.Image":
+        """
+        Lay a block of text out inside the circle of a round die-cut label.
+
+        A round label reports a square printable area, but only the inscribed
+        circle is actually on the paper. Rather than retreat to the inscribed
+        square -- which would throw away 36 % of the label and make a single
+        centred line needlessly small -- each line is measured against the
+        circle's chord at its own height (see :func:`get_round_line_widths`), so
+        the middle of the label is used at nearly full width and only the top
+        and bottom lines are pinched.
+
+        ``vertical_alignment`` moves the stack up or down the circle, but only as
+        far as the chord it needs still exists (see :func:`get_round_block_top`).
+        The default stays ``middle``, because the circle is narrowest exactly
+        where a top-aligned block starts and centring is what keeps the first
+        line from being the one that gets cut off.
+
+        Args:
+            lines: The text lines to render (explicit breaks already applied).
+            settings: Print settings; ``font_size``, ``alignment``,
+                ``vertical_alignment``, ``text_wrap`` and ``auto_fit`` are
+                honoured.
+            diameter: The label's printable width in pixels.
+
+        Returns:
+            The rendered label, exactly ``diameter`` x ``diameter`` pixels.
+        """
+        font_size = int(settings.get("font_size", 50))
+        alignment = settings.get("alignment", "left")
+        vertical_alignment = get_vertical_alignment(settings)
+        wrap = settings.get("text_wrap", True)
+        auto_fit = settings.get("auto_fit", True)
+        radius = get_round_safe_radius(diameter)
+
+        def block_top_for(current_lines, current_font, line_height):
+            """Where this exact stack may sit, given the width it needs."""
+            block_width = max(
+                (current_font.getlength(line) for line in current_lines), default=0.0)
+            return get_round_block_top(
+                radius,
+                len(current_lines) * line_height,
+                # A block wider than the label has no room to travel at all; cap
+                # it so the geometry stays real instead of going imaginary.
+                min(block_width, 2 * radius),
+                vertical_alignment,
+            )
+
+        def layout(current_font):
+            """Wrap ``lines`` to the circle and return (lines, widths, height, top)."""
+            ascent, descent = current_font.getmetrics()
+            line_height = ascent + descent
+            rendered = list(lines)
+            if wrap:
+                # Chord widths depend on how many lines there are *and* on where
+                # the stack sits; the line count depends on the widths, and the
+                # position depends on the line count and the widest line. All
+                # three are settled in the same iteration -- resolving them in
+                # separate passes is what leaves the widths describing one
+                # placement while the text is drawn at another. It converges in
+                # a step or two; the cap is only there so a pathological input
+                # cannot spin.
+                block_top = block_top_for(rendered, current_font, line_height)
+                for _ in range(4):
+                    widths = get_round_line_widths(
+                        radius, max(1, len(rendered)), line_height, block_top)
+                    rewrapped = self._wrap_text_to_widths(lines, current_font, widths)
+                    rewrapped_top = block_top_for(rewrapped, current_font, line_height)
+                    settled = len(rewrapped) == len(rendered) and rewrapped_top == block_top
+                    rendered, block_top = rewrapped, rewrapped_top
+                    if settled:
+                        break
+            rendered = rendered or [""]
+            # Whatever the iteration settled on, the widths handed back describe
+            # the placement the caller is about to draw at, never another one.
+            block_top = block_top_for(rendered, current_font, line_height)
+            widths = get_round_line_widths(radius, len(rendered), line_height, block_top)
+            return rendered, widths, line_height, block_top
+
+        font = ImageFont.truetype(self.font_path, font_size)
+        rendered, widths, line_height, block_top = layout(font)
+
+        def fits(current_font, current_lines, current_widths, current_line_height):
+            # The stack has to fit the diameter, and every line has to fit the
+            # chord it sits on. Wrapping already enforces the second for all but
+            # unwrappable input, so this mostly guards text_wrap = false.
+            if len(current_lines) * current_line_height > 2 * radius:
+                return False
+            # ...and no word may have been cut in half to get there. A narrow
+            # chord needs a smaller font, not more line breaks: hard-breaking
+            # satisfies every width test trivially, so without this the search
+            # stops at a large font and prints "Kalibrier / t 2026" when the very
+            # same text fits one unbroken line two steps further down.
+            if self._wrapping_broke_a_word(lines, current_lines):
+                return False
+            return all(
+                current_font.getlength(line) <= width
+                for line, width in zip(current_lines, current_widths)
+            )
+
+        if auto_fit:
+            while (font_size > MIN_AUTO_FIT_FONT_SIZE
+                   and not fits(font, rendered, widths, line_height)):
+                font_size -= 2
+                font = ImageFont.truetype(self.font_path, font_size)
+                rendered, widths, line_height, block_top = layout(font)
+
+        logger.debug("Laid out round label text",
+                     diameter=diameter,
+                     font_size=font_size,
+                     line_count=len(rendered),
+                     line_height=line_height,
+                     vertical_alignment=vertical_alignment)
+
+        image = Image.new("RGB", (diameter, diameter), "white")
+        draw = ImageDraw.Draw(image)
+
+        centre = diameter / 2.0
+        # The very same offset the chords above were measured at.
+        y = centre + block_top
+        for line, width in zip(rendered, widths):
+            line_width = font.getlength(line)
+            # Alignment is relative to the chord this line may use, not to the
+            # square, so "left" still lands on paper near the top and bottom.
+            chord_left = centre - width / 2.0
+            if alignment == "center":
+                x = centre - line_width / 2.0
+            elif alignment == "right":
+                x = chord_left + width - line_width
+            else:
+                x = chord_left
+            draw.text((int(round(x)), int(round(y))), line, font=font, fill="black")
+            y += line_height
+
+        return image
 
     def _create_text_label(self, html_text: str, settings: Dict[str, Any]) -> str:
         """
@@ -1018,18 +1454,47 @@ class PrinterService:
             # Render at the loaded roll's true printable width. Anything else is
             # rescaled by convert() on the way to the printer, which silently
             # changes the effective font size and softens the result.
-            width, label_height, is_die_cut = get_label_geometry(settings.get("label_size"))
+            geometry = get_label_geometry(settings.get("label_size"))
+            width, label_height, is_die_cut = geometry
+
+            # A round label needs its own layout: the usable width is the
+            # circle's chord, which changes from line to line, so there is no
+            # single text area for the rectangular path below to work with.
+            if geometry.is_round and label_height:
+                image = self._render_round_text(lines, settings, width)
+                image_path = os.path.join(
+                    self.upload_folder, f"text_label_{uuid.uuid4().hex[:8]}.png"
+                )
+                image.save(image_path)
+                return image_path
+
             font_size = int(settings.get("font_size", 50))
             alignment = settings.get("alignment", "left")
+            vertical_alignment = get_vertical_alignment(settings)
             text_area = width - 20  # 10 px margin on either side
 
+            # Continuous tape has a spare axis: its length is unbounded. Running
+            # the text along it instead of across it turns the printable width
+            # into the line height and lets the label grow with the message, so
+            # a long text on a narrow roll comes out as one readable strip
+            # rather than a column of hard-wrapped fragments in a tiny font.
+            # A die-cut label is a fixed size in both directions and has no such
+            # axis to spend, so it always renders across.
+            lengthwise = (
+                str(settings.get("orientation", "across")).lower() == "lengthwise"
+                and not (is_die_cut and label_height)
+            )
+
             wrap = settings.get("text_wrap", True)
+            auto_fit = settings.get("auto_fit", True)
             font = ImageFont.truetype(self.font_path, font_size)
 
             def wrap_all(current_font):
                 # Auto-wrap long lines to the label width (default on) so text is
                 # never silently truncated. Disable with settings.text_wrap = false.
-                if not wrap:
+                # Lengthwise there is no width to wrap against -- the tape grows
+                # with the message -- so lines break only where the input said.
+                if not wrap or lengthwise:
                     return list(lines)
                 return [
                     wrapped
@@ -1040,14 +1505,29 @@ class PrinterService:
             wrapped = wrap_all(font)
 
             # auto_fit shrinks the font until the text fits the medium. What
-            # "fits" means depends on the medium, so the two cases differ.
-            if settings.get("auto_fit", True) and wrap:
+            # "fits" means depends on the medium, so the cases differ.
+            if auto_fit and lengthwise:
+                # The lines stack across the tape, so the printable width is the
+                # height budget. Length is free, so nothing else constrains it.
+                while font_size > MIN_AUTO_FIT_FONT_SIZE:
+                    ascent, descent = font.getmetrics()
+                    if 20 + len(wrapped) * (ascent + descent) <= width:
+                        break
+                    font_size -= 2
+                    font = ImageFont.truetype(self.font_path, font_size)
+            elif auto_fit and wrap:
                 if is_die_cut and label_height:
                     # Fixed physical height: shrink until the wrapped text fits
-                    # inside it.
+                    # inside it *and* no word had to be hard-broken to get there.
+                    # Height alone is satisfiable by chopping a word in half, so
+                    # on its own it stops at a large font and prints
+                    # "Kalibrierungs / etikett" where a smaller one would have
+                    # kept the word whole -- the same trade a narrow continuous
+                    # roll makes below.
                     while font_size > MIN_AUTO_FIT_FONT_SIZE:
                         ascent, descent = font.getmetrics()
-                        if 20 + len(wrapped) * (ascent + descent) <= label_height:
+                        if (20 + len(wrapped) * (ascent + descent) <= label_height
+                                and self._widest_word(lines, font) <= text_area):
                             break
                         font_size -= 2
                         font = ImageFont.truetype(self.font_path, font_size)
@@ -1089,41 +1569,173 @@ class PrinterService:
 
             total_height += 10
 
-            # A die-cut label is a fixed physical size, so pin the canvas to it:
-            # convert() raises "Bad image dimensions" for anything else. With
-            # auto_fit on the font was already stepped down to fit; with it off
-            # the requested size is honoured and the overflow is clipped, rather
-            # than inventing a label the printer cannot cut.
-            if is_die_cut and label_height:
-                total_height = label_height
+            if lengthwise:
+                # Lay the label out unrolled: the text reads left to right on a
+                # canvas as tall as the tape is wide, and the whole thing is
+                # rotated onto the tape once it is drawn. So here the canvas
+                # width is the tape *length* and grows with the longest line.
+                line_area = max((w for _, w in line_metrics), default=0) + 20
+                if line_area > MAX_LENGTHWISE_LENGTH_PX:
+                    raise ValidationError(
+                        f"Lengthwise label would need {line_area} px of tape "
+                        f"(limit {MAX_LENGTHWISE_LENGTH_PX} px, about 1 m). "
+                        "Shorten the text or reduce the font size."
+                    )
+                canvas_height = width
+                # The tape width is the axis with room to spare here, so it is
+                # the one vertical_alignment acts on: the stack may sit against
+                # either edge of the tape or, by default, centred across it --
+                # on a narrow roll the difference is the whole margin. The
+                # canvas is still in reading orientation at this point, so "top"
+                # is the edge above the first line as the label reads; the
+                # transpose below carries it onto the tape. alignment continues
+                # to position the lines along the tape.
+                y = get_vertical_offset(
+                    canvas_height, len(line_metrics) * line_height, vertical_alignment)
+            else:
+                # A die-cut label is a fixed physical size, so pin the canvas to
+                # it: convert() raises "Bad image dimensions" for anything else.
+                # With auto_fit on the font was already stepped down to fit; with
+                # it off the requested size is honoured and the overflow is
+                # clipped, rather than inventing a label the printer cannot cut.
+                if is_die_cut and label_height:
+                    total_height = label_height
+                line_area = width
+                canvas_height = total_height
+                if is_die_cut and label_height:
+                    # A die-cut label is a fixed piece of paper, so there is
+                    # slack between the stack and the two long edges to hand to
+                    # vertical_alignment. It stays centred by default: on media
+                    # where the printable area narrows towards the edge the
+                    # first line is the one that gets cut off.
+                    y = get_vertical_offset(
+                        canvas_height, len(line_metrics) * line_height, vertical_alignment)
+                else:
+                    # Continuous tape rendered across grows to exactly fit the
+                    # text, so there is no spare length for the stack to move
+                    # into -- only the 10 px lead-in, which every value keeps.
+                    y = 10
 
-            image = Image.new("RGB", (width, total_height), "white")
+            image = Image.new("RGB", (line_area, canvas_height), "white")
             draw = ImageDraw.Draw(image)
 
             # Draw text
-            y = 10
             for line_text, line_width in line_metrics:
                 if alignment == "center":
-                    x = (width - line_width) // 2
+                    x = (line_area - line_width) // 2
                 elif alignment == "right":
-                    x = width - line_width - 10
+                    x = line_area - line_width - 10
                 else:
                     x = 10
                 draw.text((x, y), line_text, font=font, fill="black")
                 y += line_height
+
+            if lengthwise:
+                # Rotate counter-clockwise so the message reads bottom-to-top
+                # with the strip held upright; pair with rotate=180 for the other
+                # direction. transpose() is a lossless pixel move, where rotate()
+                # would resample. The result is exactly the roll's printable
+                # width, so convert() passes it through without rescaling.
+                image = image.transpose(Image.Transpose.ROTATE_90)
 
             # Save image
             image_path = os.path.join(self.upload_folder, f"text_label_{uuid.uuid4().hex[:8]}.png")
             image.save(image_path)
             
             return image_path
+        except ValidationError:
+            # Already a precise client error (the lengthwise length cap), so let
+            # it through; wrapping it would turn a 400 into a 500.
+            raise
         except Exception as e:
             logger.error("Error creating text label", error=str(e), exc_info=True)
             raise ImageProcessingError(f"Error creating text label: {str(e)}")
     
+    def _fit_to_label(self, img: "Image.Image", label_size: Optional[str] = None) -> "Image.Image":
+        """
+        Centre-fit a finished label image onto the medium's exact canvas.
+
+        Every render path ends here, because what "the right size" means is a
+        property of the loaded media, not of the content:
+
+        * Continuous tape only fixes the width; the length grows with the
+          content. The image is scaled to the printable width and returned --
+          exactly what ``convert()`` would otherwise do on the way out, done
+          here so the pipeline and the preview agree on the pixels.
+        * A rectangular die-cut label is a fixed size in both directions and
+          ``convert()`` raises "Bad image dimensions" for anything else, so the
+          content is scaled to fit inside it and centred on a white canvas of
+          the label's own size.
+        * A round die-cut label reports the same square size, but its printable
+          area is the inscribed *circle*. A centred rectangle fits in a circle
+          exactly when its half-diagonal fits the radius, so that is the scale
+          used: a square (a QR code) ends up at the inscribed square, while a
+          wide, short block gets to use nearly the full diameter instead of
+          being needlessly shrunk to the same square.
+
+        The aspect ratio is never distorted; the leftover area is white padding.
+
+        Args:
+            img: The finished label image.
+            label_size: Label identifier the image is destined for. Defaults to
+                62 mm tape when not given.
+
+        Returns:
+            The image fitted to the medium (the original object when it already
+            fits and nothing has to change).
+
+        Raises:
+            ImageProcessingError: If the image has no usable dimensions.
+        """
+        geometry = get_label_geometry(label_size)
+        source_width, source_height = img.size
+        if source_width <= 0 or source_height <= 0:
+            raise ImageProcessingError(f"Cannot fit an empty image to label {label_size}")
+
+        if not (geometry.is_die_cut and geometry.height):
+            # Continuous tape: only the width is fixed, the label may be as long
+            # as it needs to be.
+            if source_width == geometry.width:
+                return img
+            aspect_ratio = source_height / source_width
+            new_height = max(1, int(geometry.width * aspect_ratio))
+            return img.resize((geometry.width, new_height), Image.Resampling.LANCZOS)
+
+        # Die-cut media from here on: the canvas is the label itself.
+        # Paletted/alpha images are flattened first so the white padding really
+        # is white and LANCZOS has continuous tone to work with.
+        if img.mode not in ("L", "RGB"):
+            img = img.convert("RGB")
+
+        if geometry.is_round:
+            radius = get_round_safe_radius(geometry.width)
+            scale = radius / (math.hypot(source_width, source_height) / 2.0)
+        else:
+            scale = min(geometry.width / source_width, geometry.height / source_height)
+
+        new_size = (
+            max(1, min(geometry.width, int(source_width * scale))),
+            max(1, min(geometry.height, int(source_height * scale))),
+        )
+        if new_size != img.size:
+            img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+        # White canvas, so the untouched area of the label stays blank rather
+        # than picking up whatever the source image had in its corners.
+        canvas = Image.new(img.mode, (geometry.width, geometry.height), (255,) * len(img.mode))
+        canvas.paste(img, ((geometry.width - new_size[0]) // 2, (geometry.height - new_size[1]) // 2))
+
+        logger.debug("Fitted image to die-cut label",
+                     label_size=label_size,
+                     is_round=geometry.is_round,
+                     source_size=(source_width, source_height),
+                     content_size=new_size,
+                     canvas_size=(geometry.width, geometry.height))
+        return canvas
+
     def _resize_image(self, image_path: str, label_size: Optional[str] = None) -> str:
         """
-        Resize an image to fit the label width.
+        Resize an image to fit the label.
 
         Args:
             image_path: Path to the image file.
@@ -1137,21 +1749,17 @@ class PrinterService:
             ImageProcessingError: If there's an error resizing the image.
         """
         try:
-            max_width = get_label_width(label_size)
-
             with Image.open(image_path) as img:
-                # Calculate new dimensions
-                aspect_ratio = img.height / img.width
-                new_height = int(max_width * aspect_ratio)
-                
-                # Resize image
-                img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
-                
+                # Fit to the medium: the printable width on continuous tape, the
+                # label's exact canvas on die-cut media (which convert() insists
+                # on) with the content centred inside it.
+                img = self._fit_to_label(img, label_size)
+
                 # Save resized image
                 filename = os.path.basename(image_path)
                 resized_path = os.path.join(self.upload_folder, f"resized_{filename}")
                 img.save(resized_path)
-                
+
                 return resized_path
         except Exception as e:
             logger.error("Error resizing image", error=str(e), exc_info=True)
@@ -1500,7 +2108,15 @@ class PrinterService:
             #    (side-by-side, or text above/below). No-op if no text.
             qr_img = self._compose_qr_with_text(qr_img, data, settings)
 
-            # 3. Persist the result.
+            # 3. Fit the composition to the loaded media. The QR code is
+            #    rendered at whatever qr_size asks for, which is a size the
+            #    printer knows nothing about: on continuous tape it has to be
+            #    scaled to the printable width, and on a die-cut label it has to
+            #    land on the label's exact canvas -- convert() refuses anything
+            #    else outright, so without this a round label could never print.
+            qr_img = self._fit_to_label(qr_img, settings.get("label_size"))
+
+            # 4. Persist the result.
             image_path = os.path.join(self.upload_folder, f"qrcode_{uuid.uuid4().hex[:8]}.png")
             qr_img.save(image_path)
 

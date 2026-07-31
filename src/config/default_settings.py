@@ -9,6 +9,8 @@ DEFAULT_SETTINGS = {
     "label_size": "62",
     "font_size": 50,
     "alignment": "left",
+    "orientation": "across",  # across | lengthwise (continuous rolls only)
+    "vertical_alignment": "middle",  # top | middle | bottom (no effect on continuous + across)
     "rotate": 0,
     "threshold": 70.0,
     "dither": False,

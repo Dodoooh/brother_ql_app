@@ -99,7 +99,9 @@ class SettingsService:
 
         type_checks = {
             "printer_uri": str, "printer_model": str, "label_size": str,
-            "font_size": (int, float), "alignment": str, "rotate": (int, float),
+            "font_size": (int, float), "alignment": str, "orientation": str,
+            "vertical_alignment": str,
+            "rotate": (int, float),
             "threshold": (int, float), "dither": bool, "compress": bool, "red": bool,
             "keep_alive_enabled": bool, "keep_alive_interval": (int, float),
             "keep_alive_mode": str, "keep_alive_duration_seconds": int,
@@ -131,6 +133,12 @@ class SettingsService:
         # --- Value Checks ---
         if "alignment" in settings_to_validate and settings_to_validate["alignment"] not in ["left", "center", "right"]:
             raise ValueError(f"Invalid alignment value: {settings_to_validate['alignment']}")
+
+        if "vertical_alignment" in settings_to_validate and settings_to_validate["vertical_alignment"] not in ["top", "middle", "bottom"]:
+            raise ValueError(f"Invalid vertical_alignment value: {settings_to_validate['vertical_alignment']}. Must be top, middle, or bottom.")
+
+        if "orientation" in settings_to_validate and settings_to_validate["orientation"] not in ["across", "lengthwise"]:
+            raise ValueError(f"Invalid orientation value: {settings_to_validate['orientation']}. Must be across or lengthwise.")
 
         if "rotate" in settings_to_validate and settings_to_validate["rotate"] not in [0, 90, 180, 270]:
              raise ValueError(f"Invalid rotate value: {settings_to_validate['rotate']}. Must be 0, 90, 180, or 270.")
@@ -300,8 +308,9 @@ class SettingsService:
     # when omitted. keep_alive_*/ipp_port/printers are excluded (not per-print).
     _INHERITABLE_PRINT_KEYS = (
         "printer_uri", "printer_model", "label_size", "font_size", "alignment",
-        "rotate", "threshold", "dither", "compress", "red", "copies",
-        "cut_mode", "dpi_600", "hq",
+        "orientation", "vertical_alignment", "rotate", "threshold", "dither",
+        "compress", "red",
+        "copies", "cut_mode", "dpi_600", "hq",
     )
 
     def resolve_print_settings(self, request_settings: Optional[Dict[str, Any]]) -> Dict[str, Any]:
