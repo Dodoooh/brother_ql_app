@@ -30,6 +30,8 @@ tags:
     description: Combined label layouts
   - name: preview
     description: Server-side render-only label previews (no printing)
+  - name: calibration
+    description: Print alignment calibration (target printing and preview)
   - name: settings
     description: Settings management
   - name: jobs
@@ -609,6 +611,95 @@ paths:
       responses:
         '200':
           description: Label preview rendered successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PreviewResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /calibration/test-print:
+    post:
+      summary: Print a calibration target
+      description: >-
+        Prints the alignment calibration target on the selected medium, with the
+        calibration offset currently in force applied to it -- the target's
+        subject is where the ink lands, so it is the one print that is
+        deliberately shifted. The target carries a ring (round media) or frame
+        (rectangular and continuous media) at the edge of the printable area, a
+        centre crosshair, a millimetre scale (a mark every millimetre, every
+        fifth one long) and a caption naming the label and the offset it was
+        printed with. Read the error as half the difference between two opposite
+        gaps, store it via PUT /settings, print again.
+
+
+        Setting `sweep` turns this into a one-pass calibration: it prints
+        several numbered targets whose offsets step around the current value, so
+        the user picks the one that looks centred instead of iterating. It is
+        opt-in because every step costs a physical label, and `copies` is forced
+        to 1 for its duration.
+
+
+        The response reports the offsets that will actually reach the paper:
+        sideways travel is bounded by how much print head there is beside the
+        loaded media, so a request beyond it is clamped, and `clamped`,
+        `requested_offsets_mm` and `sideways_travel_mm` say so. The printed
+        target captions itself with the applied offset for the same reason.
+
+
+        The job goes through the print queue like every other print endpoint;
+        `dry_run` validates and renders without printing (its `would_print`
+        object additionally reports the number of `labels` the run would use,
+        plus the same offset/clamp/travel fields).
+      operationId: api.calibration_controller.test_print_calibration
+      tags:
+        - calibration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalibrationTestPrintRequest'
+      responses:
+        '200':
+          description: Calibration target queued for printing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CalibrationPrintResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /calibration/preview:
+    post:
+      summary: Render a server-side preview of the calibration target
+      description: >-
+        Renders the same target as /calibration/test-print and returns it as a
+        PNG data URL instead of printing it. Unlike the other preview endpoints
+        this one applies the calibration offset, because the shifted result is
+        exactly what the target is for. Being a picture, it shows both axes
+        moved inside the label: it has no print head to slide the raster along,
+        so a sideways offset it shows running past the edge is content landing
+        off the die cut rather than content the printer refuses to lay down.
+        It shows the *applied* offset and the size correction, in the same
+        order the print path applies them, so that the preview of a target
+        agrees with the target -- and with the caption both of them carry.
+      operationId: api.calibration_controller.preview_calibration
+      tags:
+        - calibration
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CalibrationPreviewRequest'
+      responses:
+        '200':
+          description: Calibration target rendered successfully
           content:
             application/json:
               schema:
@@ -1411,7 +1502,7 @@ components:
           description: Size of the label
           example: "62"
           default: "62"
-          enum: ["12", "12+17", "18", "29", "38", "50", "54", "62", "62red", "102", "103", "104", "17x54", "17x87", "23x23", "29x42", "29x90", "39x90", "39x48", "52x29", "54x29", "60x86", "62x29", "62x100", "102x51", "102x152", "103x164", "d12", "d24", "d58", "pt12", "pt18", "pt24", "pt36"]
+          enum: ["12", "12+17", "18", "29", "38", "50", "54", "62", "62red", "102", "103", "104", "17x54", "17x87", "23x23", "29x42", "29x90", "39x90", "39x48", "52x29", "54x29", "60x86", "62x29", "62x100", "102x51", "102x152", "103x164", "d12", "d24", "d58"]
         text_wrap:
           type: boolean
           description: >
@@ -1526,6 +1617,24 @@ components:
           description: High quality printing
           example: true
           default: true
+        calibration:
+          allOf:
+            - $ref: '#/components/schemas/CalibrationMap'
+          description: >-
+            Per-label print offsets applied on the way to the printer. Normally
+            omitted: the map is inherited from the saved settings, where the
+            calibration UI stores it. Send it here only to print one job with a
+            different offset without changing the saved configuration.
+        bleed_mm:
+          allOf:
+            - $ref: '#/components/schemas/BleedMap'
+          description: >-
+            Per-label bleed, in millimetres per side, across the tape. Normally
+            omitted: the map is inherited from the saved settings. Send it here
+            to print or preview one job with a different bleed — note that it
+            changes the width of the label being rendered, so a preview
+            requested with it will come back wider, which is the intended
+            behaviour.
       # No required fields: a request may omit settings (or individual fields)
       # and the app fills them from its saved configuration (request overrides).
 
@@ -1548,7 +1657,7 @@ components:
           description: Default label size
           example: "62"
           default: "62"
-          enum: ["12", "12+17", "18", "29", "38", "50", "54", "62", "62red", "102", "103", "104", "17x54", "17x87", "23x23", "29x42", "29x90", "39x90", "39x48", "52x29", "54x29", "60x86", "62x29", "62x100", "102x51", "102x152", "103x164", "d12", "d24", "d58", "pt12", "pt18", "pt24", "pt36"]
+          enum: ["12", "12+17", "18", "29", "38", "50", "54", "62", "62red", "102", "103", "104", "17x54", "17x87", "23x23", "29x42", "29x90", "39x90", "39x48", "52x29", "54x29", "60x86", "62x29", "62x100", "102x51", "102x152", "103x164", "d12", "d24", "d58"]
         font_size:
           type: integer
           description: Default font size
@@ -1681,10 +1790,377 @@ components:
           default: 631
           minimum: 1
           maximum: 65535
+        calibration:
+          allOf:
+            - $ref: '#/components/schemas/CalibrationMap'
+          description: >-
+            Per-label print corrections, keyed by label identifier: offsets
+            in millimetres and an optional size multiplier. This is where the
+            calibration UI stores what /calibration/test-print was used to
+            measure. Absent or empty means no correction anywhere, which is how
+            every existing installation behaves.
+        bleed_mm:
+          allOf:
+            - $ref: '#/components/schemas/BleedMap'
+          description: >-
+            Per-label bleed, keyed by label identifier, in millimetres per side,
+            **across the tape only**. How far outside the published printable
+            width a design may run — up to the punched edge of the label. Absent
+            or empty means the app prints the area it always has. Read the
+            BleedMap description before setting it: it prints into an area the
+            manufacturer declares non-printable, both the die-cut tolerance and
+            the ink that lands on the liner are visible on the finished roll,
+            and on round media it changes the printable area from a circle to an
+            ellipse.
       required:
         - printer_uri
         - printer_model
         - label_size
+
+    CalibrationOffset:
+      type: object
+      description: >-
+        A print offset in millimetres. x_mm positive moves the printed content
+        right on the tape; y_mm positive moves it down (later in the feed
+        direction). Both default to 0, which prints exactly as an uncalibrated
+        app does. The two axes are corrected differently, because the printer
+        offers a lever on one and not on the other: sideways, the whole raster
+        is placed further along the print head, so no content is ever cut off
+        and the only limit is how much head there is beside the loaded media --
+        a request beyond that is clamped to what the printer can reach and
+        logged with the amount actually applied. Along the feed the raster
+        starts where the feed starts, so the content is moved inside the
+        label's own canvas and a large offset can push content off the edge,
+        which is logged as well.
+      properties:
+        x_mm:
+          type: number
+          format: float
+          description: >-
+            Sideways offset in millimetres; positive moves right. Clamped at
+            print time to the travel the print head allows beside the loaded
+            media; /calibration/test-print reports both what was requested and
+            what will be applied.
+          example: -0.5
+          default: 0
+          minimum: -10
+          maximum: 10
+        y_mm:
+          type: number
+          format: float
+          description: >-
+            Offset along the feed in millimetres; positive moves down (later in
+            the feed). Content pushed past the edge of the label is clipped.
+          example: 1.0
+          default: 0
+          minimum: -10
+          maximum: 10
+        scale:
+          type: number
+          format: float
+          description: >-
+            Size correction: a multiplier on the printed content, applied about
+            the centre of the label. 0.98 prints it 2 % smaller. It corrects a
+            printer that lays ink down slightly larger or smaller than it was
+            asked to, which is why the range is deliberately narrow -- it is
+            not a zoom. Like the offsets it applies to prints only and never to
+            a preview, so using it to resize a design would leave the preview
+            showing something the paper does not. The canvas may not grow, so
+            scaling up crops at the rim and logs the amount.
+          example: 0.98
+          default: 1.0
+          minimum: 0.95
+          maximum: 1.05
+      additionalProperties: false
+
+    CalibrationMap:
+      type: object
+      description: >-
+        Per-label print offsets, keyed by label identifier (e.g. "d24",
+        "62x29"). Offsets are keyed by media rather than by printer because
+        what they correct -- die-cut registration tolerance and the raster
+        offset of the loaded roll -- is a property of the media. A missing key
+        and an entry of zeros mean the same thing: print as before. Applied on
+        the print path only; the preview endpoints deliberately show the label
+        as designed, since calibration exists to make the paper match them.
+      additionalProperties:
+        $ref: '#/components/schemas/CalibrationOffset'
+      example:
+        d24:
+          x_mm: -0.5
+          y_mm: 1.0
+
+    BleedMap:
+      type: object
+      description: >-
+        Per-label bleed, keyed by label identifier (e.g. "d24", "62x29"), in
+        millimetres **per side**. Absent or 0 means the app prints the area it
+        always has, which is what every existing installation does.
+
+
+        Every label is offered smaller than it is. brother_ql publishes 20 mm of
+        a 24 mm round die cut as printable, so 2.03 mm of paper all round is
+        unreachable by any design — the ring of bare paper you can measure on a
+        finished label. Bleed hands that strip back: the raster is rendered
+        wider and placed so the label stays exactly where it was, letting
+        content run out to the punched edge.
+
+
+        **Bleed widens the label; it never lengthens it.** That is a hardware
+        constraint, not a simplification. Each raster line the printer receives
+        is one step of the paper feed, so the number of lines in a job is how far
+        the media advances while the label prints. A version of this feature that
+        also extended the raster along the feed made every d24 page advance 4 mm
+        too far: the cutter walked off the gap between labels until the roll lost
+        registration and had to be re-seated. Nothing in the raster language can
+        give those steps back — the one feed command carries the media's own
+        margin and cannot be negative — so the feed axis is simply not a resource
+        bleed can spend, however much unused paper is sitting there. On a 62x29
+        label that is 2.96 mm a side along the feed against 1.52 mm across it,
+        and only the 1.52 mm is available.
+
+
+        A consequence worth knowing for round media: a bled round label is no
+        longer square (a bled d24 is 284 × 236 dots) and its printable area is
+        therefore an **ellipse** rather than a circle — full width at the middle,
+        tapering top and bottom. Layout follows that ellipse, so the extra width
+        is really usable and not quietly given back. It also means `rotate` 90 or
+        270 no longer works on a bled round label, exactly as it has never worked
+        on rectangular die-cut labels: a quarter turn does not fit a canvas that
+        is a fixed size. Such a request is refused with an explanation rather
+        than a dimension mismatch. `rotate` 0 and 180 are unaffected.
+
+
+        Whatever is asked for is clamped to what the loaded medium and the
+        printer can actually give — half the difference between the label's
+        total and printable dots, and never wider than the print head — so
+        setting 5 mm on a d24 gets 2.03 mm, and says so in the log and in the
+        `bleed` block of /calibration/test-print. Values above 5 mm are rejected
+        outright as a wrong unit rather than a request.
+
+
+        **What you are opting into.** This prints into the area Brother declares
+        non-printable, and there are two consequences you should expect to see
+        on the paper:
+
+
+        * **Die-cut registration varies from label to label.** The punch and the
+          feed each have a tolerance of a few tenths of a millimetre, so content
+          taken right out to the edge will show that variation — a design that
+          touches the rim on one label may stop just short of it, or run just
+          past it, on the next. Content that matters (text, a code, a border you
+          want to look deliberate) is better kept inside the published area;
+          bleed is for backgrounds and colour that are meant to run off.
+
+        * **Ink lands on the liner.** Anything that overshoots the die cut is
+          printed on the backing paper between labels rather than on the label
+          you peel off. It is not lost from the roll, but it is on the liner,
+          and on a black-heavy design it is visible there.
+
+
+        Both apply across the tape, which is the only direction bleed acts in.
+        The label's position is otherwise untouched: the raster is widened and
+        the paste position moved by exactly half the growth, so the centre of the
+        label lands on the same dot of the print head as it did unbled, and the
+        job is the same number of raster lines long.
+
+
+        Bleed is a **separate setting from `calibration`**, and deliberately so.
+        Calibration corrects a printer that puts ink in the wrong place, so it
+        applies to prints and never to previews — the preview is the target the
+        correction aims at. Bleed changes how large the label you are designing
+        is, so it **does** show in every preview, exactly like the label size.
+      additionalProperties:
+        type: number
+        format: float
+        description: Bleed for this medium, in millimetres per side.
+        minimum: 0
+        maximum: 5
+      example:
+        d24: 2.0
+
+    CalibrationSweep:
+      type: object
+      description: >-
+        Opt-in one-pass calibration: print several numbered targets whose
+        offsets step around the value currently in force, then keep the one that
+        looks centred. Each step costs a physical label.
+      properties:
+        axis:
+          type: string
+          description: >-
+            Axis to step. One axis at a time: a diagonal sweep cannot tell which
+            of the two errors a given label is showing.
+          enum: [x, y]
+          example: x
+          default: x
+        count:
+          type: integer
+          description: Number of targets to print, one label each.
+          example: 5
+          default: 5
+          minimum: 2
+          maximum: 9
+        step_mm:
+          type: number
+          format: float
+          description: Difference in millimetres between one target and the next.
+          example: 0.5
+          default: 0.5
+          minimum: 0.1
+          maximum: 5.0
+      additionalProperties: false
+
+    CalibrationTestPrintRequest:
+      type: object
+      properties:
+        label_size:
+          type: string
+          description: >-
+            Medium to calibrate. Overrides settings.label_size; when both are
+            omitted the saved default label size is used.
+          example: "d24"
+        offset:
+          $ref: '#/components/schemas/CalibrationOffset'
+        sweep:
+          $ref: '#/components/schemas/CalibrationSweep'
+        settings:
+          $ref: '#/components/schemas/PrintSettings'
+        dry_run:
+          type: boolean
+          description: >-
+            Validate only: render the target and check printer reachability, but
+            do not print or enqueue. Returns { ok, dry_run, printer_reachable,
+            would_print: { label_size, copies, labels, width_px, height_px,
+            offsets_mm, requested_offsets_mm, clamped, sideways_travel_mm,
+            scale } } -- the same offset/clamp/travel report a real run gives,
+            so a client can check what the printer would do without spending a
+            label on finding out.
+          default: false
+
+    CalibrationPreviewRequest:
+      type: object
+      properties:
+        label_size:
+          type: string
+          description: >-
+            Medium to render the target for. Overrides settings.label_size.
+          example: "d24"
+        offset:
+          $ref: '#/components/schemas/CalibrationOffset'
+        settings:
+          $ref: '#/components/schemas/PrintSettings'
+
+    CalibrationPrintResponse:
+      type: object
+      properties:
+        success:
+          type: boolean
+          description: Whether the calibration run was queued
+          example: true
+        job_id:
+          type: string
+          description: Identifier of the queued print job
+          example: "6f1c1a1e2b7d4f3c"
+        message:
+          type: string
+          example: "Print job queued"
+        label_size:
+          type: string
+          description: The medium the target is printed on
+          example: "d24"
+        offsets_mm:
+          type: array
+          description: >-
+            The offsets that will actually be printed, in print order. A single
+            entry for a normal test print, one per step for a sweep -- each
+            target prints its own number and the offset it was really printed
+            with on itself. Where the print head has less travel beside the
+            loaded media than was requested, this is the clamped value, so it
+            always describes what the paper will show.
+          items:
+            $ref: '#/components/schemas/CalibrationOffset'
+        requested_offsets_mm:
+          type: array
+          description: >-
+            The offsets as requested, in the same order. Equal to offsets_mm
+            unless something was clamped.
+          items:
+            $ref: '#/components/schemas/CalibrationOffset'
+        clamped:
+          type: boolean
+          description: >-
+            Whether any offset had to be reduced to the travel the printer has.
+            When true, offsets_mm differs from requested_offsets_mm and the
+            client should say so rather than let the user believe the full
+            correction was applied.
+          example: false
+        sideways_travel_mm:
+          type: object
+          nullable: true
+          description: >-
+            How far x_mm can go on this printer with this medium loaded,
+            measured from the uncalibrated position. Null when it cannot be
+            worked out (an unknown printer model or label identifier, or media
+            as wide as the print head), because not knowing the limit is no
+            reason to invent one. Travel is usually asymmetric -- a 24 mm round
+            label on a QL-820NWB sits close to one end of the head, with about
+            37 mm of travel one way and 3.5 mm the other.
+          properties:
+            min:
+              type: number
+              format: float
+              description: Most negative (leftward) x_mm this medium allows.
+              example: -37.42
+            max:
+              type: number
+              format: float
+              description: Most positive (rightward) x_mm this medium allows.
+              example: 3.56
+        scale:
+          type: number
+          format: float
+          description: The size correction in force for this medium.
+          example: 1.0
+        bleed:
+          type: object
+          description: >-
+            The bleed in force for this medium, and — more usefully — how much
+            it could have. Reported here because this is the one endpoint that
+            already answers "what can this medium on this printer actually do?",
+            and a bleed control needs the per-medium ceiling from somewhere:
+            2.03 mm on d24, 2.96 mm on d58, and only 1.02 mm on 62 mm tape on a
+            QL-800-class printer, where the print head runs out before the paper
+            does.
+          properties:
+            requested_mm:
+              type: number
+              format: float
+              description: The bleed configured for this medium, per side.
+              example: 2.0
+            applied_mm:
+              type: number
+              format: float
+              description: >-
+                What will really be used across the tape, after clamping.
+              example: 2.03
+            limit_mm:
+              type: number
+              format: float
+              nullable: true
+              description: >-
+                The most this medium can bleed across the tape on this printer.
+                Null for a label identifier the media catalogue does not know,
+                because not knowing the margin is no reason to invent one. There
+                is no feed-direction counterpart, because none is ever available
+                — see BleedMap.
+              example: 2.03
+            clamped:
+              type: boolean
+              description: >-
+                Whether more bleed was asked for than the medium or the print
+                head can give.
+              example: false
 
     PrintResponse:
       type: object

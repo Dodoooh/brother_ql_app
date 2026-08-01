@@ -23,6 +23,10 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **⚙️ Custom Settings**: Fine-tune font size, label size, alignment, rotation, threshold, dithering and red printing. Text can run across the tape or lengthwise along it on continuous rolls. Copies (1–100) and cut mode are available directly in every compose section.
 
+- **🎯 Print Alignment Calibration**: Correct content that lands off-centre on the physical label, per label type — print a target, read the gap, nudge the print the same way, repeat. Applied when printing only; the preview always shows the label as you designed it.
+
+- **🔎 Media Picker**: Find your label by the Brother product code printed on the box — `DK-11218` finds the 24 mm round label — with a button that copies the code for reordering.
+
 - **🗂 Print Queue**: Submit multiple jobs and have them printed sequentially. Pause/resume the queue, emergency-stop (cancel all waiting jobs), delete individual jobs, reprint with the same settings, or re-open a job's parameters — all from the Queue panel.
 
 - **🛡 Large-batch Confirmation**: Printing 10 or more copies requires an explicit confirmation in the UI and an explicit flag in the API, so a big run is never started by accident.
@@ -159,7 +163,7 @@ The application settings can be configured in the `data/settings.json` file. Thi
 - `alignment`: The default text alignment (`left`, `center`, or `right`)
 - `vertical_alignment`: How the text block sits across the label's height (`top`, `middle` — the default — or `bottom`), the counterpart to `alignment` along the width. Takes effect on die-cut labels and on continuous rolls set to `lengthwise`; a continuous roll printed `across` grows in length to fit the text exactly, so there is no spare height to move within
 - `orientation`: How text runs on the label — `across` (the default: text runs across the tape and the label grows in length) or `lengthwise` (text runs along the tape, so the roll's printable width becomes the line height). Text labels on continuous rolls only; die-cut labels always print `across`
-- `rotate`: The rotation applied to the rendered label in degrees (`0`, `90`, `180`, or `270`). `90` and `270` are currently not supported on rectangular die-cut labels, whose canvas is a fixed size in both directions
+- `rotate`: The rotation applied to the rendered label in degrees (`0`, `90`, `180`, or `270`). `90` and `270` are currently not supported on rectangular die-cut labels, whose canvas is a fixed size in both directions — nor on a round die-cut label with `bleed_mm` set, whose canvas is no longer square either
 - `threshold`: The black/white threshold used when converting the image (e.g., `70.0`)
 - `dither`: Whether to apply dithering when converting the image (`true`/`false`)
 - `compress`: Whether to enable printer-side compression (`true`/`false`)
@@ -173,6 +177,29 @@ The application settings can be configured in the `data/settings.json` file. Thi
 - `keep_alive_mode`: `forever` to keep the printer awake continuously, or `timed` to keep it awake only for a window after each print
 - `keep_alive_duration_seconds`: When `keep_alive_mode` is `timed`, how long (in seconds) to stay awake after each print (e.g. `7200` for 2 hours)
 - `ipp_port`: The IPP port used to query printer status (default `631`)
+- `calibration`: Per-label print corrections, keyed by label identifier, e.g. `{"d24": {"x_mm": -0.5, "y_mm": 1.0, "scale": 0.98}}`. `x_mm` shifts the print sideways (above zero moves right), `y_mm` along the feed (above zero moves down), and `scale` (`0.95`–`1.05`) corrects a printer that lays ink down slightly larger or smaller than nominal. Applied when **printing only** — never to the preview, which stands for the label you designed. An absent map or an absent key means no correction. See [Print Alignment Calibration](#print-alignment-calibration) below
+- `bleed_mm`: **Experimental.** How far a design may run outside the published printable area, keyed by label identifier, in millimetres per side, e.g. `{"d24": 2.0}` — **across the tape only**. Absent or `0` (the default) prints the area the app always has. It hands back the ~2 mm ring of paper the manufacturer declares unprintable, at the cost of a round label becoming an oval one; read [Bleed](#bleed-experimental) below before enabling it
+
+### Print Alignment Calibration
+
+Die-cut registration tolerance and per-model raster offsets can put the print slightly off-centre on the physical label — most visibly on round media, where a design that is mathematically centred can still print off the punched circle. A calibration corrects that, per label type. Open **Settings → Print Alignment → Calibrate**, then:
+
+1. **Print the target.** It carries a ring (round media) or a frame (rectangular and continuous media) on the edge of the printable area, a centre crosshair, a millimetre scale on both axes and a caption naming the label and the offset it was printed with.
+2. **Read the error off the label.** Compare two opposite gaps between the ring and the die cut; the correction is half their difference. The scale is printed next to the ring, so no ruler is needed.
+3. **Move the print that way** with the direction pad (0.1 / 0.5 / 1 mm steps) and print again. The dialog keeps the stored value, the value of the last test print and the current draft on screen at once, so it is clear whether an adjustment is converging or overshooting. If the rings come out slightly too large or too small for the label, correct the size as well.
+4. **Save** when it lands. Saving is a separate, reversible step and applies to that label type only.
+
+Two things are worth knowing. The **preview never moves**: it is the label you designed, and the calibration exists to make the paper match it. And the **sideways travel is asymmetric**: the offset slides the whole raster along the print head, so nothing is ever cut off, but the room available depends on where the loaded media sits on the head — a 24 mm round label on a QL-820NWB has about 37 mm of travel one way and only 3.5 mm the other. A request beyond that is clamped to what the printer can reach, and the printed caption, the dialog and the API all report the applied value rather than the requested one. Along the feed there is no such lever: the content is moved inside the label's own canvas, so a large `y_mm` can push content off the edge, and on continuous media a positive `y_mm` trims the trailing edge instead of adding a lead-in.
+
+### Bleed (experimental)
+
+Every die-cut label is offered smaller than it is: 20 mm of a 24 mm round label is published as printable, so about 2 mm of paper all round is unreachable by any design — the bare ring you can measure on a finished label. `bleed_mm` hands that strip back, per label type. It is off by default, has no UI control, and is deliberately marked experimental:
+
+- **It widens the label and never lengthens it.** Each raster line is one step of the paper feed, so extending the raster along the feed makes the media advance further per label and walks the cutter off the gap between labels until the roll loses registration. That is a hardware constraint, not a simplification — the extra feed steps cannot be given back.
+- **A bled round label is an ellipse, not a circle** (24 × 20 mm on `d24`), and the layout follows that ellipse. Because the canvas is no longer square, `rotate` 90 and 270 stop working on a bled round label, exactly as they have never worked on rectangular die-cut labels.
+- **What runs past the die cut lands on the liner**, and the die cut itself varies by a few tenths of a millimetre from label to label. Bleed is for backgrounds and colour meant to run off; keep text, codes and borders inside the published area.
+
+Even coverage on the smaller circle is the better default, and remains the default. Whatever is asked for is clamped to what the medium and the print head can give (`5` on `d24` yields 2.03 mm); values above 5 mm are rejected as a wrong unit. Unlike `calibration`, bleed **does** show in the preview, because it changes how large the label you are designing is.
 
 ### Multiple Printers
 
@@ -258,6 +285,10 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 **Live preview** (true-to-print PNG render)
 - **POST /api/v1/text/preview**, **/qrcode/preview**, **/label/preview**, **/image/preview**, **/pdf/preview**
 
+**Calibration**
+- **POST /api/v1/calibration/test-print**: Print the alignment target on a medium, optionally as a sweep
+- **POST /api/v1/calibration/preview**: Render the same target as a PNG instead of printing it
+
 **Print queue**
 - **GET /api/v1/jobs**: List recent jobs (newest first)
 - **GET /api/v1/jobs/{id}**: Get a single job's status
@@ -285,6 +316,10 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 > **Lengthwise text:** Set `settings.orientation` to `lengthwise` on `/text/print` or `/text/preview` to run the text along the tape instead of across it: the roll's printable width becomes the line height and the tape grows with the message, so a long text on a narrow roll prints as one continuous strip instead of a shrunken column. The text reads bottom-to-top when the strip is held upright — add `rotate: 180` for the opposite direction. Continuous rolls only; die-cut labels have a fixed size in both directions and always render `across` (the default).
 
 > **Vertical alignment:** `settings.vertical_alignment` (`top`, `middle`, `bottom`) positions the text block across the label's height on `/text/print` and `/text/preview`, the counterpart to `alignment` along the width. It has room to work on die-cut labels — most visibly on round media such as `d24`, where a centred line leaves a lot of space above and below — and on continuous rolls set to `lengthwise`, where it moves the text across the tape width. On a continuous roll printed `across` (the default) the label grows in length to fit the text exactly, so there is no spare height and the setting has no effect. The default `middle` matches the previous behaviour.
+
+> **Print alignment calibration:** `settings.calibration` carries a per-label correction in millimetres — `{"d24": {"x_mm": -0.5, "y_mm": 1.0, "scale": 0.98}}` — that is applied on the way to the printer on every print endpoint. It is normally stored once via `PUT /settings`; sending it in a print request applies it to that job alone. The **preview endpoints deliberately ignore it**, because the preview is the label you designed and the calibration exists to make the paper match it. `POST /calibration/test-print` prints the target you measure against (and accepts `dry_run`, plus an opt-in `sweep` of several numbered targets stepping around the current value); `POST /calibration/preview` renders the same target — the one preview that does show the offset, since where the ink lands is its subject. Sideways travel is bounded by how much print head sits beside the loaded media and is usually asymmetric, so a request beyond it is clamped: the response reports `offsets_mm`, `requested_offsets_mm`, `clamped` and `sideways_travel_mm`, and the printed caption names the offset actually applied. See [Print Alignment Calibration](#print-alignment-calibration) for the measuring loop.
+
+> **Bleed (experimental):** `settings.bleed_mm` (`{"d24": 2.0}`) lets a design run outside the published printable area, in millimetres per side and **across the tape only** — the feed direction is unavailable, because extra raster lines are extra feed steps and they walk the cutter off the label gap. It is absent by default. Unlike `calibration` it **does** affect previews, so a preview requested with it comes back wider. A bled round label is an ellipse rather than a circle, which also makes `rotate` 90/270 unavailable on it. Requests are clamped to the medium's real margin, and `POST /calibration/test-print` reports the per-medium ceiling in its `bleed` block (`requested_mm`, `applied_mm`, `limit_mm`, `clamped`). See [Bleed](#bleed-experimental) for what you are opting into.
 
 > **Dry run:** Add `dry_run: true` to any print request to validate it end-to-end (render + printer reachability) **without** printing or queueing — ideal for endless (62 mm) media and CI. The response is `{ "ok": true, "dry_run": true, "printer_reachable": …, "would_print": { "label_size", "copies", "width_px", "height_px" } }`.
 

@@ -419,6 +419,11 @@ function setupEventListeners() {
         });
     });
 
+    // ---- Print alignment calibration (Settings summary + dialog) ----
+    if (typeof setupCalibration === 'function') {
+        setupCalibration();
+    }
+
     // ---- Print queue wiring (polling + actions) ----
     setupQueue();
 

@@ -1077,6 +1077,12 @@ body.dark-mode .queue-badge { color: #06222B; }
 }
 .lp-chevron { flex: 0 0 auto; color: var(--muted-dim); font-size: 13px; }
 
+/* Copy-the-product-code button under the picker. The code itself is monospaced
+   inside an otherwise normal button label, so it reads as the literal string
+   that lands on the clipboard. */
+.lp-copy { margin-top: 8px; font-family: var(--mono); font-size: 11px; }
+.lp-copy.is-copied { border-color: var(--green); color: var(--green); }
+
 /* ---- Popover ---- */
 .lp-pop {
     position: absolute;
@@ -1208,4 +1214,407 @@ body.dark-mode .queue-badge { color: #06222B; }
     .lp-search input[type=text] { font-size: 16px; }
     .lp-opt-head { flex-wrap: wrap; gap: 2px 10px; }
     .lp-list { max-height: 60vh; }
+}
+
+/* ===================== Print alignment calibration ===================== */
+/* Two surfaces: a compact summary inside Settings (which media are calibrated,
+   and the way in), and the dialog that drives the print/measure/nudge loop.
+   Both are built from the shared tokens, so they follow the theme. */
+
+.cal-intro {
+    margin: 0 0 12px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+}
+
+.cal-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 6px; }
+.cal-list-note { margin-bottom: 12px; }
+
+.cal-empty {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 14px;
+    border: 1px dashed var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    color: var(--muted);
+    font-size: 12px;
+}
+.cal-empty i { font-size: 15px; color: var(--muted-dim); }
+
+/* One calibrated medium: the row itself opens the dialog, the trailing button
+   resets that medium in a single click. */
+.cal-item {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    overflow: hidden;
+}
+.cal-item.is-current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent-soft); }
+
+.cal-item-main {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 12px;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    text-align: left;
+    cursor: pointer;
+}
+.cal-item-main:hover { background: var(--accent-soft); }
+.cal-item-main:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-soft); }
+
+.cal-item-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.cal-item-name { font-size: 13px; font-weight: 500; }
+.cal-item-id { font-size: 11px; color: var(--muted-dim); }
+.cal-item-current {
+    font-family: var(--mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 2px 6px;
+    border-radius: 999px;
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+}
+/* A calibration can name a shift and a size correction at once, so the value
+   wraps rather than pushing the row out on a phone. */
+.cal-item-value { font-size: 11px; color: var(--accent-strong); text-align: right; }
+
+.cal-item-clear {
+    flex: 0 0 auto;
+    width: 38px;
+    display: grid;
+    place-items: center;
+    border: 0;
+    border-left: 1px solid var(--border);
+    background: transparent;
+    color: var(--muted-dim);
+    cursor: pointer;
+}
+.cal-item-clear i { font-size: 11px; }
+.cal-item-clear:hover { color: var(--red); background: color-mix(in srgb, var(--red) 10%, transparent); }
+.cal-item-clear:focus-visible { outline: none; color: var(--red); box-shadow: inset 0 0 0 2px var(--accent-soft); }
+
+.cal-open { width: auto; }
+
+/* ---- Dialog ---- */
+
+.cal-medium {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    margin-bottom: 14px;
+}
+.cal-medium-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.cal-medium-name { font-size: 14px; font-weight: 600; }
+.cal-medium-codes { font-size: 10px; color: var(--muted-dim); }
+.cal-medium-state {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    padding: 4px 9px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    white-space: nowrap;
+}
+.cal-medium-state.is-set {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--accent-strong);
+    text-transform: none;
+    letter-spacing: 0;
+    /* "calibrated: 0.5 mm left, 1 mm down, 2 % smaller" is too long to hold on
+       one line on a phone. */
+    white-space: normal;
+    text-align: right;
+}
+
+.cal-copy {
+    margin: 0 0 16px;
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+}
+
+.cal-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 18px;
+    align-items: start;
+}
+
+.cal-target-stage {
+    display: grid;
+    place-items: center;
+    min-height: 190px;
+    padding: 10px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+}
+/* The stage reuses .preview-stage (and .is-round) from the live preview, so a
+   round die-cut target is shown with the same cut treatment. */
+.cal-target-stage .preview-stage { max-width: 100%; }
+/* The dialog is short, so the target is capped tighter than the 60vh the main
+   preview allows. Round media is square, so capping the width caps both. */
+.cal-target-stage .preview-server { max-height: 240px; }
+.cal-target-stage .preview-stage.is-round { max-width: min(100%, 240px); }
+
+.cal-preview-empty {
+    max-width: 260px;
+    font-size: 11px;
+    line-height: 1.6;
+    text-align: center;
+    color: var(--muted-dim);
+}
+.cal-preview-empty.d-none { display: none; }
+
+.cal-controls { display: flex; flex-direction: column; gap: 14px; }
+
+.cal-step-row { display: flex; align-items: center; justify-content: space-between; gap: 8px 10px; flex-wrap: wrap; }
+.cal-step-row .lbl { margin-bottom: 0; }
+
+.cal-steps { display: inline-flex; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+.cal-step {
+    padding: 7px 12px;
+    border: 0;
+    border-left: 1px solid var(--border);
+    background: var(--panel);
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+}
+.cal-step:first-child { border-left: 0; }
+.cal-step:hover { color: var(--ink); }
+.cal-step.is-active { background: var(--accent-soft); color: var(--accent-strong); font-weight: 600; }
+.cal-step:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--accent-soft); }
+
+/* Direction pad: the primary control. The user picks a direction, never a sign. */
+.cal-pad {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-areas:
+        ".    up    ."
+        "left reset right"
+        ".    down  .";
+    gap: 6px;
+    max-width: 260px;
+    margin: 0 auto;
+}
+.cal-pad-up    { grid-area: up; }
+.cal-pad-left  { grid-area: left; }
+.cal-pad-reset { grid-area: reset; }
+.cal-pad-right { grid-area: right; }
+.cal-pad-down  { grid-area: down; }
+
+.cal-pad-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    /* Comfortable touch target on phones. */
+    min-height: 52px;
+    padding: 6px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-2);
+    color: var(--ink);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.cal-pad-btn i { font-size: 16px; }
+.cal-pad-btn span {
+    font-family: var(--mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted-dim);
+}
+.cal-pad-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.cal-pad-btn:hover span { color: var(--accent); }
+.cal-pad-btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.cal-pad-btn:active { transform: translateY(1px); }
+.cal-pad-reset { color: var(--muted); }
+.cal-pad-reset i { font-size: 14px; }
+
+/* Size correction: the same "pick a direction, never a sign" treatment as the
+   pad, one axis instead of two. The percentage is what the user works in; the
+   multiplier that is actually stored sits next to it, read-only. */
+.cal-size {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+}
+
+.cal-size-row { display: flex; align-items: stretch; gap: 8px; }
+
+.cal-size-btn {
+    flex: 0 0 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    /* Comfortable touch target, matching the direction pad. */
+    min-width: 62px;
+    min-height: 52px;
+    padding: 6px 8px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    color: var(--ink);
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+}
+.cal-size-btn i { font-size: 15px; }
+.cal-size-btn span {
+    font-family: var(--mono);
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted-dim);
+}
+.cal-size-btn:hover { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.cal-size-btn:hover span { color: var(--accent); }
+.cal-size-btn:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.cal-size-btn:active { transform: translateY(1px); }
+
+.cal-size-value {
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 4px;
+    min-width: 0;
+}
+.cal-size-input { position: relative; width: 100%; }
+.cal-size-input input[type=number] { padding-right: 26px; text-align: center; }
+.cal-size-unit {
+    position: absolute;
+    top: 50%;
+    right: 10px;
+    transform: translateY(-50%);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted-dim);
+    pointer-events: none;
+}
+/* The raw factor, so the percentage can always be checked against what is
+   stored. Muted until it actually corrects something. */
+.cal-size-factor { font-size: 10px; color: var(--muted-dim); }
+.cal-size-factor.is-set { color: var(--accent-strong); }
+
+.cal-size-clear {
+    flex: 0 0 auto;
+    width: 38px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: transparent;
+    color: var(--muted-dim);
+    cursor: pointer;
+}
+.cal-size-clear i { font-size: 12px; }
+.cal-size-clear:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+.cal-size-clear:focus-visible { outline: none; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.cal-size-clear:disabled { opacity: .4; cursor: default; }
+
+.cal-size-hint { margin-top: 0; line-height: 1.6; font-family: var(--sans); font-size: 11px; }
+
+.cal-readout {
+    margin: 0;
+    text-align: center;
+    font-size: 13px;
+    color: var(--ink);
+}
+.cal-readout strong { color: var(--accent-strong); }
+.cal-readout-zero { color: var(--muted); }
+
+.cal-numbers { margin-bottom: 0; }
+
+.cal-history {
+    margin: 0;
+    padding: 10px 12px;
+    border: 1px solid var(--border-soft);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+}
+.cal-history-row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.cal-history-row + .cal-history-row { margin-top: 6px; }
+.cal-history-row.d-none { display: none; }
+.cal-history dt {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted-dim);
+    font-weight: 500;
+}
+.cal-history dd { margin: 0; font-size: 12px; color: var(--muted); text-align: right; }
+
+.cal-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 18px; }
+.cal-actions .btn-print { width: auto; }
+
+.cal-status {
+    margin-top: 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-left-width: 3px;
+    border-radius: 9px;
+    background: var(--panel-2);
+    font-size: 12px;
+    line-height: 1.6;
+    color: var(--muted);
+}
+.cal-status.d-none { display: none; }
+.cal-status--success { border-left-color: var(--green); color: var(--ink); }
+.cal-status--warning { border-left-color: #d97706; color: var(--ink); }
+.cal-status--error { border-left-color: var(--red); color: var(--ink); }
+.cal-status--info { border-left-color: var(--accent); }
+
+.cal-footer { justify-content: space-between; gap: 8px; }
+.cal-footer-remove { margin-right: auto; }
+.cal-footer-remove:disabled { opacity: .5; }
+
+@media (max-width: 768px) {
+    .cal-grid { grid-template-columns: 1fr; }
+    .cal-target-stage { min-height: 150px; }
+    /* Match the 16px rule that stops iOS from zooming into a focused field. */
+    .cal-numbers input[type=number],
+    .cal-size-input input[type=number] { font-size: 16px; }
+    .cal-pad-btn { min-height: 58px; }
+    .cal-size-btn { min-width: 56px; min-height: 58px; }
+    .cal-size-btn span { font-size: 8px; }
+    .cal-footer { flex-direction: column-reverse; align-items: stretch; }
+    .cal-footer .btn { width: 100%; }
+    .cal-footer-remove { margin-right: 0; }
+    .cal-actions { flex-direction: column; }
+    .cal-actions .btn-print, .cal-actions .btn-ghost { width: 100%; }
 }

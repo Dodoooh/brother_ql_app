@@ -16,6 +16,7 @@ These tests therefore assert three separate things:
   instructions, because that is what people are printing on today.
 """
 
+import io
 import math
 import os
 
@@ -544,3 +545,421 @@ def test_continuous_text_label_is_not_padded_to_a_fixed_height(service):
 
     assert img.width == WIDTH_12MM
     assert img.height < WIDTH_12MM
+
+
+# --------------------------------------------------------------------------- #
+# Fitting a round label by its ink
+#
+# Fitting the image's *rectangle* into the circle costs 1/sqrt(2) of the
+# diameter, and it costs it whether or not there is anything in the corners to
+# pay for. Measured on paper: a 236x236 bitmap holding a ring drawn to its own
+# edge -- 19.8 mm of artwork -- came off a DK-11218 13.3 mm across, a 5 mm ring
+# of bare paper all round. The fit therefore follows the ink: the largest scale
+# that keeps every dot the printer will actually blacken inside the safe
+# ellipse. Artwork that does reach its corners is bound by the corner dot, which
+# is the half-diagonal rule again, so photographs do not move at all.
+#
+# What is asserted here is rendered dots, not scale factors. This pipeline has
+# been green while the paper was wrong before.
+# --------------------------------------------------------------------------- #
+
+# The reported artwork and what it measured, in dots.
+RING_SOURCE_PX = 236
+RING_INK_PX = 234        # drawn to within a dot of the bitmap's own edge
+RING_BOX_RULE_PX = 157   # what came off the printer: 13.3 mm of a 24 mm label
+
+# 2 * get_round_safe_radius(236): the full diameter less the registration
+# sliver that keeps a misplaced die cut off the artwork.
+D24_SAFE_DIAMETER_PX = 226
+
+
+def _draw(img):
+    return pytest.importorskip("PIL.ImageDraw").Draw(img)
+
+
+def _ink_span(img):
+    """Width and height of the printed ink, or None for a blank label."""
+    box = _ink_bbox(img)
+    return None if box is None else (box[2] - box[0], box[3] - box[1])
+
+
+def _ink_outside_ellipse(img):
+    """Black pixels outside the ellipse inscribed in the canvas.
+
+    On a bled round label the canvas is no longer square, so the die cut is not
+    a circle any more; the inscribed ellipse is the region that is both on the
+    canvas and on the label.
+    """
+    gray = img.convert("L")
+    semi_x = gray.width / 2.0
+    semi_y = gray.height / 2.0
+    pixels = gray.load()
+    outside = 0
+    for y in range(gray.height):
+        for x in range(gray.width):
+            if pixels[x, y] < 128 and math.hypot(
+                    (x - (gray.width - 1) / 2.0) / semi_x,
+                    (y - (gray.height - 1) / 2.0) / semi_y) > 1.0:
+                outside += 1
+    return outside
+
+
+def _ring(size=RING_SOURCE_PX, inset=1, stroke=6):
+    """The reported artwork: a ring drawn to the edge of its own bitmap."""
+    img = Image.new("RGB", (size, size), "white")
+    _draw(img).ellipse((inset, inset, size - 1 - inset, size - 1 - inset),
+                       outline="black", width=stroke)
+    return img
+
+
+def _filled(size, colour="black"):
+    img = Image.new("RGB", size, "white")
+    _draw(img).rectangle((0, 0, size[0] - 1, size[1] - 1), fill=colour)
+    return img
+
+
+def _disc_with_a_corner_mark(mark):
+    """A big black disc plus a pale mark in one corner, twice label size.
+
+    Whether that mark is ink is a question only the threshold and dither
+    settings can answer, which is the point: it decides the fit.
+    """
+    img = Image.new("L", (472, 472), 255)
+    _draw(img).ellipse((36, 36, 435, 435), fill=0)
+    _draw(img).rectangle((0, 0, 30, 30), fill=mark)
+    return img
+
+
+def _png_bytes(img):
+    buffer = io.BytesIO()
+    img.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+# --- The regression itself ------------------------------------------------- #
+
+def test_the_bounding_box_rule_is_what_shrank_the_ring(service):
+    """
+    The measurement that started this, reproduced exactly.
+
+    Fitting the bitmap's rectangle leaves the ring at 157 dots of a 236-dot
+    label -- 13.3 mm of 24 mm, the 5 mm of bare paper the user measured on
+    every side.
+    """
+    boxed = service._fit_to_label(_ring(), "d24", {}, margin_is_content=True)
+
+    assert _ink_span(boxed) == (RING_BOX_RULE_PX, RING_BOX_RULE_PX)
+
+
+def test_a_ring_drawn_to_its_own_edge_now_uses_the_whole_label(service):
+    """
+    The fix: nothing is in the corners, so nothing is paid for them.
+
+    The ring cannot come back at its full 234 dots -- the outer 5 belong to the
+    registration margin that keeps a misplaced die cut off the artwork -- but it
+    gets everything inside that, which is 18.9 mm of a 24 mm label instead of
+    13.3 mm.
+    """
+    fitted = service._fit_to_label(_ring(), "d24", {})
+    span = _ink_span(fitted)
+
+    assert fitted.size == (SIZE_D24, SIZE_D24)
+    assert span[0] >= D24_SAFE_DIAMETER_PX - 2
+    assert span[0] <= D24_SAFE_DIAMETER_PX
+    assert span[0] == span[1]  # still a ring, not an ellipse
+    assert span[0] > RING_BOX_RULE_PX * 1.4
+    assert _ink_outside_circle(fitted) == 0
+
+
+def test_the_ring_survives_the_whole_image_print_path(service, tmp_path):
+    """Not just the fit in isolation: the path a printed file actually takes."""
+    source = tmp_path / "ring.png"
+    _ring().save(source)
+
+    img = _open(service._resize_image(str(source), "d24"))
+
+    assert img.size == (SIZE_D24, SIZE_D24)
+    assert _ink_span(img)[0] >= D24_SAFE_DIAMETER_PX - 2
+    assert _ink_outside_circle(img) == 0
+    _accept(img, "d24")
+
+
+# --- Artwork that really does fill its rectangle must not move -------------- #
+
+def test_a_fully_inked_rectangle_is_byte_identical_to_the_old_fit(service):
+    """
+    A photograph with ink in its corners is bound by the corner dot, and the
+    corner dot is what the half-diagonal rule measures. Same rule, same
+    arithmetic, same file.
+    """
+    for size in [(800, 300), (236, 236), (300, 800), (1000, 1000)]:
+        source = _filled(size)
+        assert _png_bytes(service._fit_to_label(source, "d24", {})) == \
+            _png_bytes(service._fit_to_label(source, "d24", {}, margin_is_content=True))
+
+
+@pytest.mark.parametrize("label_size", ROUND_LABELS)
+def test_a_photo_that_reaches_its_corners_is_untouched(service, label_size):
+    """The same claim on every round medium, and on the bled geometry too."""
+    source = _filled((800, 600))
+    bled = {"label_size": label_size, "bleed_mm": {label_size: 1.0}}
+
+    for settings in ({}, bled):
+        assert _png_bytes(service._fit_to_label(source, label_size, settings)) == \
+            _png_bytes(service._fit_to_label(source, label_size, settings,
+                                             margin_is_content=True))
+
+
+# --- The guarantee that must not weaken ------------------------------------ #
+
+@pytest.mark.parametrize("label_size", ROUND_LABELS)
+@pytest.mark.parametrize("artwork", ["ring", "wide_bar", "disc", "corner_dot", "diagonal"])
+def test_no_design_ever_puts_ink_outside_the_die_cut(service, label_size, artwork):
+    """Ink outside the circle is ink on the backing paper, whatever the fit."""
+    source = Image.new("RGB", (472, 472), "white")
+    draw = _draw(source)
+    if artwork == "ring":
+        draw.ellipse((2, 2, 469, 469), outline="black", width=12)
+    elif artwork == "wide_bar":
+        draw.rectangle((0, 200, 471, 271), fill="black")
+    elif artwork == "disc":
+        draw.ellipse((60, 60, 411, 411), fill="black")
+    elif artwork == "corner_dot":
+        draw.rectangle((8, 8, 24, 24), fill="black")
+    else:
+        draw.line((0, 0, 471, 471), fill="black", width=10)
+
+    fitted = service._fit_to_label(source, label_size, {})
+
+    assert fitted.size == tuple(get_label_geometry(label_size)[:2])
+    assert _ink_outside_circle(fitted) == 0
+    _accept(fitted, label_size)
+
+
+# --- Ink means what the printer will blacken ------------------------------- #
+
+def test_the_fit_uses_the_threshold_the_job_will_print_with(service):
+    """
+    A mark too pale to print is not ink and must not hold the fit back; the same
+    mark under a threshold that *does* print it must. Anything else and the fit
+    and the printer disagree about the rim, which is the one place it shows.
+    """
+    source = _disc_with_a_corner_mark(mark=230)
+
+    pale = _ink_span(service._fit_to_label(source, "d24", {"threshold": 70}))
+    printed = _ink_span(service._fit_to_label(source, "d24", {"threshold": 5}))
+
+    assert pale[0] > printed[0] * 1.2
+    # And "printed" is the bounding-box answer, because the mark is in a corner.
+    assert printed == _ink_span(
+        service._fit_to_label(source, "d24", {"threshold": 5}, margin_is_content=True))
+
+
+def test_dithering_turns_grey_into_ink_and_the_fit_follows(service):
+    """
+    Mid grey prints as nothing under a hard threshold and as a field of dots
+    under error diffusion. The fit has to see the dots.
+    """
+    source = _disc_with_a_corner_mark(mark=128)
+
+    hard = _ink_span(service._fit_to_label(source, "d24", {"dither": False}))
+    dithered = _ink_span(service._fit_to_label(source, "d24", {"dither": True}))
+
+    assert dithered[0] < hard[0]
+    assert _ink_outside_circle(service._fit_to_label(source, "d24", {"dither": True})) == 0
+
+
+def test_a_transparent_corner_is_empty_not_black(service):
+    """
+    Dropping the alpha channel would leave the hidden colour behind, and a
+    transparent black corner would then hold the fit back for ink that never
+    prints.
+    """
+    source = Image.new("RGBA", (472, 472), (255, 255, 255, 0))
+    _draw(source).ellipse((36, 36, 435, 435), fill=(0, 0, 0, 255))
+    opaque = Image.new("RGBA", (472, 472), (255, 255, 255, 0))
+    _draw(opaque).ellipse((36, 36, 435, 435), fill=(0, 0, 0, 255))
+    _draw(source).rectangle((0, 0, 30, 30), fill=(0, 0, 0, 0))
+
+    assert _ink_span(service._fit_to_label(source, "d24", {})) == \
+        _ink_span(service._fit_to_label(opaque, "d24", {}))
+
+
+# --- Nothing to fit, and nearly nothing to fit ----------------------------- #
+
+def test_a_blank_image_is_not_scaled_to_infinity(service):
+    """No ink means no constraint; the rectangle rule decides, as it always did."""
+    blank = Image.new("RGB", (400, 400), "white")
+
+    fitted = service._fit_to_label(blank, "d24", {})
+
+    assert fitted.size == (SIZE_D24, SIZE_D24)
+    assert _ink_bbox(fitted) is None
+    assert _png_bytes(fitted) == _png_bytes(
+        service._fit_to_label(blank, "d24", {}, margin_is_content=True))
+
+
+def test_a_lone_dot_is_never_enlarged_past_its_own_size(service):
+    """
+    A single dot near the middle would otherwise be blown up 40-fold to fill the
+    label. Upsampling a bitmap invents no detail, so 1:1 is the ceiling.
+    """
+    source = Image.new("RGB", (472, 472), "white")
+    _draw(source).rectangle((234, 234, 237, 237), fill="black")
+
+    span = _ink_span(service._fit_to_label(source, "d24", {}))
+
+    assert span[0] <= 6
+
+
+def test_a_small_design_keeps_the_enlargement_the_old_rule_gave_it(service):
+    """
+    Where the rectangle rule was already enlarging, it stays the ceiling. This
+    fit exists to stop giving diameter away, not to start magnifying more.
+    """
+    source = _ring(size=60, stroke=3)
+
+    assert _png_bytes(service._fit_to_label(source, "d24", {})) == \
+        _png_bytes(service._fit_to_label(source, "d24", {}, margin_is_content=True))
+
+
+# --- The QR quiet zone ----------------------------------------------------- #
+
+def _qr_geometry(service, img, data="https://example.org/abc"):
+    """Module pitch and black-module box of a rendered QR label."""
+    encoder = pytest.importorskip("qrcode").QRCode(version=1, box_size=10, border=4)
+    encoder.add_data(data)
+    encoder.make(fit=True)
+    box = _ink_bbox(img)
+    return box, (box[2] - box[0]) / encoder.modules_count, encoder.border
+
+
+def _quiet_zone_corners(box, pitch, border):
+    margin = border * pitch
+    return [(box[0] - margin, box[1] - margin), (box[2] + margin, box[1] - margin),
+            (box[0] - margin, box[3] + margin), (box[2] + margin, box[3] + margin)]
+
+
+def _inside_circle(point, diameter):
+    radius = diameter / 2.0
+    return math.hypot(point[0] - radius, point[1] - radius) <= radius
+
+
+def test_a_qr_code_keeps_its_quiet_zone_on_the_label(service):
+    """
+    A QR's white border is not waste, it is the margin the scanner needs, and it
+    has to land on the paper the user peels off rather than on the backing.
+    """
+    img = _open(service._create_qr_code("https://example.org/abc", {"label_size": "d24"}))
+    box, pitch, border = _qr_geometry(service, img)
+
+    assert border == 4
+    assert pitch > 1  # a module is more than a single dot, or nothing scans
+    for corner in _quiet_zone_corners(box, pitch, border):
+        assert _inside_circle(corner, SIZE_D24)
+
+
+def test_fitting_a_qr_code_by_its_ink_would_push_the_quiet_zone_off_the_label(service):
+    """
+    Why the QR path opts out, stated as a measurement rather than an opinion:
+    grow the modules to the rim and four modules of quiet zone no longer fit on
+    the label at all.
+    """
+    raw = service._generate_qr_image("https://example.org/abc", {"label_size": "d24"})
+
+    boxed = service._fit_to_label(raw, "d24", {}, margin_is_content=True)
+    inked = service._fit_to_label(raw, "d24", {})
+
+    box_quiet = _quiet_zone_corners(*_qr_geometry(service, boxed))
+    ink_quiet = _quiet_zone_corners(*_qr_geometry(service, inked))
+
+    assert all(_inside_circle(corner, SIZE_D24) for corner in box_quiet)
+    assert not any(_inside_circle(corner, SIZE_D24) for corner in ink_quiet)
+
+
+@pytest.mark.parametrize("settings", [
+    {},
+    {"show_text": True, "text": "Shelf B2"},
+    {"side_by_side": True, "side_text": "Shelf B2"},
+])
+@pytest.mark.parametrize("label_size", ROUND_LABELS)
+def test_every_qr_layout_is_still_fitted_by_its_rectangle(service, label_size, settings):
+    """The opt-out covers the composed layouts too, not only the bare symbol."""
+    settings = dict(settings, label_size=label_size)
+
+    img = _open(service._create_qr_code("https://example.org/abc", settings))
+
+    assert _ink_outside_circle(img) == 0
+    assert _png_bytes(img) == _png_bytes(_open(
+        service._create_qr_code("https://example.org/abc", settings)))
+
+
+# --- Media the change must not touch --------------------------------------- #
+
+def test_rectangular_die_cut_still_fits_by_the_bounding_box(service):
+    """
+    On 62x29 the constraint really is the rectangle: the corners print. A design
+    floating in white must therefore stay exactly where the old rule put it.
+    """
+    source = Image.new("RGB", (300, 300), "white")
+    _draw(source).rectangle((120, 120, 179, 179), fill="black")
+
+    fitted = service._fit_to_label(source, "62x29", {})
+
+    assert fitted.size == SIZE_62X29
+    # 271 / 300 of a 60-dot block, and nothing like the 271 dots an ink fit
+    # would have grown it to.
+    assert _ink_span(fitted) == (55, 55)
+
+
+def test_continuous_tape_still_fits_by_the_width(service):
+    """Endless tape has no circle to fit into and no corners to give up."""
+    source = Image.new("RGB", (300, 300), "white")
+    _draw(source).rectangle((120, 120, 179, 179), fill="black")
+
+    fitted = service._fit_to_label(source, "62", {})
+
+    assert fitted.size == (WIDTH_62MM, WIDTH_62MM)
+    assert _ink_span(fitted) == (140, 140)
+
+
+# --- Composition with the other geometry features -------------------------- #
+
+def test_the_ink_fit_follows_the_bleed_onto_the_ellipse(service):
+    """
+    Bleed makes a d24 284 x 236 and its drawable area an ellipse. The ink fit
+    reads the ellipse, so a wide design gains across the tape and nothing leaves
+    the die cut.
+    """
+    settings = {"label_size": "d24", "bleed_mm": {"d24": 2.03}}
+    bled = get_label_geometry("d24", settings)
+    source = Image.new("RGB", (472, 236), "white")
+    _draw(source).rectangle((0, 100, 471, 135), fill="black")
+
+    fitted = service._fit_to_label(source, "d24", settings)
+    unbled = service._fit_to_label(source, "d24", {"label_size": "d24"})
+
+    assert fitted.size == (bled.width, bled.height)
+    assert _ink_span(fitted)[0] > _ink_span(unbled)[0]
+    assert _ink_outside_ellipse(fitted) == 0
+
+
+def test_the_calibration_offset_still_moves_an_ink_fitted_label(service):
+    """The fit hands the funnel a normal label; the offset works on it as before."""
+    fitted = service._fit_to_label(_ring(), "d24", {})
+
+    shifted = service._shift_within_canvas(fitted, 0, 6, "d24")
+
+    assert shifted.size == (SIZE_D24, SIZE_D24)
+    assert _ink_bbox(shifted)[1] == _ink_bbox(fitted)[1] + 6
+
+
+def test_the_size_correction_still_applies_to_an_ink_fitted_label(service):
+    """Same for the size half of a calibration entry."""
+    fitted = service._fit_to_label(_ring(), "d24", {})
+
+    corrected = service._scale_within_canvas(fitted, 0.9, "d24")
+
+    assert corrected.size == (SIZE_D24, SIZE_D24)
+    assert _ink_span(corrected)[0] < _ink_span(fitted)[0]
+    assert _ink_outside_circle(corrected) == 0

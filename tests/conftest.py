@@ -3,8 +3,8 @@ Shared pytest configuration and lightweight dependency stubs.
 
 The application code imports a handful of heavy / hardware-oriented third-party
 packages at *module import time* (``structlog``, ``brother_ql``, ``PIL``,
-``qrcode``, ``pysnmp``). In the CI/Docker image all of those are installed and
-the real packages are used. To keep the unit tests robust and runnable even in
+``qrcode``, ``pysnmp``, ``flask``/``werkzeug``). In the CI/Docker image all of
+those are installed and the real packages are used. To keep the unit tests robust and runnable even in
 a bare environment, this conftest installs *minimal* stand-in modules for any of
 them that happen to be missing.
 
@@ -114,6 +114,60 @@ def _ensure_qrcode() -> None:
     sys.modules["qrcode.constants"] = constants
 
 
+def _ensure_flask() -> None:
+    """Stand in for Flask/Werkzeug so the thin API controllers can be imported.
+
+    The controllers import ``flask``/``werkzeug`` at module level for request
+    parsing and response shaping, but their logic under test -- validation and
+    delegation -- never touches a real request context. The stub therefore
+    provides an empty request (no headers, no files, no form), which is exactly
+    the "plain JSON call" path.
+    """
+    try:
+        import flask  # noqa: F401
+        import werkzeug.datastructures  # noqa: F401
+        return
+    except ImportError:
+        pass
+
+    class _Headers(dict):
+        def get(self, key, default=None):
+            return super().get(key, default)
+
+    class _Request:
+        def __init__(self):
+            self.headers = _Headers()
+            self.files = {}
+            self.form = {}
+
+        def get_json(self, *_args, **_kwargs):
+            return None
+
+    class _Response:
+        def __init__(self, body=b"", mimetype=None, headers=None):
+            self.data = body
+            self.mimetype = mimetype
+            self.headers = dict(headers or {})
+
+    flask = types.ModuleType("flask")
+    flask.request = _Request()  # type: ignore[attr-defined]
+    flask.Response = _Response  # type: ignore[attr-defined]
+    flask.current_app = None  # type: ignore[attr-defined]
+    flask.send_file = lambda *a, **k: None  # type: ignore[attr-defined]
+    sys.modules["flask"] = flask
+
+    werkzeug = types.ModuleType("werkzeug")
+    datastructures = types.ModuleType("werkzeug.datastructures")
+    datastructures.FileStorage = object  # type: ignore[attr-defined]
+    utils = types.ModuleType("werkzeug.utils")
+    utils.secure_filename = lambda name: (name or "").replace("/", "_")  # type: ignore[attr-defined]
+    werkzeug.datastructures = datastructures  # type: ignore[attr-defined]
+    werkzeug.utils = utils  # type: ignore[attr-defined]
+    sys.modules["werkzeug"] = werkzeug
+    sys.modules["werkzeug.datastructures"] = datastructures
+    sys.modules["werkzeug.utils"] = utils
+
+
 def _ensure_pil() -> None:
     try:
         import PIL  # noqa: F401
@@ -138,3 +192,4 @@ _ensure_structlog()
 _ensure_brother_ql()
 _ensure_qrcode()
 _ensure_pil()
+_ensure_flask()

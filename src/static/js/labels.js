@@ -62,7 +62,7 @@ const LABEL_CATALOGUE = [
         length_mm: null,
         printable_px: { width: 234, length: 0 },
         material: "tape",
-        notes: "No Brother DK roll of this width exists and 18 mm does not appear in any QL raster command reference. The geometry (234 printable dots for 18 mm = 360 dpi, feed margin 14 like the pt* entries) matches an 18 mm P-touch TZe cassette on the 360 dpi PT-P900W / PT-P950NW head, not a QL medium. Could not confirm against a Brother source; no product code asserted. Not usable on any printer offered by this app.",
+        notes: "No Brother DK roll of this width exists and 18 mm does not appear in any QL raster command reference. The geometry (234 printable dots for 18 mm = 360 dpi, feed margin 14) matches an 18 mm P-touch TZe cassette on the 360 dpi PT-P900W / PT-P950NW head, not a QL medium. Could not confirm against a Brother source; no product code asserted. Unlikely to be usable on a QL printer.",
         confidence: "unverified"
     },
     {
@@ -415,59 +415,7 @@ const LABEL_CATALOGUE = [
         material: "film",
         notes: "100 labels per roll. The only round DK made of film rather than paper. Fits every QL model. DK-11207 is the EU code, DK-1207 the US/JP code.",
         confidence: "confirmed"
-    },
-    {
-        identifier: "pt12",
-        product_codes: ["TZe-231"],
-        name: "12 mm P-touch tape",
-        description: "12 mm P-touch laminated tape. Cable marking, equipment and drawer labels.",
-        form: "ptouch",
-        width_mm: 12,
-        length_mm: null,
-        printable_px: { width: 70, length: 0 },
-        material: "laminated tape",
-        notes: "Any 12 mm TZe cassette fits; TZe-231 (black on white laminated) is the reference code, but there are dozens of colour/material variants at this width. Geometry matches the 128-dot / 180 dpi head of the PT-E550W, PT-P700 and PT-P750W. No Brother QL model can use it, and this app's printer dropdown offers only QL models, so this option is unusable as the app currently ships.",
-        confidence: "likely"
-    },
-    {
-        identifier: "pt18",
-        product_codes: ["TZe-241"],
-        name: "18 mm P-touch tape",
-        description: "18 mm P-touch laminated tape. Equipment, shelf and safety labels.",
-        form: "ptouch",
-        width_mm: 18,
-        length_mm: null,
-        printable_px: { width: 112, length: 0 },
-        material: "laminated tape",
-        notes: "Any 18 mm TZe cassette fits; TZe-241 (black on white laminated) is the reference code. Geometry matches the 128-dot / 180 dpi head of the PT-E550W, PT-P700 and PT-P750W. No QL model can use it; unusable with the printers this app offers.",
-        confidence: "likely"
-    },
-    {
-        identifier: "pt24",
-        product_codes: ["TZe-251"],
-        name: "24 mm P-touch tape",
-        description: "24 mm P-touch laminated tape. Wide signage, panel and safety labels.",
-        form: "ptouch",
-        width_mm: 24,
-        length_mm: null,
-        printable_px: { width: 128, length: 0 },
-        material: "laminated tape",
-        notes: "Any 24 mm TZe cassette fits; TZe-251 (black on white laminated) is the reference code. Only 128 dots (about 18 mm) of the 24 mm tape are printable because the PT-E550W / PT-P700 / PT-P750W head is 128 dots wide. No QL model can use it; unusable with the printers this app offers.",
-        confidence: "likely"
-    },
-    {
-        identifier: "pt36",
-        product_codes: ["TZe-261"],
-        name: "36 mm P-touch tape",
-        description: "36 mm P-touch laminated tape. Large signage and identification labels.",
-        form: "ptouch",
-        width_mm: 36,
-        length_mm: null,
-        printable_px: { width: 454, length: 0 },
-        material: "laminated tape",
-        notes: "Any 36 mm TZe cassette fits; TZe-261 (black on white laminated) is the reference code. Geometry matches the 560-dot / 360 dpi head of the PT-P900W and PT-P950NW. No QL model can use it; unusable with the printers this app offers.",
-        confidence: "likely"
-    }];
+    },];
 
 /**
  * Display order and headings of the picker's groups, keyed by the catalogue's
@@ -477,8 +425,7 @@ const LABEL_CATALOGUE = [
 const LABEL_GROUPS = [
     { form: 'continuous', title: 'Continuous rolls' },
     { form: 'die-cut', title: 'Die-cut labels' },
-    { form: 'round', title: 'Round labels' },
-    { form: 'ptouch', title: 'P-touch tapes' }
+    { form: 'round', title: 'Round labels' }
 ];
 
 /**
@@ -489,8 +436,7 @@ const LABEL_GROUPS = [
 const LABEL_FORM_KEYWORDS = {
     'continuous': 'continuous endless roll tape any length',
     'die-cut': 'die-cut diecut precut fixed size sheet',
-    'round-die-cut': 'round circle circular dot die-cut diecut',
-    'ptouch': 'p-touch ptouch tze cassette laminated tape'
+    'round-die-cut': 'round circle circular dot die-cut diecut'
 };
 
 /**
@@ -665,16 +611,71 @@ function labelCodesText(entry) {
 }
 
 /**
+ * The code to put on the clipboard for an entry, or an empty string when the
+ * medium has no Brother product behind it.
+ *
+ * Only the first code, never the joined list: this is meant to be pasted into
+ * a shop's search box, and "DK-11218 / DK-1218" finds nothing. The regional
+ * pair is listed in full on the entry itself, and the button names the code it
+ * will copy, so there is no guessing about which one lands on the clipboard.
+ * @param {Object} entry - a catalogue entry
+ * @returns {string}
+ */
+function labelPrimaryCode(entry) {
+    return (entry && entry.product_codes.length > 0) ? entry.product_codes[0] : '';
+}
+
+/**
+ * Put text on the clipboard, resolving to whether it worked.
+ *
+ * navigator.clipboard only exists in a secure context, and this app is
+ * routinely reached over plain http on a LAN address, where it is absent. The
+ * hidden-textarea fallback is what actually runs in that (common) case.
+ * @param {string} text - the text to copy
+ * @returns {Promise<boolean>} true when the copy succeeded
+ */
+function copyTextToClipboard(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text).then(() => true, () => false);
+    }
+    return Promise.resolve(legacyCopyToClipboard(text));
+}
+
+/**
+ * Clipboard fallback for non-secure contexts: select a detached textarea and
+ * let the browser's own copy command take it.
+ * @param {string} text - the text to copy
+ * @returns {boolean} true when the copy succeeded
+ */
+function legacyCopyToClipboard(text) {
+    const area = document.createElement('textarea');
+    area.value = text;
+    // Keep it out of sight and out of the layout, but still selectable -
+    // display:none or visibility:hidden would make the selection fail.
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+
+    let copied = false;
+    try {
+        area.select();
+        copied = document.execCommand('copy');
+    } catch (error) {
+        copied = false;
+    }
+    document.body.removeChild(area);
+    return copied;
+}
+
+/**
  * A caveat worth showing next to an entry, or an empty string when there is
- * none. P-touch tapes fit no QL printer, and two identifiers have no Brother
- * product behind them at all.
+ * none. Two identifiers have no Brother product behind them at all.
  * @param {Object} entry - a catalogue entry
  * @returns {{text: string, kind: string}|null}
  */
 function labelFlag(entry) {
-    if (entry.form === 'ptouch') {
-        return { text: 'P-touch tape — no QL printer can print it', kind: 'warn' };
-    }
     if (entry.product_codes.length === 0) {
         return { text: 'No Brother product code — unverified', kind: 'muted' };
     }
@@ -720,6 +721,9 @@ function setupLabelPicker() {
     select.setAttribute('aria-hidden', 'true');
     const labelEl = document.getElementById('label-size-label');
     if (labelEl) labelEl.removeAttribute('for');
+
+    const copyButton = document.getElementById('label-picker-copy');
+    if (copyButton) copyButton.addEventListener('click', copySelectedLabelCode);
 
     trigger.addEventListener('click', toggleLabelPicker);
     trigger.addEventListener('keydown', event => {
@@ -799,6 +803,80 @@ function syncLabelPicker() {
         noteEl.textContent = flag ? flag.text : '';
         noteEl.classList.toggle('d-none', !flag);
     }
+    syncLabelCopyButton(entry);
+}
+
+/**
+ * Point the copy button at the selected medium's product code, or hide it when
+ * the medium has none. Naming the code on the button is the whole trick: the
+ * user sees exactly what they are about to paste.
+ * @param {Object|null} entry - the selected catalogue entry, if any
+ */
+function syncLabelCopyButton(entry) {
+    const button = document.getElementById('label-picker-copy');
+    const textEl = document.getElementById('label-picker-copy-text');
+    if (!button || !textEl) return;
+
+    const code = labelPrimaryCode(entry);
+    button.hidden = !code;
+    if (!code) {
+        // Drop the previous medium's code rather than leaving it parked on a
+        // hidden button: a stale product code is how someone ends up ordering
+        // the wrong roll.
+        resetLabelCopyButton();
+        delete button.dataset.code;
+        button.removeAttribute('title');
+        textEl.textContent = 'Copy code';
+        return;
+    }
+
+    // A pending "Copied" confirmation belongs to the previous medium.
+    resetLabelCopyButton();
+    button.dataset.code = code;
+    textEl.textContent = 'Copy ' + code;
+    button.setAttribute('title', 'Copy ' + code + ' to the clipboard');
+}
+
+// Handle for the "Copied" confirmation, so switching media mid-flash does not
+// leave the button stuck on the wrong label.
+let labelCopyResetTimer = null;
+
+/**
+ * Restore the copy button to its resting state.
+ */
+function resetLabelCopyButton() {
+    const button = document.getElementById('label-picker-copy');
+    const textEl = document.getElementById('label-picker-copy-text');
+    const iconEl = document.getElementById('label-picker-copy-icon');
+    if (labelCopyResetTimer) {
+        clearTimeout(labelCopyResetTimer);
+        labelCopyResetTimer = null;
+    }
+    if (!button || !textEl || !iconEl) return;
+    button.classList.remove('is-copied');
+    iconEl.className = 'bi bi-clipboard';
+    if (button.dataset.code) textEl.textContent = 'Copy ' + button.dataset.code;
+}
+
+/**
+ * Copy the selected medium's product code and confirm it on the button itself.
+ */
+function copySelectedLabelCode() {
+    const button = document.getElementById('label-picker-copy');
+    const textEl = document.getElementById('label-picker-copy-text');
+    const iconEl = document.getElementById('label-picker-copy-icon');
+    if (!button || !textEl || !iconEl) return;
+
+    const code = button.dataset.code || '';
+    if (!code) return;
+
+    copyTextToClipboard(code).then(copied => {
+        if (labelCopyResetTimer) clearTimeout(labelCopyResetTimer);
+        button.classList.toggle('is-copied', copied);
+        iconEl.className = copied ? 'bi bi-check2' : 'bi bi-exclamation-triangle';
+        textEl.textContent = copied ? 'Copied ' + code : 'Press Ctrl+C to copy';
+        labelCopyResetTimer = setTimeout(resetLabelCopyButton, 2000);
+    });
 }
 
 /**

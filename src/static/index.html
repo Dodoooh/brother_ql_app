@@ -663,11 +663,13 @@
                                                 <option value="d12">12mm (round die-cut)</option>
                                                 <option value="d24">24mm (round die-cut)</option>
                                                 <option value="d58">58mm (round die-cut)</option>
-                                                <option value="pt12">pTouch 12mm (endless)</option>
-                                                <option value="pt18">pTouch 18mm (endless)</option>
-                                                <option value="pt24">pTouch 24mm (endless)</option>
-                                                <option value="pt36">pTouch 36mm (endless)</option>
                                             </select>
+                                            <!-- Reordering aid: copies the medium's Brother product
+                                                 code, which is what a shop search actually wants. -->
+                                            <button type="button" class="btn-ghost btn-sm lp-copy" id="label-picker-copy" hidden>
+                                                <i class="bi bi-clipboard" id="label-picker-copy-icon" aria-hidden="true"></i>
+                                                <span id="label-picker-copy-text">Copy code</span>
+                                            </button>
                                             <div class="hint d-none" id="label-picker-note"></div>
                                         </div>
                                         <div class="field">
@@ -680,6 +682,26 @@
                                             </select>
                                         </div>
                                     </div>
+
+                                    <div class="section-sep"></div>
+                                    <div class="section-cap">Print Alignment</div>
+
+                                    <!-- Per-label-type calibration. The heavy part (target
+                                         preview + nudge loop) lives in #calibrationModal;
+                                         this is the summary and the way in. -->
+                                    <p class="cal-intro">
+                                        Die-cut registration and per-model raster offsets can put the print
+                                        slightly off-centre on the physical label, and some printers lay ink
+                                        down a little larger or smaller than nominal. A calibration shifts and
+                                        resizes everything this app prints — <strong>stored per label
+                                        type</strong>, and applied when printing only, never to the preview.
+                                    </p>
+                                    <div id="calibration-list" class="cal-list"></div>
+                                    <div class="hint cal-list-note">Opening a row selects that label type in Media above</div>
+                                    <button type="button" id="calibration-open" class="btn-ghost cal-open">
+                                        <i class="bi bi-crosshair"></i>
+                                        Calibrate <span id="calibration-open-label">the selected label type</span>
+                                    </button>
 
                                     <div class="section-sep"></div>
                                     <div class="section-cap">Rendering</div>
@@ -842,6 +864,165 @@
         </div>
     </div>
 
+    <!-- Print Alignment Calibration Modal -->
+    <div class="modal fade" id="calibrationModal" tabindex="-1" aria-labelledby="calibrationModalLabel" aria-hidden="true">
+        <div class="modal-dialog modal-lg modal-dialog-scrollable modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="calibrationModalLabel">Print Alignment</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body">
+
+                    <!-- Which medium is being calibrated, and whether it already has an offset -->
+                    <div class="cal-medium">
+                        <span class="cal-medium-body">
+                            <span class="cal-medium-name" id="cal-medium-name">Label type</span>
+                            <span class="cal-medium-codes mono" id="cal-medium-codes"></span>
+                        </span>
+                        <span class="cal-medium-state" id="cal-medium-state">not calibrated</span>
+                    </div>
+                    <p class="cal-copy">
+                        Print the target, look at how far it sits off-centre on the label, then move the
+                        print the same way and print again. If the rings come out slightly too large or
+                        too small for the label, correct the size as well. Repeat until it lands exactly.
+                        This applies to <strong>this label type only</strong>, and only when printing —
+                        previews always show the label as you designed it.
+                    </p>
+
+                    <div class="cal-grid">
+                        <!-- Target preview -->
+                        <div class="cal-target">
+                            <div class="cal-target-stage">
+                                <div id="cal-stage" class="preview-stage d-none">
+                                    <img id="cal-preview" class="preview-server" alt="Calibration target preview">
+                                    <span class="preview-die-cut" aria-hidden="true"></span>
+                                </div>
+                                <div id="cal-preview-empty" class="cal-preview-empty">Rendering the calibration target…</div>
+                            </div>
+                            <div class="hint" id="cal-preview-hint"></div>
+                        </div>
+
+                        <!-- Directional controls -->
+                        <div class="cal-controls">
+                            <div class="cal-step-row">
+                                <span class="lbl">Position step</span>
+                                <div class="cal-steps" role="group" aria-label="Nudge step size">
+                                    <button type="button" class="cal-step" data-cal-step="0.1" aria-pressed="false">0.1 mm</button>
+                                    <button type="button" class="cal-step" data-cal-step="0.5" aria-pressed="true">0.5 mm</button>
+                                    <button type="button" class="cal-step" data-cal-step="1" aria-pressed="false">1 mm</button>
+                                </div>
+                            </div>
+
+                            <div class="cal-pad">
+                                <button type="button" class="cal-pad-btn cal-pad-up" data-cal-nudge="up" title="Move the print up">
+                                    <i class="bi bi-arrow-up" aria-hidden="true"></i><span>up</span>
+                                </button>
+                                <button type="button" class="cal-pad-btn cal-pad-left" data-cal-nudge="left" title="Move the print left">
+                                    <i class="bi bi-arrow-left" aria-hidden="true"></i><span>left</span>
+                                </button>
+                                <button type="button" class="cal-pad-btn cal-pad-reset" id="cal-pad-reset" title="Back to no correction at all: centred and at nominal size" aria-label="Reset the offset and the size correction">
+                                    <i class="bi bi-crosshair" aria-hidden="true"></i>
+                                </button>
+                                <button type="button" class="cal-pad-btn cal-pad-right" data-cal-nudge="right" title="Move the print right">
+                                    <i class="bi bi-arrow-right" aria-hidden="true"></i><span>right</span>
+                                </button>
+                                <button type="button" class="cal-pad-btn cal-pad-down" data-cal-nudge="down" title="Move the print down">
+                                    <i class="bi bi-arrow-down" aria-hidden="true"></i><span>down</span>
+                                </button>
+                            </div>
+
+                            <div class="grid-2 cal-numbers">
+                                <div class="field">
+                                    <label class="lbl" for="cal-x">&larr; left &nbsp;/&nbsp; right &rarr;</label>
+                                    <input type="number" id="cal-x" class="mono" step="0.1" min="-10" max="10" value="0.0">
+                                    <div class="hint">mm — above zero moves right</div>
+                                </div>
+                                <div class="field">
+                                    <label class="lbl" for="cal-y">&uarr; up &nbsp;/&nbsp; down &darr;</label>
+                                    <input type="number" id="cal-y" class="mono" step="0.1" min="-10" max="10" value="0.0">
+                                    <div class="hint">mm — above zero moves down the feed</div>
+                                </div>
+                            </div>
+
+                            <!-- Size correction: for printers that lay ink down slightly
+                                 larger or smaller than nominal. Adjusted in percent, stored
+                                 as the multiplier shown next to the field. -->
+                            <div class="cal-size">
+                                <div class="cal-step-row">
+                                    <span class="lbl">Size step</span>
+                                    <div class="cal-steps" role="group" aria-label="Size correction step">
+                                        <button type="button" class="cal-step" data-cal-scale-step="0.1" aria-pressed="false">0.1 %</button>
+                                        <button type="button" class="cal-step" data-cal-scale-step="0.5" aria-pressed="true">0.5 %</button>
+                                        <button type="button" class="cal-step" data-cal-scale-step="1" aria-pressed="false">1 %</button>
+                                    </div>
+                                </div>
+
+                                <div class="cal-size-row">
+                                    <button type="button" class="cal-size-btn" data-cal-scale="smaller" title="Print smaller" aria-label="Print smaller by one step">
+                                        <i class="bi bi-dash-lg" aria-hidden="true"></i><span>smaller</span>
+                                    </button>
+                                    <div class="cal-size-value">
+                                        <div class="cal-size-input">
+                                            <input type="number" id="cal-scale" class="mono" step="0.1" min="-5" max="5" value="0"
+                                                   aria-label="Size correction in percent, below zero prints smaller"
+                                                   aria-describedby="cal-scale-factor">
+                                            <span class="cal-size-unit" aria-hidden="true">%</span>
+                                        </div>
+                                        <span class="cal-size-factor mono" id="cal-scale-factor">&times;1.000</span>
+                                    </div>
+                                    <button type="button" class="cal-size-btn" data-cal-scale="larger" title="Print larger" aria-label="Print larger by one step">
+                                        <i class="bi bi-plus-lg" aria-hidden="true"></i><span>larger</span>
+                                    </button>
+                                    <button type="button" class="cal-size-clear" id="cal-scale-reset" title="Back to nominal size" aria-label="Clear the size correction" disabled>
+                                        <i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i>
+                                    </button>
+                                </div>
+                                <div class="hint cal-size-hint">
+                                    Corrects a printer that prints slightly large or small — below zero prints
+                                    smaller. It does not resize your design, and the preview does not change.
+                                </div>
+                            </div>
+
+                            <p class="cal-readout" id="cal-readout" role="status">
+                                <span class="cal-readout-zero">Printed exactly as previewed — no shift, no size correction</span>
+                            </p>
+
+                            <dl class="cal-history">
+                                <div class="cal-history-row">
+                                    <dt>Currently stored</dt>
+                                    <dd id="cal-saved-value">none stored</dd>
+                                </div>
+                                <div class="cal-history-row d-none" id="cal-printed-row">
+                                    <dt>Last test print</dt>
+                                    <dd id="cal-printed-value">—</dd>
+                                </div>
+                            </dl>
+                        </div>
+                    </div>
+
+                    <div class="cal-actions">
+                        <button type="button" id="cal-test-print" class="btn-print">
+                            <i class="bi bi-printer-fill"></i> Print test label
+                        </button>
+                        <button type="button" id="cal-dry-run" class="btn-ghost">
+                            <i class="bi bi-clipboard-check"></i> Dry run (no label used)
+                        </button>
+                    </div>
+
+                    <div id="cal-status" class="cal-status d-none" role="status"></div>
+                </div>
+                <div class="modal-footer cal-footer">
+                    <button type="button" class="btn btn-secondary cal-footer-remove" id="cal-remove" disabled>
+                        <i class="bi bi-arrow-counterclockwise"></i> Remove stored calibration
+                    </button>
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                    <button type="button" class="btn btn-primary" id="cal-save" disabled>Save calibration</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Notifications Container -->
     <div id="notifications" class="notifications"></div>
 
@@ -852,6 +1033,7 @@
     <script src="js/labels.js"></script>
     <script src="js/preview.js"></script>
     <script src="js/api.js"></script>
+    <script src="js/calibration.js"></script>
     <script src="js/core.js"></script>
 </body>
 </html>

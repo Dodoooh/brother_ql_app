@@ -120,6 +120,12 @@ async function loadSettings() {
         // Reflect the current mode in the duration controls' visibility/state.
         updateKeepAliveModeUI();
 
+        // Per-label-type print alignment offsets. Absent in older settings
+        // files, which simply means nothing is calibrated.
+        if (typeof setCalibrationMap === 'function') {
+            setCalibrationMap(settings.calibration);
+        }
+
         // Also check the current keep alive status
         loadKeepAliveStatus();
         

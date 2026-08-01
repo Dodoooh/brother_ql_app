@@ -245,6 +245,71 @@
     }
 
     /**
+     * Draw a stand-in alignment target as a PNG data URL: a crosshair through
+     * the centre, concentric rings and edge ticks, which is what the real
+     * server renders for a calibration test print. Drawn on a canvas rather
+     * than shipped as a blob so it can follow the medium's aspect ratio.
+     *
+     * @param {string} labelSize - label type identifier, e.g. "d24" or "62x29"
+     * @returns {string} a data:image/png URL
+     */
+    function calibrationTargetPng(labelSize) {
+        // Square for round media, otherwise the die-cut's own ratio, otherwise
+        // a strip of continuous tape.
+        const round = /^d\d+$/.test(String(labelSize || ''));
+        const rect = /^(\d+)x(\d+)$/.exec(String(labelSize || ''));
+        const width = 420;
+        let height = 260;
+        if (round) height = width;
+        else if (rect) height = Math.round(width * (parseInt(rect[1], 10) / parseInt(rect[2], 10)));
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        // No 2D context (very old or headless environment): fall back to the
+        // generic placeholder rather than failing the request.
+        if (!ctx) return DEMO_LABEL_PNG;
+
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.strokeStyle = '#000000';
+        ctx.fillStyle = '#000000';
+        ctx.lineWidth = 2;
+
+        const cx = width / 2;
+        const cy = height / 2;
+
+        // Crosshair.
+        ctx.beginPath();
+        ctx.moveTo(cx, 8); ctx.lineTo(cx, height - 8);
+        ctx.moveTo(8, cy); ctx.lineTo(width - 8, cy);
+        ctx.stroke();
+
+        // Concentric rings, ~5 mm apart at this scale.
+        for (let r = 30; r < Math.min(width, height) / 2 - 6; r += 30) {
+            ctx.beginPath();
+            ctx.arc(cx, cy, r, 0, Math.PI * 2);
+            ctx.stroke();
+        }
+
+        // Edge ticks: the marks you line up with the label edge.
+        ctx.lineWidth = 3;
+        [[cx, 0, cx, 16], [cx, height, cx, height - 16],
+         [0, cy, 16, cy], [width, cy, width - 16, cy]].forEach(t => {
+            ctx.beginPath();
+            ctx.moveTo(t[0], t[1]); ctx.lineTo(t[2], t[3]);
+            ctx.stroke();
+        });
+
+        ctx.font = '600 13px monospace';
+        ctx.textAlign = 'center';
+        ctx.fillText(String(labelSize || ''), cx, cy - 10);
+
+        return canvas.toDataURL('image/png');
+    }
+
+    /**
      * Read a short, human-friendly label from a print request's body (JSON or
      * FormData), falling back to the job type.
      */
@@ -489,6 +554,28 @@
                 truncated: false,
                 rendered_pages: [1],
                 previews: [{ page: 1, image: DEMO_LABEL_PNG }]
+            });
+        }
+
+        // ----- Print alignment calibration -----
+        if (p === '/calibration/preview' && method === 'POST') {
+            return jsonResponse({ image: calibrationTargetPng(body && body.label_size) });
+        }
+        if (p === '/calibration/test-print' && method === 'POST') {
+            const labelSize = (body && body.label_size) || state.settings.label_size;
+            if (body && (body.dry_run === true || body.dry_run === 'true')) {
+                return jsonResponse({
+                    ok: true,
+                    dry_run: true,
+                    printer_reachable: true,
+                    would_print: { label_size: labelSize, copies: 1, width_px: 696, height_px: 696 }
+                });
+            }
+            const jobId = queuePrintJob('calibration', body || {});
+            return jsonResponse({
+                success: true,
+                job_id: jobId,
+                message: 'Calibration target queued (demo)'
             });
         }
 
