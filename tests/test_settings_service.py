@@ -157,6 +157,115 @@ def test_save_settings_returns_false_on_invalid(tmp_path):
         assert service.save_settings(_valid_settings(ipp_port=0)) is False
 
 
+# --- owned media and the media memory ----------------------------------------
+#
+# Both are checked against the media catalogue, unlike calibration and bleed.
+# Those may legitimately carry entries for media that is not loaded now, and an
+# entry that matches nothing simply never applies; these two help *choose* a
+# label size on the user's behalf, so an entry naming nothing real can only
+# mislead. Rejection therefore names the offending value.
+
+def _validate(tmp_path, **overrides):
+    service, _ = _make_service(tmp_path)
+    with patch("src.services.settings_service.guess_backend", side_effect=_net_backend):
+        service._validate_settings(_valid_settings(**overrides))
+
+
+def test_owned_media_accepts_known_identifiers(tmp_path):
+    _validate(tmp_path, owned_media=["62red", "12+17", "d24", "62x29"])
+
+
+def test_owned_media_may_be_empty(tmp_path):
+    _validate(tmp_path, owned_media=[])
+
+
+def test_owned_media_rejects_an_unknown_identifier_by_name(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, owned_media=["62red", "62-red"])
+    assert "62-red" in str(excinfo.value)
+
+
+def test_owned_media_rejects_a_non_string_entry(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, owned_media=[62])
+    assert "62" in str(excinfo.value)
+
+
+def test_owned_media_rejects_a_non_list(tmp_path):
+    with pytest.raises(ValueError):
+        _validate(tmp_path, owned_media={"62red": True})
+
+
+def test_media_memory_accepts_a_variant_of_its_own_medium(tmp_path):
+    _validate(tmp_path, media_memory={"62": "62red", "12": "12+17", "103": "104"})
+
+
+def test_media_memory_accepts_a_medium_pinned_to_its_plain_variant(tmp_path):
+    _validate(tmp_path, media_memory={"62": "62"})
+
+
+def test_media_memory_rejects_an_unknown_medium_by_name(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_memory={"64": "62red"})
+    assert "64" in str(excinfo.value)
+
+
+def test_media_memory_rejects_a_variant_used_as_the_key(tmp_path):
+    """62red is one way of addressing the 62 mm medium, not a medium of its own.
+    Keying on it would split one roll's history across two entries."""
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_memory={"62red": "62red"})
+    message = str(excinfo.value)
+    assert "62red" in message and "'62'" in message
+
+
+def test_media_memory_rejects_an_unknown_label_as_the_value(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_memory={"62": "62-red"})
+    assert "62-red" in str(excinfo.value)
+
+
+def test_media_memory_rejects_a_value_from_a_different_medium(tmp_path):
+    """The entry that would actually break a print: a 62 mm roll can never be a
+    d24, so remembering one against the other could only ever switch to a label
+    size the loaded medium cannot use."""
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_memory={"62": "d24"})
+    message = str(excinfo.value)
+    assert "d24" in message and "62red" in message  # names the offender and the options
+
+
+def test_media_memory_rejects_a_non_string_value(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_memory={"62": None})
+    assert "62" in str(excinfo.value)
+
+
+def test_media_auto_switch_must_be_a_boolean(tmp_path):
+    with pytest.raises(ValueError):
+        _validate(tmp_path, media_auto_switch="yes")
+
+
+def test_a_settings_file_predating_the_feature_still_loads(tmp_path):
+    """An older settings file has none of the three keys; the defaults are
+    merged in, off."""
+    service, _ = _make_service(tmp_path, _valid_settings())
+    settings = service.get_settings()
+
+    assert settings["media_auto_switch"] is False
+    assert settings["owned_media"] == []
+    assert settings["media_memory"] == {}
+
+
+def test_a_settings_file_predating_the_feature_still_validates(tmp_path):
+    service, _ = _make_service(tmp_path)
+    stored = _valid_settings()
+    for key in ("media_auto_switch", "owned_media", "media_memory"):
+        assert key not in stored
+    with patch("src.services.settings_service.guess_backend", side_effect=_net_backend):
+        service._validate_settings(stored)
+
+
 # --- deepcopy isolation ------------------------------------------------------
 
 def test_returned_settings_are_isolated_from_cache(tmp_path):

@@ -3,6 +3,8 @@ Default settings for the Brother QL Printer App.
 These settings are used when no user-defined settings are available.
 """
 
+from typing import FrozenSet, Optional, Tuple
+
 # Largest print offset a calibration entry may carry, per axis. The errors this
 # corrects are die-cut registration tolerance and per-model raster offsets, all
 # of which are a couple of millimetres at worst; a value beyond this would push
@@ -42,6 +44,112 @@ DEFAULT_CALIBRATION_SCALE = 1.0
 # or a wrong unit rather than a request. Five millimetres is comfortably above
 # every real margin and far below "somebody typed centimetres".
 BLEED_LIMIT_MM = 5.0
+
+
+# --------------------------------------------------------------------------- #
+# The media a printer cannot tell apart, and what to call each of them.
+#
+# Detection resolves all 15 die-cut sizes to exactly one identifier. Three
+# continuous cases cannot be resolved from the device and must not be: 62/62red
+# are the same geometry with the colour reported as unknown, 12/12+17 are the
+# same roll addressed two ways, and 103/104 differ by about a quarter of a
+# millimetre. Identification therefore returns the whole group.
+#
+# The table lives in this module rather than beside the identification code
+# because both halves of the feature need it and this module imports nothing, so
+# sharing it here cannot create an import cycle: the printer service widens a
+# geometric match into the whole group, and the settings service validates the
+# owned-media list and the media memory against it. A second copy in either
+# place would be a second thing to keep right.
+#
+# THE ORDER INSIDE EACH GROUP IS LOAD-BEARING. The first member is the plain
+# variant, and it is three things at once: the key the media memory is stored
+# under, the documented default when nothing else resolves the group, and
+# therefore what a user gets who never expresses a preference. The second member
+# is always the one that costs something to pick by accident -- red ink that is
+# not loaded, a 29 mm-wide raster on a 12 mm roll, a quarter-millimetre of extra
+# width -- which is exactly why it is never the default.
+# --------------------------------------------------------------------------- #
+MEDIA_EQUIVALENTS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
+    (("62", "62red"),
+     "62 and 62red are the same geometry and the printer reports "
+     "'mediacolor: unknown', so the red tape cannot be distinguished"),
+    (("12", "12+17"),
+     "12 and 12+17 are the same physical 12 mm roll; 12+17 is a rendering "
+     "choice, not a medium"),
+    (("103", "104"),
+     "103 and 104 differ by about 0.25 mm, below any resolution the printer "
+     "reports"),
+)
+
+
+def medium_variants(label_size: str) -> Tuple[str, ...]:
+    """Every identifier that names the same physical medium as ``label_size``.
+
+    Args:
+        label_size: A label identifier, e.g. "62red".
+
+    Returns:
+        The group it belongs to in plain-variant-first order, or a 1-tuple of
+        the identifier itself when it names a medium of its own.
+    """
+    for group, _note in MEDIA_EQUIVALENTS:
+        if label_size in group:
+            return group
+    return (str(label_size),)
+
+
+def medium_key(label_size: str) -> str:
+    """The canonical name of the medium ``label_size`` is a variant of.
+
+    This is the key the media memory is stored under, and it was chosen to be
+    the one thing about an ambiguous detection that does not move:
+
+    * not the candidate list -- that is derived from the media catalogue, and a
+      catalogue edit (a new variant, a reordered table, a renamed entry) would
+      silently orphan every remembered choice;
+    * not the list's order or index, for the same reason and more so;
+    * not a UI label, which is a translation and a wording decision away from
+      changing under a memory that has to outlive it;
+    * not the reported millimetres either: the device quantises them, 103.6 mm
+      arrives as 104, and a key that is a float is a key that occasionally is
+      not equal to itself.
+
+    What is left is the medium itself, named by its plain variant. "62" means
+    the 62 mm continuous roll however many colour variants the catalogue grows,
+    and a memory of ``{"62": "62red"}`` keeps meaning "red was in use on the
+    62 mm roll" whether or not brother_ql ever renames, adds or drops one.
+
+    Args:
+        label_size: A label identifier.
+
+    Returns:
+        The plain variant of its group, or the identifier itself.
+    """
+    return medium_variants(label_size)[0]
+
+
+def supported_label_identifiers() -> Optional[FrozenSet[str]]:
+    """Every label identifier this app offers, for validating a settings map.
+
+    P-touch media is excluded for the same reason the printer service excludes
+    it from matching: those are TZe tapes for a different family of machines and
+    are not in this app's label enum.
+
+    Returns:
+        The identifiers, or None when the media catalogue cannot be read at all.
+        None means "cannot check", and a validator that cannot check must not
+        reject: refusing to save a settings file because a library is missing
+        would turn a degraded install into an unusable one.
+    """
+    try:
+        from brother_ql.labels import ALL_LABELS, FormFactor
+
+        return frozenset(label.identifier for label in ALL_LABELS
+                         if label.form_factor != FormFactor.PTOUCH_ENDLESS)
+    except Exception:  # noqa: BLE001 - no catalogue means no check, not a failure
+        return None
+
 
 DEFAULT_SETTINGS = {
     "printer_uri": "tcp://192.168.1.100",
@@ -97,6 +205,44 @@ DEFAULT_SETTINGS = {
     # the label size itself. Absent or 0 -- the default -- means the app prints
     # exactly the area it always did.
     "bleed_mm": {},
+    # Follow the printer: when it reports a roll the configured label_size is
+    # not consistent with, adopt the detected one.
+    #
+    # OFF by default, and it has to stay that way. Every other setting here
+    # changes what happens when the user asks for something; this one changes a
+    # stored setting -- label_size, which decides how every label is rendered --
+    # without the user acting at all. A feature that edits the configuration on
+    # its own has to be chosen, not inherited from a default.
+    #
+    # It never switches away from a label type that is already consistent with
+    # what is loaded: a user printing on 62red who turns this on is not moved to
+    # 62, because 62red is one of the things a 62 mm roll can be. It only acts
+    # when the setting and the paper genuinely disagree.
+    #
+    # Where the medium is ambiguous and nothing below resolves it, this switches
+    # nothing and reports the ambiguity, exactly as the manual path does. A
+    # missing label is a visible error; the wrong label is a bad print.
+    "media_auto_switch": False,
+    # The media the user actually owns, as label identifiers:
+    #   ["62red", "d24"]
+    # A hint for resolving an ambiguous detection, never a filter. A medium the
+    # printer reports is reported and identified whether or not it appears here
+    # -- the list narrows what the app has to guess between, it does not decide
+    # what may be seen. Empty (the default) means no claim is made.
+    "owned_media": [],
+    # The label type last settled on for each medium, keyed by the medium's
+    # plain variant (see medium_key above):
+    #   {"62": "62red"}
+    # This is what makes automatic switching defensible on the three media the
+    # printer cannot pin down. Without it, loading a 62 mm roll means guessing
+    # between 62 and 62red; with it, the app is recalling what was in use last
+    # time that roll was loaded rather than guessing at all.
+    #
+    # Written only while media_auto_switch is on, and only when a settings write
+    # moves label_size to something the loaded medium could actually be -- see
+    # PrinterService.record_label_choice for why that is the moment a choice
+    # counts as settled.
+    "media_memory": {},
     "printers": [
         {
             "id": "default",

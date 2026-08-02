@@ -69,7 +69,12 @@ paths:
   /printers/status:
     post:
       summary: Check printer status
-      description: Checks if a printer is available and ready
+      description: >-
+        Checks whether a printer answers, whether anything is stopping it from
+        printing, and which media it is loaded with. Reachability and readiness
+        are reported separately: a printer with its cover open or no roll in it
+        answers perfectly well (reachable=true) but cannot print
+        (available=false, state=blocked).
       operationId: api.printer_controller.check_printer_status
       tags:
         - printer
@@ -1247,6 +1252,17 @@ components:
           example: "QL-800"
           default: "QL-800"
           enum: ["QL-500", "QL-550", "QL-560", "QL-570", "QL-580N", "QL-600", "QL-650TD", "QL-700", "QL-710W", "QL-720NW", "QL-800", "QL-810W", "QL-820NWB", "QL-1050", "QL-1060N", "QL-1100", "QL-1110NWB", "QL-1115NWB"]
+        label_size:
+          type: string
+          description: >-
+            Optional. Label identifier the loaded media should be compared
+            against, reported back as media.matches_label_size. Omit it to use
+            the configured label_size. The comparison is done here rather than
+            in the client because the rules for it (which identifiers denote the
+            same physical medium, which sizes cannot be told apart) belong with
+            the label catalogue.
+          example: "62"
+          enum: ["12", "12+17", "18", "29", "38", "50", "54", "62", "62red", "102", "103", "104", "17x54", "17x87", "23x23", "29x42", "29x90", "39x90", "39x48", "52x29", "54x29", "60x86", "62x29", "62x100", "102x51", "102x152", "103x164", "d12", "d24", "d58"]
       required:
         - printer_uri
         - printer_model
@@ -1256,16 +1272,239 @@ components:
       properties:
         available:
           type: boolean
-          description: Whether the printer is available
+          description: >-
+            Whether nothing known prevents the printer from printing. False when
+            the device does not answer AND false when it reports a blocking
+            condition such as an open cover or an empty media bay. This is
+            narrower than it used to be: it previously meant only "the device
+            answered", which is now carried by `reachable`.
           example: true
+        reachable:
+          type: boolean
+          description: >-
+            Whether the device answered at all. This is the reachability signal
+            (used by the dry-run preflight and the keep-alive reporting); it
+            stays true for a printer that is reachable but cannot print.
+          example: true
+        state:
+          type: string
+          description: >-
+            Which question the answer actually settled. `ready` = answered and
+            nothing blocking; `blocked` = answered and cannot print (see
+            blocking_reasons); `unknown` = accepts a TCP connection but reports
+            no status, so readiness is genuinely undetermined; `unreachable` =
+            no answer.
+          enum: [ready, blocked, unknown, unreachable]
+          example: ready
+        blocking_reasons:
+          type: array
+          description: >-
+            Reported conditions preventing printing, as IPP state-reason
+            keywords with the severity suffix removed (e.g. `cover-open`,
+            `media-empty`). Empty when nothing blocks. A stopped printer that
+            names no reason yields `printer-stopped`.
+          items:
+            type: string
+          example: ["cover-open"]
         status:
           type: string
           description: Status message
           example: "Printer is ready"
+        media:
+          $ref: '#/components/schemas/LoadedMedia'
         details:
           type: object
           description: Additional status details
           additionalProperties: true
+
+    LoadedMedia:
+      type: object
+      description: >-
+        The media the printer reports as loaded, and which of this app's label
+        identifiers it could be. Read over IPP from `media-ready`,
+        `media-col-ready` and `printer-input-tray`; `media-default` is never
+        used, as it was measured to keep reporting the factory value through
+        every media change and with no roll loaded at all.
+      properties:
+        detected:
+          type: boolean
+          description: Whether a supported medium was identified.
+          example: true
+        detection:
+          type: string
+          description: >-
+            Why there is (or is not) a reading. `ok` = identified;
+            `unidentified` = media read but no supported label matches it;
+            `no-media` = the printer answered and reports nothing loaded;
+            `unreachable` = the printer did not answer; `unsupported` = this
+            backend (USB, kernel device, or a network printer without IPP)
+            cannot report media at all.
+          enum: [ok, unidentified, no-media, unreachable, unsupported]
+          example: ok
+        width_mm:
+          type: number
+          nullable: true
+          description: Reported media width in millimetres, null when unknown.
+          example: 62
+        length_mm:
+          type: number
+          nullable: true
+          description: >-
+            Reported media length in millimetres, 0 for continuous tape (which
+            has no length of its own) and null when unknown.
+          example: 0
+        media_type:
+          type: string
+          nullable: true
+          description: '`roll` for continuous tape, `labels` for die-cut media.'
+          example: roll
+        media_name:
+          type: string
+          nullable: true
+          description: >-
+            The tray's own name for the medium, e.g. `62mm / 2.4"` or
+            `24mm Dia / 0.94" Dia`, where `Dia` marks round stock.
+          example: '62mm / 2.4"'
+        is_round:
+          type: boolean
+          nullable: true
+          description: Whether the medium is round die-cut, null when not stated.
+          example: false
+        source:
+          type: string
+          nullable: true
+          description: Which IPP attribute the size came from.
+          enum: [media-col-ready, media-ready]
+          example: media-col-ready
+        candidates:
+          type: array
+          description: >-
+            Every label identifier the reported media is consistent with, in
+            catalogue order. More than one means the media genuinely cannot be
+            told apart from what the printer reports -- 62/62red are the same
+            geometry with `mediacolor: unknown`, 12/12+17 are the same physical
+            roll, and 103/104 differ by less than the reporting resolution.
+            Empty when nothing was identified.
+          items:
+            type: string
+          example: ["62", "62red"]
+        ambiguous:
+          type: boolean
+          description: Whether more than one candidate remains possible.
+          example: true
+        reason:
+          type: string
+          description: Human-readable account of the match, or of why there is none.
+          example: "62 mm continuous tape cannot be resolved further: 62 and 62red are the same geometry and the printer reports 'mediacolor: unknown', so the red tape cannot be distinguished"
+        label_size:
+          type: string
+          nullable: true
+          description: The label identifier the candidates were compared against.
+          example: "62"
+        matches_label_size:
+          type: boolean
+          nullable: true
+          description: >-
+            Whether label_size is among the candidates. Null -- never false --
+            when nothing could be identified, so "unknown" stays distinguishable
+            from "they disagree".
+          example: true
+        resolution:
+          $ref: '#/components/schemas/MediaResolution'
+        auto_switch:
+          $ref: '#/components/schemas/MediaAutoSwitch'
+
+    MediaResolution:
+      type: object
+      description: >-
+        Which single label identifier the candidates come down to, and how. This
+        is reported whether or not media_auto_switch is on, because narrowing an
+        ambiguous medium is useful to a client that wants to *offer* the switch
+        rather than make it; `auto_switch` below is the only field that ever asks
+        for one to be made.
+
+
+        The steps are tried in a fixed order and the first that yields exactly
+        one identifier wins: the label type last settled on for this medium
+        (`media_memory`), then the one candidate the user says they own
+        (`owned_media`), then the documented plain variant -- 62 over 62red, 12
+        over 12+17, 103 over 104. Each of the three is something the user said;
+        none of them is a tie-break the app invented.
+      properties:
+        label_size:
+          type: string
+          nullable: true
+          description: >-
+            The single identifier the medium resolves to, or **null** when it
+            does not resolve to one -- no medium was detected, or two candidates
+            remain and nothing on record says which is loaded. Null is a result
+            rather than a failure: it is what stops automatic mode from picking.
+          example: "62red"
+        resolved_by:
+          type: string
+          nullable: true
+          description: >-
+            Which step settled it. `detection` = the printer's report left only
+            one possibility; `memory` = this is what was last used on this
+            medium; `owned` = it is the only candidate in owned_media;
+            `default` = the documented plain variant of an ambiguous medium.
+            Null when nothing settled it.
+          enum: [detection, memory, owned, default]
+          nullable: true
+          example: memory
+        reason:
+          type: string
+          description: Why this candidate won, or why no candidate could.
+          example: "62red was the label type last used on this medium"
+
+    MediaAutoSwitch:
+      type: object
+      description: >-
+        What automatic media switching wants done about the loaded roll.
+
+
+        **The server decides; the client applies.** label_size already has one
+        writer -- the client, through PUT /settings, on every change -- and a
+        second writer here would be racing it from a status poll the UI makes
+        every 30 seconds in however many tabs are open. A settings update is a
+        read-modify-write of one JSON file, so a status check that wrote
+        label_size could land between a user's edit and its save and quietly undo
+        it. And POST /printers/status is a read: an orchestrator asking whether
+        the printer is up should not find that the question changed the
+        configuration. So the decision travels back with the status and the
+        component that already owns the value carries it out.
+      properties:
+        enabled:
+          type: boolean
+          description: The media_auto_switch setting. False by default.
+          example: false
+        action:
+          type: string
+          description: >-
+            `none` = do nothing (the feature is off, nothing is loaded, or the
+            configured label type is already consistent with what is);
+            `switch` = store `to` as label_size; `ambiguous` = a roll is loaded
+            that the configured label type does not match, and the app must not
+            pick between the candidates -- surface it the way the manual path
+            does and let the user choose. A missing label is a question; the
+            wrong label is a bad print that looks deliberate.
+          enum: [none, switch, ambiguous]
+          example: none
+        from:
+          type: string
+          nullable: true
+          description: The configured label size, i.e. what a switch moves away from.
+          example: "12"
+        to:
+          type: string
+          nullable: true
+          description: >-
+            The label size to store. Null unless action is `switch`.
+          example: "62red"
+        reason:
+          type: string
+          description: Why this is the action, in the same words the resolution used.
+          example: "Automatic media switching is off, so the label type is left as configured"
 
     TextPrintRequest:
       type: object
@@ -1812,6 +2051,62 @@ components:
             the ink that lands on the liner are visible on the finished roll,
             and on round media it changes the printable area from a circle to an
             ellipse.
+        media_auto_switch:
+          type: boolean
+          description: >-
+            Follow the printer: when it reports a roll that label_size is not
+            consistent with, adopt the detected one.
+
+
+            **Off by default, and it has to be chosen.** Every other setting here
+            changes what happens when you ask for something. This one changes a
+            stored setting — label_size, which decides how every label is
+            rendered — without you acting at all, so it is not something to
+            inherit from a default.
+
+
+            It never switches away from a label type that already matches what is
+            loaded: 62red stays 62red on a 62 mm roll, because 62red is one of
+            the things that roll can be. And where the medium is ambiguous and
+            neither the memory nor the owned-media list nor the documented
+            default resolves it, it switches nothing and reports the ambiguity —
+            see MediaAutoSwitch.
+          example: false
+          default: false
+        owned_media:
+          type: array
+          description: >-
+            The media you actually own, as label identifiers. Used to narrow an
+            ambiguous detection: when the printer reports a 62 mm roll and only
+            one of 62/62red is a tape you have, the other one is not in the
+            building.
+
+
+            A hint, never a filter. A medium the printer reports is read,
+            identified and reported whether or not it appears here — this list
+            decides what the app may choose between when the device is genuinely
+            ambiguous, and nothing else. Unknown identifiers are rejected by
+            name: an entry here helps pick a label size on your behalf, so a
+            typo would sit in the list looking like a claim and narrow nothing.
+          items:
+            type: string
+          example: ["62red", "d24"]
+          default: []
+        media_memory:
+          allOf:
+            - $ref: '#/components/schemas/MediaMemoryMap'
+          description: >-
+            The label type last settled on for each medium. This is what makes
+            automatic switching defensible on the three media a printer cannot
+            pin down: loading a 62 mm roll stops being a guess between 62 and
+            62red and becomes a recollection of what was in use last time that
+            roll was loaded.
+
+
+            Maintained by the app while media_auto_switch is on — an entry is
+            recorded when a settings write moves label_size to something the
+            currently loaded medium could actually be, which is the point at
+            which a choice has been settled rather than merely written.
       required:
         - printer_uri
         - printer_model
@@ -1889,6 +2184,34 @@ components:
         d24:
           x_mm: -0.5
           y_mm: 1.0
+
+    MediaMemoryMap:
+      type: object
+      description: >-
+        The label type last settled on for each medium, keyed by the medium's
+        **plain variant** — "62" for the 62 mm continuous roll, "12" for the
+        12 mm one, "103" for the 103/104 pair. Everything else is a variant of
+        one of those and is stored as the value, never as the key.
+
+
+        The key names the medium rather than the detection, and that is what
+        makes it survive: it is not the candidate list (derived from the media
+        catalogue, so a new variant or a reordered table would orphan every
+        entry), not the list's order, not a label from the UI (a wording or
+        translation change away from moving), and not the reported millimetres
+        (the device quantises them — 103.6 mm arrives as 104). "62" means the
+        62 mm roll however many variants of it the catalogue grows.
+
+
+        The value has to be one of the identifiers that medium can be addressed
+        by, and an entry that breaks that — `{"62": "d24"}` — is rejected by
+        name. This is the one setting that can change label_size without the
+        user acting, so an entry that would switch a continuous roll to a
+        die-cut label size is caught at the door rather than at the printer.
+      additionalProperties:
+        type: string
+      example:
+        "62": "62red"
 
     BleedMap:
       type: object

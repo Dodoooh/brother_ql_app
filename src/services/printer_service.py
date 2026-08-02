@@ -40,9 +40,11 @@ from src.config.default_settings import (
     CALIBRATION_SCALE_MAX,
     CALIBRATION_SCALE_MIN,
     DEFAULT_CALIBRATION_SCALE,
+    MEDIA_EQUIVALENTS,
+    medium_variants,
 )
 from src.services.settings_service import settings_service
-from src.services.ipp_client import get_printer_attributes
+from src.services.ipp_client import EMPTY_MEDIA, get_media_ready, get_printer_attributes
 from src.services.pdf_renderer import render_pdf, parse_page_range
 from src.utils.exceptions import PrinterError, ImageProcessingError, ValidationError
 from src.utils.uri_validation import validate_printer_uri
@@ -507,6 +509,653 @@ def get_label_width(label_size: Optional[str],
                     settings: Optional[Dict[str, Any]] = None) -> int:
     """Return the drawable width in pixels for a label identifier."""
     return get_label_geometry(label_size, settings)[0]
+
+
+# --------------------------------------------------------------------------- #
+# Identifying the medium the printer says is loaded.
+#
+# The printer reports a size in millimetres; the app speaks in brother_ql label
+# identifiers. Mapping one onto the other is a lookup, but it is a lookup with
+# three measured traps in it, and every one of them is a wrong answer rather
+# than a missing one -- which is why this returns a *list* of candidates and a
+# reason instead of a single best guess. Where the media genuinely cannot be
+# told apart, that has to reach the user as ambiguity, not as a coin flip.
+#
+#   1. The catalogue states each medium's size three different ways and they
+#      disagree. ``60x86`` is the clearest case: the printer reports 60x86,
+#      ``dots_total`` works out to 59.94 x 86.70 mm, and ``tape_size`` claims
+#      (60, 87). Matching ``tape_size`` alone misses the label the printer is
+#      holding, so a medium matches when the report is close to *any* of the
+#      three sizes the catalogue gives for it.
+#   2. IPP sorts the dimension pair. ``om_brother-label-29x62mm`` is this app's
+#      ``62x29``; the pair carries no indication of which axis runs across the
+#      tape, so both sides are sorted before they are compared.
+#   3. A printer's ``media-supported`` is not the catalogue. ``102x51``,
+#      ``102x152`` and ``103x164`` are absent from a QL-820NWB entirely -- they
+#      are QL-1100-series media -- so nothing here may assume a particular
+#      printer's list, and matching runs against the whole app-supported set.
+# --------------------------------------------------------------------------- #
+
+# How far the reported size may sit from a catalogue size and still match. The
+# report is quantised to whole millimetres in the media name and to hundredths
+# in media-col-ready, while the catalogue rounds through printer dots, so a few
+# tenths of disagreement is normal. 0.8 mm absorbs that and still separates
+# every distinct medium in the catalogue -- the closest pair that must stay
+# apart is 52x29 and 54x29, 1.35 mm away from each other.
+MEDIA_MATCH_TOLERANCE_MM = 0.8
+
+# ``12+17`` is not a medium. It is the 12 mm roll with the app rendering a
+# 29 mm-wide raster onto it, so its dots_total describes a rendering choice
+# rather than a piece of paper -- taken at face value it would match a 29 mm
+# roll, which is a different roll entirely. It is therefore kept out of
+# geometric matching and reached only through the equivalence group below.
+_RENDERING_ONLY_IDENTIFIERS = frozenset({"12+17"})
+
+# The three media that cannot be told apart from what the printer reports.
+# Whichever member matches, the whole group is returned, because picking one
+# would be inventing information the device did not supply.
+#
+# The table itself lives in src.config.default_settings as MEDIA_EQUIVALENTS,
+# because the settings validator needs the same groups to check the media memory
+# and importing this module from there would be a cycle. Its first member is the
+# plain variant; see the comment there for why that ordering carries weight.
+
+
+class LabelIdentification(NamedTuple):
+    """What medium the printer is holding, in the app's own identifiers.
+
+    Attributes:
+        candidates: Every label identifier the report is consistent with, in
+            catalogue order. Empty when nothing matched or nothing was read.
+        reason: Human-readable account of the match -- what was measured, and
+            where two identifiers could not be separated.
+    """
+
+    candidates: Tuple[str, ...]
+    reason: str
+
+    @property
+    def resolved(self) -> bool:
+        """Whether the report matched at least one supported medium."""
+        return bool(self.candidates)
+
+    @property
+    def ambiguous(self) -> bool:
+        """Whether more than one identifier remains possible."""
+        return len(self.candidates) > 1
+
+    def matches(self, label_size: Optional[str]) -> Optional[bool]:
+        """Whether ``label_size`` is among the candidates.
+
+        Returns None -- not False -- when nothing was identified, so "we do not
+        know" stays distinguishable from "they disagree".
+        """
+        if not self.candidates or not label_size:
+            return None
+        return str(label_size) in self.candidates
+
+
+def _supported_labels() -> List[Any]:
+    """Every label this app offers, in catalogue order.
+
+    P-touch media is excluded: those are TZe tapes for a different family of
+    machines, they are not in the app's label enum, and several of them share a
+    dots_total that would collide with QL media.
+    """
+    from brother_ql.labels import ALL_LABELS, FormFactor
+
+    return [label for label in ALL_LABELS if label.form_factor != FormFactor.PTOUCH_ENDLESS]
+
+
+def _is_continuous(label: Any) -> bool:
+    from brother_ql.labels import FormFactor
+
+    return label.form_factor == FormFactor.ENDLESS
+
+
+def _is_round(label: Any) -> bool:
+    from brother_ql.labels import FormFactor
+
+    return label.form_factor == FormFactor.ROUND_DIE_CUT
+
+
+def _dots_to_mm(dots: int) -> float:
+    """Convert printer dots to millimetres at the QL series' fixed 300 dpi."""
+    return dots * 25.4 / 300.0
+
+
+def _identifier_sizes(identifier: str) -> Tuple[float, ...]:
+    """The size an identifier states about itself, e.g. "62x29" -> (62, 29).
+
+    Round identifiers ("d24") are skipped: their diameter is already covered by
+    dots_total, and reading the digits out of them would invite a round label to
+    match a rectangular one of the same nominal width.
+    """
+    if identifier.startswith("d"):
+        return ()
+    parts = identifier.split("x")
+    sizes: List[float] = []
+    for part in parts:
+        digits = ""
+        for char in part:
+            if not char.isdigit():
+                break
+            digits += char
+        if not digits:
+            return ()
+        sizes.append(float(digits))
+    return tuple(sizes)
+
+
+def _catalogue_sizes(label: Any) -> List[Tuple[float, ...]]:
+    """Every size the catalogue states for one medium, each sorted ascending.
+
+    Continuous media yields 1-tuples (the tape width); die-cut media yields
+    sorted 2-tuples, because the report does not say which axis is which.
+    """
+    continuous = _is_continuous(label)
+    sizes: List[Tuple[float, ...]] = []
+    if continuous:
+        sizes.append((_dots_to_mm(label.dots_total[0]),))
+        sizes.append((float(label.tape_size[0]),))
+        identifier = _identifier_sizes(label.identifier)
+        if len(identifier) == 1:
+            sizes.append(identifier)
+    else:
+        sizes.append(tuple(sorted(_dots_to_mm(dots) for dots in label.dots_total)))
+        sizes.append(tuple(sorted(float(side) for side in label.tape_size)))
+        identifier = _identifier_sizes(label.identifier)
+        if len(identifier) == 2:
+            sizes.append(tuple(sorted(identifier)))
+    return sizes
+
+
+def _sizes_match(reported: Tuple[float, ...], candidate: Tuple[float, ...]) -> bool:
+    if len(reported) != len(candidate):
+        return False
+    return all(abs(a - b) <= MEDIA_MATCH_TOLERANCE_MM
+               for a, b in zip(reported, candidate, strict=True))
+
+
+def _describe_media(width_mm: float, length_mm: Optional[float],
+                    continuous: bool, is_round: Optional[bool]) -> str:
+    if continuous:
+        return f"{width_mm:g} mm continuous tape"
+    shape = "round " if is_round else ""
+    return f"{width_mm:g} x {float(length_mm or 0.0):g} mm {shape}die-cut label"
+
+
+def identify_label_candidates(media: Optional[Dict[str, Any]]) -> LabelIdentification:
+    """Map a media report from the printer onto this app's label identifiers.
+
+    Takes the dict produced by :func:`src.services.ipp_client.extract_media`
+    (``width_mm``, ``length_mm``, ``media_type``, ``media_name``, ``is_round``)
+    and returns every identifier the report is consistent with, never a single
+    guess. Three continuous media are genuinely indistinguishable from what a
+    printer reports and always come back as a pair; see ``MEDIA_EQUIVALENTS``.
+
+    The form factor comes from ``media_type`` -- ``labels`` means die-cut,
+    ``roll`` means continuous -- and falls back to the reported length when the
+    printer does not say (a length of 0 or none is continuous tape).
+
+    Round versus rectangular is decided **geometrically**, not from the tray's
+    "Dia" marking: no round size coincides with a rectangular one anywhere in
+    Brother's catalogue (the nearest pair, d24 at 24.05 mm and 23x23 at
+    23.03 mm, is 1.02 mm apart, comfortably outside the tolerance), so the
+    measured size settles it on its own. That is the signal to depend on
+    because it survives a printer that reports no tray string, an empty
+    ``medianame`` or a localised one. The "Dia" token is still read -- it is
+    carried through as ``is_round`` and cross-checked here, and a disagreement
+    is logged rather than silently resolved.
+
+    Args:
+        media: The media report, or None.
+
+    Returns:
+        A :class:`LabelIdentification`. ``candidates`` is empty when the printer
+        reported no media, was unreachable, or reported a medium this app does
+        not support -- the reason says which.
+    """
+    if not media or media.get("width_mm") is None:
+        return LabelIdentification((), "No media reported by the printer")
+
+    try:
+        width_mm = float(media["width_mm"])
+    except (TypeError, ValueError):
+        return LabelIdentification((), "Printer reported an unreadable media width")
+
+    length_raw = media.get("length_mm")
+    try:
+        length_mm = float(length_raw) if length_raw is not None else None
+    except (TypeError, ValueError):
+        length_mm = None
+
+    media_type = str(media.get("media_type") or "").strip().lower()
+    if media_type == "roll":
+        continuous = True
+    elif media_type == "labels":
+        continuous = False
+    else:
+        # No form factor reported: a medium with no length of its own is tape.
+        continuous = not length_mm
+
+    reported = (width_mm,) if continuous else tuple(sorted((width_mm, length_mm or 0.0)))
+    description = _describe_media(width_mm, length_mm, continuous, media.get("is_round"))
+
+    try:
+        labels = _supported_labels()
+    except Exception:
+        logger.warning("Could not read the label catalogue for media identification", exc_info=True)
+        return LabelIdentification((), "Label catalogue unavailable")
+
+    order = {label.identifier: index for index, label in enumerate(labels)}
+    matched: List[str] = []
+    for label in labels:
+        if _is_continuous(label) != continuous:
+            continue
+        if label.identifier in _RENDERING_ONLY_IDENTIFIERS:
+            continue
+        if any(_sizes_match(reported, size) for size in _catalogue_sizes(label)):
+            matched.append(label.identifier)
+
+    if not matched:
+        return LabelIdentification(
+            (), f"{description} does not match any label this app supports")
+
+    notes: List[str] = []
+    for group, note in MEDIA_EQUIVALENTS:
+        if any(identifier in matched for identifier in group):
+            for identifier in group:
+                if identifier in order and identifier not in matched:
+                    matched.append(identifier)
+            notes.append(note)
+
+    # Cross-check against the tray's "Dia" marking. With the current catalogue
+    # this can never disagree -- geometry already separates round from
+    # rectangular -- so a disagreement means a printer reporting something new
+    # and is worth a log line rather than a silent override.
+    hint = media.get("is_round")
+    if hint is not None and not continuous:
+        wrong_shape = [identifier for identifier in matched
+                       if _is_round(labels[order[identifier]]) != bool(hint)]
+        if wrong_shape and len(wrong_shape) < len(matched):
+            logger.warning("Media shape hint disagrees with the measured size",
+                           media_name=media.get("media_name"), is_round=hint,
+                           dropped=wrong_shape)
+            matched = [identifier for identifier in matched if identifier not in wrong_shape]
+
+    matched.sort(key=lambda identifier: order.get(identifier, len(order)))
+    reason = description
+    if len(matched) == 1:
+        reason = f"{description} identifies {matched[0]}"
+    elif notes:
+        reason = f"{description} cannot be resolved further: " + "; ".join(notes)
+    else:
+        reason = f"{description} matches {', '.join(matched)}"
+    return LabelIdentification(tuple(matched), reason)
+
+
+# --------------------------------------------------------------------------- #
+# Resolving an ambiguous detection, and following the printer automatically.
+#
+# Identification stops at "these are the identifiers the report is consistent
+# with", because that is all the device says. Automatic switching needs one
+# identifier, and the whole question is where the extra bit of information comes
+# from -- because it must not come from a coin flip. Three sources are consulted,
+# in this order, and each of them is a thing the *user* said rather than a thing
+# the app inferred:
+#
+#   1. memory -- what was last settled on for this very medium. A recollection,
+#      not a guess: if 62red was in use the last time a 62 mm roll was loaded,
+#      loading a 62 mm roll again returns to 62red.
+#   2. owned media -- what the user says they actually have. If only one
+#      candidate is a tape they own, the others are not in the building.
+#   3. the documented plain-variant default -- 62 over 62red, 12 over 12+17,
+#      103 over 104. Not a tie-break so much as a stated convention: the plain
+#      variant is the one that costs nothing to be wrong about, and the other
+#      member of every group is the one that has to be chosen deliberately.
+#
+# If none of the three settles it, nothing is chosen. That is the point of the
+# order rather than a gap in it: automatic mode leaves label_size exactly as it
+# was and reports the ambiguity, which is what the manual path already does. A
+# label that did not print is a question; a label printed on the wrong medium is
+# a bad label that looks deliberate.
+#
+# Ownership narrows; it never censors. A medium the user has not claimed to own
+# is still read, still identified and still reported -- the list decides what the
+# app may pick between when the device is genuinely ambiguous, and nothing else.
+# A printer holding a roll the user forgot to list is a fact, and facts do not
+# get filtered out of a status report.
+# --------------------------------------------------------------------------- #
+
+# How a single label identifier was arrived at, reported so a client can show
+# why one candidate won rather than presenting the result as an oracle.
+MEDIA_RESOLVED_BY_DETECTION = "detection"  # the device left only one possibility
+MEDIA_RESOLVED_BY_MEMORY = "memory"        # last settled on for this medium
+MEDIA_RESOLVED_BY_OWNED = "owned"          # the only candidate the user owns
+MEDIA_RESOLVED_BY_DEFAULT = "default"      # the documented plain variant
+
+# What automatic mode wants the client to do about it.
+MEDIA_SWITCH_NONE = "none"            # nothing to do (or the feature is off)
+MEDIA_SWITCH_APPLY = "switch"         # adopt auto_switch.to as the label size
+MEDIA_SWITCH_AMBIGUOUS = "ambiguous"  # a roll is loaded, but the app must not pick
+
+
+class MediaResolution(NamedTuple):
+    """Which single label identifier an identification comes down to.
+
+    Attributes:
+        label_size: The winning identifier, or None when the medium could not be
+            narrowed to one. None is a result, not a failure: it is what stops
+            automatic mode from picking.
+        resolved_by: Which step settled it -- one of ``detection``, ``memory``,
+            ``owned`` or ``default`` -- or None when nothing did.
+        reason: Human-readable account of why this candidate won, or of why no
+            candidate could.
+    """
+
+    label_size: Optional[str]
+    resolved_by: Optional[str]
+    reason: str
+
+    @property
+    def resolved(self) -> bool:
+        """Whether exactly one identifier came out of it."""
+        return self.label_size is not None
+
+
+def media_memory_key(candidates: Tuple[str, ...]) -> Optional[str]:
+    """The key a set of candidates is remembered under, or None.
+
+    The key names the *medium*, so it is the plain variant of the group the
+    candidates belong to (see :func:`src.config.default_settings.medium_key` for
+    why that is the stable choice). A single candidate names its own medium.
+
+    Args:
+        candidates: The identifiers the printer's report is consistent with.
+
+    Returns:
+        The medium's key, or None when the candidates do not all belong to one
+        medium. That last case cannot arise from today's catalogue -- only the
+        three documented groups produce more than one candidate -- and returning
+        None rather than a first-in-the-list guess is what keeps it that way: an
+        ambiguity nobody has documented gets no key, no default, and therefore no
+        automatic switch.
+    """
+    if not candidates:
+        return None
+    group = medium_variants(candidates[0])
+    if all(candidate in group for candidate in candidates):
+        return group[0]
+    return None
+
+
+def owned_media(settings: Optional[Dict[str, Any]]) -> Tuple[str, ...]:
+    """The label identifiers the user says they own, in the order given.
+
+    A malformed list is ignored rather than fatal, the same bargain the
+    calibration and bleed maps make: this is a hint used to narrow a guess, and a
+    bad value in it must not cost a status check.
+
+    Args:
+        settings: Settings possibly carrying ``owned_media``.
+
+    Returns:
+        The identifiers, with anything that is not a non-empty string dropped.
+    """
+    if not settings:
+        return ()
+    owned = settings.get("owned_media")
+    if not owned:
+        return ()
+    if not isinstance(owned, (list, tuple)):
+        logger.warning("Ignoring malformed owned media list",
+                       owned_type=str(type(owned)))
+        return ()
+    return tuple(entry for entry in owned if isinstance(entry, str) and entry.strip())
+
+
+def _remembered_label(settings: Optional[Dict[str, Any]],
+                      key: Optional[str]) -> Optional[str]:
+    """The label identifier last settled on for the medium ``key``, if any."""
+    if not settings or not key:
+        return None
+    memory = settings.get("media_memory")
+    if not memory:
+        return None
+    if not isinstance(memory, dict):
+        logger.warning("Ignoring malformed media memory",
+                       memory_type=str(type(memory)))
+        return None
+    remembered = memory.get(key)
+    if remembered is None:
+        return None
+    if not isinstance(remembered, str) or not remembered.strip():
+        logger.warning("Ignoring malformed media memory entry",
+                       medium=key, value=repr(remembered))
+        return None
+    return remembered
+
+
+def resolve_media_label(candidates: Tuple[str, ...],
+                        settings: Optional[Dict[str, Any]] = None) -> MediaResolution:
+    """Narrow a detection to one label identifier, or decline to.
+
+    The steps are tried in the order documented in the section comment above --
+    memory, then owned media, then the plain-variant default -- and the first one
+    that produces exactly one identifier wins. A remembered choice that is not
+    among the current candidates (the roll was changed, or the catalogue moved
+    under it) is skipped rather than trusted, and so is an owned-media list that
+    leaves two candidates standing.
+
+    Args:
+        candidates: The identifiers the printer's report is consistent with.
+        settings: Settings carrying ``media_memory`` and ``owned_media``.
+
+    Returns:
+        A :class:`MediaResolution`. ``label_size`` is None when nothing settled
+        it, which is the signal that automatic mode must leave the setting alone.
+    """
+    candidates = tuple(str(candidate) for candidate in (candidates or ()))
+    if not candidates:
+        return MediaResolution(
+            None, None, "No medium was identified, so there is nothing to resolve")
+    if len(candidates) == 1:
+        return MediaResolution(
+            candidates[0], MEDIA_RESOLVED_BY_DETECTION,
+            f"{candidates[0]} is the only label type the reported medium can be")
+
+    listed = ", ".join(candidates)
+    key = media_memory_key(candidates)
+
+    remembered = _remembered_label(settings, key)
+    if remembered and remembered in candidates:
+        return MediaResolution(
+            remembered, MEDIA_RESOLVED_BY_MEMORY,
+            f"{remembered} was the label type last used on this medium")
+    if remembered:
+        logger.info("Ignoring a remembered label the loaded medium cannot be",
+                    medium=key, remembered=remembered, candidates=list(candidates))
+
+    owned = tuple(candidate for candidate in candidates
+                  if candidate in owned_media(settings))
+    if len(owned) == 1:
+        return MediaResolution(
+            owned[0], MEDIA_RESOLVED_BY_OWNED,
+            f"{owned[0]} is the only one of {listed} in the owned media list")
+
+    if key and key in candidates:
+        others = ", ".join(candidate for candidate in candidates if candidate != key)
+        return MediaResolution(
+            key, MEDIA_RESOLVED_BY_DEFAULT,
+            f"{key} is the plain variant of this medium and the documented "
+            f"default; {others} has to be chosen deliberately")
+
+    return MediaResolution(
+        None, None,
+        f"{listed} cannot be told apart, and nothing recorded says which of them "
+        f"is loaded")
+
+
+def plan_media_switch(resolution: MediaResolution, candidates: Tuple[str, ...],
+                      matches_label_size: Optional[bool],
+                      label_size: Optional[str],
+                      settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Say what automatic mode wants done about the loaded medium.
+
+    This decides; it does not act. See :meth:`PrinterService._media_report` for
+    why the switch is left to the one component that already writes
+    ``label_size``.
+
+    Args:
+        resolution: What :func:`resolve_media_label` made of the candidates.
+        candidates: The identifiers the report is consistent with.
+        matches_label_size: Whether the configured label size is among them.
+        label_size: The configured label size, i.e. what a switch moves away
+            from.
+        settings: Settings carrying ``media_auto_switch``.
+
+    Returns:
+        ``enabled``, ``action`` (``none`` / ``switch`` / ``ambiguous``), ``from``,
+        ``to`` (the identifier to store, null unless the action is ``switch``)
+        and ``reason``.
+    """
+    enabled = bool((settings or {}).get("media_auto_switch"))
+
+    def plan(action: str, to: Optional[str], reason: str) -> Dict[str, Any]:
+        return {"enabled": enabled, "action": action, "from": label_size,
+                "to": to, "reason": reason}
+
+    if not enabled:
+        # Off is off: no directive at all, whatever is loaded. The resolution is
+        # still reported beside this, so a client can offer the switch as a
+        # question -- but nothing here asks for it to be made.
+        return plan(MEDIA_SWITCH_NONE, None,
+                    "Automatic media switching is off, so the label type is "
+                    "left as configured")
+    if not candidates:
+        return plan(MEDIA_SWITCH_NONE, None,
+                    "No medium was identified, so there is nothing to switch to")
+    if matches_label_size:
+        # The configured size is one of the things the loaded roll can be. There
+        # is nothing to correct, and moving off it -- to the plain variant of an
+        # ambiguous medium, say -- would be the feature overriding a choice the
+        # user has already made and is happily printing with.
+        return plan(MEDIA_SWITCH_NONE, None,
+                    f"The configured label type {label_size} is consistent with "
+                    f"the loaded medium")
+    if resolution.resolved:
+        return plan(MEDIA_SWITCH_APPLY, resolution.label_size, resolution.reason)
+    return plan(MEDIA_SWITCH_AMBIGUOUS, None, resolution.reason)
+
+
+# --------------------------------------------------------------------------- #
+# Availability: what a single boolean is allowed to claim.
+#
+# A printer with its cover open answers IPP perfectly happily. It reports
+# printer-state 5 (stopped) and printer-state-reasons "cover-open", and it
+# cannot print a thing. A printer with no roll in it is worse: it reports state
+# 3 (idle) and only the reason "media-empty-report" gives it away. So neither
+# the state nor the reasons alone decide readiness -- both have to be read, and
+# the severity suffix IPP appends to a reason ("-report", "-warning", "-error")
+# has to come off first, because "media-empty-report" is an empty printer
+# whatever severity the firmware felt like attaching to it.
+#
+# The status response therefore separates two questions that used to share one
+# field:
+#
+#   reachable -- the device answered. This is what the keep-alive loop and the
+#       dry-run preflight actually want to know, and it is what ``available``
+#       used to mean in practice.
+#   available -- nothing known is stopping it from printing. False when a
+#       blocking condition is reported, false when the device is not there.
+#
+# ``state`` spells out which of the two produced the answer, including the case
+# neither can: a printer that accepts a TCP connection but does not speak IPP
+# is reachable and its readiness is simply unknown.
+# --------------------------------------------------------------------------- #
+
+# Reasons (severity suffix stripped) that mean the printer cannot print now.
+_BLOCKING_STATE_REASONS = frozenset({
+    "cover-open",
+    "door-open",
+    "media-empty",
+    "media-jam",
+    "media-needed",
+    "input-tray-missing",
+    "output-tray-missing",
+    "marker-supply-empty",
+    "paused",
+    "moving-to-paused",
+    "shutdown",
+    "stopped-partly",
+})
+
+_STATE_REASON_SEVERITIES = ("-report", "-warning", "-error")
+
+# Printer states in which nothing will print, even without a specific reason.
+_BLOCKING_PRINTER_STATES = frozenset({"stopped"})
+
+# How long a media reading stays usable. The status endpoint is polled by the
+# UI every 30 s and the read costs roughly 85 ms on the wire, so the first rule
+# is that a status check must not pay for it twice: the media attributes are
+# requested in the *same* Get-Printer-Attributes that already fetches the
+# printer state, which makes the media free on that path and, better than any
+# cache could manage, never stale. The cache covers everything else -- a dry
+# run, a second browser tab, a client asking for the media on its own -- so a
+# burst of those costs one round-trip rather than one each. It is kept short
+# because a roll change is exactly the event this feature exists to notice.
+MEDIA_CACHE_TTL_SECONDS = 15.0
+
+# The three states a media reading can be in besides "we read it": each is a
+# different kind of not-knowing and the UI has to be able to tell them apart.
+MEDIA_DETECTION_UNREACHABLE = "unreachable"   # the printer did not answer
+MEDIA_DETECTION_UNSUPPORTED = "unsupported"   # this backend cannot report media
+MEDIA_DETECTION_NO_MEDIA = "no-media"         # answered, nothing loaded
+MEDIA_DETECTION_UNIDENTIFIED = "unidentified"  # media read, no supported match
+MEDIA_DETECTION_OK = "ok"
+
+
+def _state_reason_list(reasons: Any) -> List[str]:
+    """Normalize printer-state-reasons into a list of bare keywords."""
+    if reasons is None:
+        return []
+    if isinstance(reasons, str):
+        parts = reasons.replace(";", ",").split(",")
+    elif isinstance(reasons, (list, tuple)):
+        parts = [str(part) for part in reasons]
+    else:
+        parts = [str(reasons)]
+    return [part.strip().lower() for part in parts if part and part.strip()]
+
+
+def blocking_state_reasons(printer_state: Optional[str], reasons: Any) -> List[str]:
+    """Return the reported conditions that prevent printing, severity stripped.
+
+    Args:
+        printer_state: The IPP printer-state, already mapped to a name.
+        reasons: printer-state-reasons, as a string, comma-joined string or list.
+
+    Returns:
+        The blocking keywords in reported order, e.g. ``["cover-open"]`` or
+        ``["media-empty"]``. Empty when nothing blocks. A stopped printer that
+        gives no usable reason still yields ``["printer-stopped"]``, because the
+        stop itself is the blocking fact.
+    """
+    blocking: List[str] = []
+    for reason in _state_reason_list(reasons):
+        if reason in ("none", ""):
+            continue
+        base = reason
+        for suffix in _STATE_REASON_SEVERITIES:
+            if base.endswith(suffix):
+                base = base[:-len(suffix)]
+                break
+        if base in _BLOCKING_STATE_REASONS and base not in blocking:
+            blocking.append(base)
+    if not blocking and str(printer_state or "").lower() in _BLOCKING_PRINTER_STATES:
+        blocking.append("printer-stopped")
+    return blocking
 
 
 def get_round_safe_axes(width: int, height: Optional[int] = None) -> Tuple[float, float]:
@@ -1452,6 +2101,10 @@ class PrinterService:
         # pauses until the next print. Initialised to now so enabling keep-alive
         # gives one window straight away.
         self._last_print_at = time.time()
+        # Loaded media, per printer URI, with the timestamp it was read at. See
+        # MEDIA_CACHE_TTL_SECONDS for why this exists.
+        self._media_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        self._media_cache_lock = threading.Lock()
         # Single source of truth for the upload folder. Precedence:
         #   1. explicit constructor argument
         #   2. UPLOAD_FOLDER environment variable (lets operators relocate or
@@ -1515,20 +2168,221 @@ class PrinterService:
         settings = settings_service.get_settings()
         return settings.get("printers", [])
     
-    def check_printer_status(self, printer_uri: str, printer_model: str) -> Dict[str, Any]:
+    def _store_media(self, printer_uri: str, media: Dict[str, Any]) -> Dict[str, Any]:
+        """Remember a media reading for ``printer_uri``."""
+        with self._media_cache_lock:
+            self._media_cache[printer_uri] = (time.monotonic(), media)
+        return media
+
+    def _forget_media(self, printer_uri: str) -> None:
+        """Drop a cached reading, e.g. because the printer stopped answering.
+
+        Serving remembered media for a printer that is no longer there would be
+        precisely the kind of confident wrong answer this feature exists to
+        avoid.
         """
-        Check if a printer is available and ready.
-        
+        with self._media_cache_lock:
+            self._media_cache.pop(printer_uri, None)
+
+    def _cached_media(self, printer_uri: str) -> Optional[Dict[str, Any]]:
+        with self._media_cache_lock:
+            entry = self._media_cache.get(printer_uri)
+        if entry and (time.monotonic() - entry[0]) < MEDIA_CACHE_TTL_SECONDS:
+            return entry[1]
+        return None
+
+    def get_loaded_media(self, printer_uri: str,
+                         ipp_result: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Return the media currently loaded in a printer.
+
+        Args:
+            printer_uri: The printer to ask about; also the cache key.
+            ipp_result: An already-fetched :func:`get_printer_attributes`
+                result. When given, its media is used and cached -- this is how
+                the status check gets the media without a second round-trip.
+                When omitted, a fresh reading is taken unless a recent one is
+                still cached (see :data:`MEDIA_CACHE_TTL_SECONDS`).
+
+        Returns:
+            The media dict described by
+            :data:`src.services.ipp_client.EMPTY_MEDIA`; all-None when the
+            printer could not be reached, has nothing loaded, or is not a
+            network printer.
+        """
+        if ipp_result is not None:
+            if not ipp_result.get("reachable"):
+                self._forget_media(printer_uri)
+                return dict(EMPTY_MEDIA)
+            return self._store_media(printer_uri, ipp_result.get("media") or dict(EMPTY_MEDIA))
+
+        cached = self._cached_media(printer_uri)
+        if cached is not None:
+            return cached
+
+        if not printer_uri or guess_backend(printer_uri) != "network":
+            # USB and kernel-backed printers offer no status channel at all.
+            return dict(EMPTY_MEDIA)
+        try:
+            validate_printer_uri(printer_uri)
+        except ValueError:
+            return dict(EMPTY_MEDIA)
+        media = get_media_ready(self._extract_ip_from_uri(printer_uri), port=self._get_ipp_port())
+        return self._store_media(printer_uri, media)
+
+    def _media_report(self, media: Optional[Dict[str, Any]],
+                      label_size: Optional[str],
+                      unavailable: Optional[str] = None,
+                      settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Build the ``media`` section of a status response.
+
+        Carries the medium as reported, the label identifiers it could be, and
+        whether ``label_size`` is one of them. ``matches_label_size`` is None --
+        never False -- whenever nothing was identified, so "we do not know" can
+        never be read as "they disagree".
+
+        On top of that it carries ``resolution`` -- which single identifier the
+        documented order (memory, owned media, plain-variant default) comes down
+        to and which step got there -- and ``auto_switch``, what automatic mode
+        wants done about it. The two are separate on purpose: the resolution is
+        reported whether or not automatic mode is on, because a client can use it
+        to *offer* the switch, while ``auto_switch`` is the only field that ever
+        asks for one.
+
+        **The server reports the switch; it does not perform it.** ``label_size``
+        already has exactly one writer -- the client, through PUT /settings, on
+        every change -- and a second one here would be racing it from a poll the
+        UI makes every 30 seconds, in however many tabs are open. update_settings
+        is a read-modify-write of a whole JSON file, so a status check that wrote
+        label_size could land between a user's edit and its save and quietly undo
+        it. Beyond the race there is the plainer objection: POST /printers/status
+        is a read. An orchestrator asking whether the printer is up should not
+        find that the question changed the configuration. So the resolution
+        travels back with the status, and the component that already owns the
+        value applies it.
+        """
+        if unavailable:
+            report = dict(EMPTY_MEDIA)
+            identification = LabelIdentification((), {
+                MEDIA_DETECTION_UNREACHABLE:
+                    "Printer could not be reached, so the loaded media is unknown",
+                MEDIA_DETECTION_UNSUPPORTED:
+                    "Media detection needs a network (tcp://) printer; this "
+                    "backend cannot report what is loaded",
+            }.get(unavailable, "Loaded media is unknown"))
+            detection = unavailable
+        elif not media or media.get("width_mm") is None:
+            report = dict(EMPTY_MEDIA)
+            identification = LabelIdentification((), "The printer reports no media loaded")
+            detection = MEDIA_DETECTION_NO_MEDIA
+        else:
+            report = {key: media.get(key) for key in EMPTY_MEDIA}
+            identification = identify_label_candidates(media)
+            detection = (MEDIA_DETECTION_OK if identification.resolved
+                         else MEDIA_DETECTION_UNIDENTIFIED)
+
+        matches = identification.matches(label_size)
+        resolution = resolve_media_label(identification.candidates, settings)
+        report.update({
+            "detected": detection == MEDIA_DETECTION_OK,
+            "detection": detection,
+            "candidates": list(identification.candidates),
+            "ambiguous": identification.ambiguous,
+            "reason": identification.reason,
+            "label_size": label_size,
+            "matches_label_size": matches,
+            "resolution": {
+                "label_size": resolution.label_size,
+                "resolved_by": resolution.resolved_by,
+                "reason": resolution.reason,
+            },
+            "auto_switch": plan_media_switch(resolution, identification.candidates,
+                                             matches, label_size, settings),
+        })
+        return report
+
+    def _status_response(self, reachable: bool, state: str, status: str,
+                         details: Dict[str, Any],
+                         media: Optional[Dict[str, Any]] = None,
+                         media_unavailable: Optional[str] = None,
+                         blocking_reasons: Optional[List[str]] = None,
+                         label_size: Optional[str] = None,
+                         settings: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Assemble a status response with honest availability.
+
+        ``available`` means "nothing known is stopping this printer from
+        printing": it is False when the device does not answer and False when it
+        reports a blocking condition. ``reachable`` carries the reachability
+        signal on its own, and ``state`` says which question was actually
+        answered -- including ``unknown``, for a printer that accepts a TCP
+        connection but tells us nothing more.
+        """
+        blocking = list(blocking_reasons or [])
+        return {
+            "available": bool(reachable) and state != "blocked",
+            "reachable": bool(reachable),
+            "state": state,
+            "blocking_reasons": blocking,
+            "status": status,
+            "media": self._media_report(media, label_size, media_unavailable, settings),
+            "details": details,
+        }
+
+    @staticmethod
+    def _status_settings() -> Dict[str, Any]:
+        """The saved settings a status check reads, or an empty dict.
+
+        A status check must survive a missing or unreadable settings file: the
+        printer is answering, and that answer is worth reporting even when the
+        app cannot read its own configuration. Everything the settings supply
+        here -- the configured label size, the owned media, the memory, the
+        automatic-switch flag -- degrades to "not configured" on their own.
+        """
+        try:
+            return settings_service.get_settings() or {}
+        except Exception:  # noqa: BLE001 - a broken settings file must not fail a status check
+            logger.warning("Could not read settings for the status check", exc_info=True)
+            return {}
+
+    def _status_label_size(self, label_size: Optional[str],
+                           settings: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """The label size a status check should compare the media against.
+
+        An explicit request value wins; otherwise the configured one is used, so
+        a client that sends nothing still gets the comparison instead of having
+        to redo it in the browser.
+        """
+        if label_size:
+            return str(label_size)
+        settings = self._status_settings() if settings is None else settings
+        configured = settings.get("label_size")
+        return str(configured) if configured else None
+
+    def check_printer_status(self, printer_uri: str, printer_model: str,
+                             label_size: Optional[str] = None) -> Dict[str, Any]:
+        """
+        Check whether a printer answers and whether it can actually print.
+
         Args:
             printer_uri: URI of the printer to check.
             printer_model: Model of the printer.
-            
+            label_size: Label identifier to compare the loaded media against.
+                Defaults to the configured ``label_size``.
+
         Returns:
-            Dict containing status information.
-            
+            Dict with ``available`` (nothing known prevents printing),
+            ``reachable`` (the device answered), ``state`` (``ready`` /
+            ``blocked`` / ``unknown`` / ``unreachable``), ``blocking_reasons``,
+            ``status``, ``media`` and ``details``. The ``media`` section carries
+            the loaded medium, the identifiers it could be, which single one
+            those come down to (``resolution``) and what automatic mode wants
+            done about it (``auto_switch``) -- see :meth:`_media_report`.
+
         Raises:
             PrinterError: If there's an error checking the printer status.
         """
+        settings = self._status_settings()
+        label_size = self._status_label_size(label_size, settings)
+
         # Defense in depth: never probe an unvetted URI. This guards against
         # SSRF (e.g. tcp://169.254.169.254) and disallowed schemes even if a
         # bad value somehow bypassed settings validation.
@@ -1537,15 +2391,19 @@ class PrinterService:
         except ValueError as ve:
             logger.warning("Rejected printer URI before status check",
                            printer_uri=printer_uri, error=str(ve))
-            return {
-                "available": False,
-                "status": f"Invalid printer URI: {str(ve)}",
-                "details": {
+            return self._status_response(
+                reachable=False,
+                state="unreachable",
+                status=f"Invalid printer URI: {str(ve)}",
+                details={
                     "printer_uri": printer_uri,
                     "printer_model": printer_model,
                     "error": str(ve),
                 },
-            }
+                media_unavailable=MEDIA_DETECTION_UNREACHABLE,
+                label_size=label_size,
+                settings=settings,
+            )
 
         backend_type = guess_backend(printer_uri)
         details: Dict[str, Any] = {
@@ -1562,45 +2420,72 @@ class PrinterService:
             ip_address = self._extract_ip_from_uri(printer_uri)
             ipp = get_printer_attributes(ip_address, port=self._get_ipp_port())
             if ipp.get("reachable"):
+                state = ipp.get("printer_state") or "unknown"
+                reasons = ipp.get("printer_state_reasons")
+                blocking = blocking_state_reasons(state, reasons)
                 details.update({
-                    "printer_state": ipp.get("printer_state"),
-                    "printer_state_reasons": ipp.get("printer_state_reasons"),
+                    "printer_state": state,
+                    "printer_state_reasons": reasons,
                     "reported_model": ipp.get("make_and_model"),
                     "source": "ipp",
                     "clock": self._build_clock_info(ipp.get("current_time")),
                 })
-                state = ipp.get("printer_state") or "unknown"
-                return {
-                    "available": True,
-                    "status": f"Printer is {state}",
-                    "details": details,
-                }
+                media = self.get_loaded_media(printer_uri, ipp_result=ipp)
+                status_text = f"Printer is {state}"
+                if blocking:
+                    status_text += f" and cannot print ({', '.join(blocking)})"
+                return self._status_response(
+                    reachable=True,
+                    state="blocked" if blocking else "ready",
+                    status=status_text,
+                    details=details,
+                    media=media,
+                    blocking_reasons=blocking,
+                    label_size=label_size,
+                settings=settings,
+                )
+            self._forget_media(printer_uri)
             if self._tcp_reachable(ip_address):
                 details["source"] = "tcp"
-                return {
-                    "available": True,
-                    "status": "Printer reachable (no IPP status)",
-                    "details": details,
-                }
+                # The device is there but says nothing: readiness and media are
+                # both genuinely unknown, and the response says so rather than
+                # guessing either way.
+                return self._status_response(
+                    reachable=True,
+                    state="unknown",
+                    status="Printer reachable (no IPP status)",
+                    details=details,
+                    media_unavailable=MEDIA_DETECTION_UNSUPPORTED,
+                    label_size=label_size,
+                settings=settings,
+                )
             details["source"] = "tcp"
             if ipp.get("error"):
                 details["error"] = ipp["error"]
-            return {
-                "available": False,
-                "status": "Printer not reachable",
-                "details": details,
-            }
+            return self._status_response(
+                reachable=False,
+                state="unreachable",
+                status="Printer not reachable",
+                details=details,
+                media_unavailable=MEDIA_DETECTION_UNREACHABLE,
+                label_size=label_size,
+                settings=settings,
+            )
 
         # Non-network backends (usb://, file://): constructing the backend is
-        # the available reachability check.
+        # the available reachability check. Neither offers a media channel.
         try:
             backend = backend_factory(backend_type)["backend_class"](printer_uri)
             backend.dispose()
-            return {
-                "available": True,
-                "status": "Printer is ready",
-                "details": details,
-            }
+            return self._status_response(
+                reachable=True,
+                state="ready",
+                status="Printer is ready",
+                details=details,
+                media_unavailable=MEDIA_DETECTION_UNSUPPORTED,
+                label_size=label_size,
+                settings=settings,
+            )
         except Exception as e:
             logger.error("Error checking printer status",
                         printer_uri=printer_uri,
@@ -1608,12 +2493,99 @@ class PrinterService:
                         error=str(e),
                         exc_info=True)
             details["error"] = str(e)
-            return {
-                "available": False,
-                "status": f"Printer error: {str(e)}",
-                "details": details,
-            }
-    
+            return self._status_response(
+                reachable=False,
+                state="unreachable",
+                status=f"Printer error: {str(e)}",
+                details=details,
+                media_unavailable=MEDIA_DETECTION_UNREACHABLE,
+                label_size=label_size,
+                settings=settings,
+            )
+
+    def record_label_choice(self, new_settings: Dict[str, Any],
+                            previous_settings: Dict[str, Any]) -> Dict[str, Any]:
+        """Remember the label type the user has just settled on for this medium.
+
+        Registered with the settings service as an update hook (see
+        :meth:`SettingsService.register_update_hook`), so what it returns is
+        folded into the very same write that carries the choice. That is
+        deliberate: a memory saved separately could be saved when the choice was
+        not, and the two would then disagree about what the user decided.
+
+        **What counts as settling on a label type.** Not every write of
+        ``label_size``: the client persists the whole settings object on every
+        change, so "it was written" says nothing about intent. Three conditions
+        together do:
+
+        * the value actually *changed*. Re-saving the same label size is not a
+          decision, and treating it as one would let an unrelated settings save
+          re-date a memory;
+        * the new value is one of the identifiers the medium **currently
+          loaded** can be. A user picking 102x51 while a 62 mm roll is in the
+          machine is preparing a job for a roll they have not loaded yet -- it
+          is not a statement about the 62 mm roll, and recording it against that
+          roll would be recording the wrong thing;
+        * automatic switching is on. The memory exists to feed it, and a feature
+          that is off writes nothing at all -- no extra keys in the settings
+          file, no probe on the printer. Off means off.
+
+        The medium is read through the ordinary media cache, so a settings save
+        that follows a status check costs nothing; only a change of
+        ``label_size`` with a cold cache pays a round trip, and an unreachable
+        printer simply means no medium and therefore no memory. Nothing here can
+        fail a settings save.
+
+        Args:
+            new_settings: The settings about to be written, already merged.
+            previous_settings: What was on disk before this write.
+
+        Returns:
+            ``{"media_memory": {...}}`` to fold into the write, or ``{}`` when
+            there is nothing to remember.
+        """
+        if not bool(new_settings.get("media_auto_switch")):
+            return {}
+
+        chosen = new_settings.get("label_size")
+        if not isinstance(chosen, str) or not chosen.strip():
+            return {}
+        if previous_settings.get("label_size") == chosen:
+            return {}
+
+        printer_uri = new_settings.get("printer_uri")
+        if not printer_uri:
+            return {}
+
+        try:
+            media = self.get_loaded_media(str(printer_uri))
+        except Exception:  # noqa: BLE001 - a settings save never fails over this
+            logger.warning("Could not read the loaded media to record a label choice",
+                           printer_uri=printer_uri, exc_info=True)
+            return {}
+
+        candidates = identify_label_candidates(media).candidates
+        if chosen not in candidates:
+            return {}
+        key = media_memory_key(candidates)
+        if not key:
+            return {}
+
+        # Prefer a map the write itself carries: a client that deliberately
+        # edits the memory must not have its edit overwritten by the copy on
+        # disk.
+        memory = new_settings.get("media_memory")
+        if not isinstance(memory, dict):
+            memory = previous_settings.get("media_memory")
+        memory = dict(memory) if isinstance(memory, dict) else {}
+        if memory.get(key) == chosen:
+            return {}
+
+        memory[key] = chosen
+        logger.info("Remembered the label type chosen for a medium",
+                    medium=key, label_size=chosen, candidates=list(candidates))
+        return {"media_memory": memory}
+
     def print_text(self, text: str, settings: Dict[str, Any]) -> Dict[str, Any]:
         """
         Print text on a label.
@@ -4511,7 +5483,7 @@ class PrinterService:
         overridden via the ``ipp_port`` setting for non-standard setups."""
         try:
             return int(settings_service.get_settings().get("ipp_port", 631) or 631)
-        except (TypeError, ValueError):
+        except Exception:  # noqa: BLE001 - an unreadable setting must not stop a status check
             return 631
 
     def _build_clock_info(self, printer_time: Optional[datetime]) -> Dict[str, Any]:
@@ -4911,3 +5883,10 @@ class PrinterService:
 
 # Create a singleton instance
 printer_service = PrinterService()
+
+# Let a settings write remember which label type was chosen for the loaded
+# medium. The dependency only runs this way -- this module already imports the
+# settings service, and the settings service knows nothing about media -- so the
+# hook is what keeps the media rules out of a module that has no business
+# holding them, without a cycle and without a second write.
+settings_service.register_update_hook(printer_service.record_label_choice)

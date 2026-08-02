@@ -94,6 +94,22 @@
                 </div>
             </div>
             <div class="status-cluster">
+                <!-- Loaded medium: what the printer says is in it, and the way
+                     to change the roll without going into Settings. The label
+                     picker's popover is anchored here while it is open. -->
+                <div class="medium-switcher" id="medium-switcher">
+                    <button id="navbar-medium" class="pill pill-medium media-idle" title="Loaded label roll"
+                            aria-haspopup="listbox" aria-expanded="false" aria-controls="label-picker-list">
+                        <i class="bi bi-tags pill-icon"></i>
+                        <span class="dot"></span>
+                        <span id="medium-indicator">Medium</span>
+                        <!-- Only shown while automatic switching is on. A mode
+                             that changes a stored setting on its own has to be
+                             visible where it changes it; on a phone the same
+                             element becomes a dot in the pill's corner. -->
+                        <span class="pill-auto" id="medium-auto" hidden>auto</span>
+                    </button>
+                </div>
                 <button id="navbar-keepalive" class="pill" title="Toggle keep alive" aria-pressed="false">
                     <i class="bi bi-power pill-icon"></i>
                     <span class="dot"></span>
@@ -103,6 +119,14 @@
                     <i class="bi bi-printer pill-icon"></i>
                     <span class="dot"></span>
                     <span id="status-indicator">Status</span>
+                </button>
+                <!-- Asks the printer again right now instead of waiting out the
+                     30 s poll - the moment for it is a roll change. Icon only at
+                     every width: the cluster is tight on a phone, and the name
+                     is carried by aria-label and the tooltip. -->
+                <button type="button" id="navbar-refresh" class="pill pill-refresh"
+                        title="Refresh printer status" aria-label="Refresh printer status">
+                    <i class="bi bi-arrow-clockwise pill-icon" aria-hidden="true"></i>
                 </button>
             </div>
         </header>
@@ -611,11 +635,12 @@
                                                 <button type="button" class="lp-trigger" id="label-picker-trigger"
                                                         aria-haspopup="listbox" aria-expanded="false"
                                                         aria-controls="label-picker-list" aria-labelledby="label-size-label label-picker-name">
-                                                    <span class="lp-trigger-body">
-                                                        <span class="lp-trigger-name" id="label-picker-name">Select a label type</span>
-                                                        <span class="lp-trigger-use" id="label-picker-use" hidden></span>
-                                                        <span class="lp-trigger-codes" id="label-picker-codes" hidden></span>
-                                                    </span>
+                                                    <!-- One line, like every other field: the medium's name,
+                                                         and the leading product code with a count of the rest.
+                                                         The description and the full code list are reference
+                                                         material and live in the open list (and the tooltip). -->
+                                                    <span class="lp-trigger-name" id="label-picker-name">Select a label type</span>
+                                                    <span class="lp-trigger-meta" id="label-picker-meta" hidden></span>
                                                     <i class="bi bi-chevron-expand lp-chevron" aria-hidden="true"></i>
                                                 </button>
                                                 <div class="lp-pop" id="label-picker-pop" hidden>
@@ -670,7 +695,7 @@
                                                 <i class="bi bi-clipboard" id="label-picker-copy-icon" aria-hidden="true"></i>
                                                 <span id="label-picker-copy-text">Copy code</span>
                                             </button>
-                                            <div class="hint d-none" id="label-picker-note"></div>
+                                            <div class="hint hint-prose d-none" id="label-picker-note"></div>
                                         </div>
                                         <div class="field">
                                             <label class="lbl" for="rotate">Rotation</label>
@@ -680,6 +705,71 @@
                                                 <option value="180">180°</option>
                                                 <option value="270">270°</option>
                                             </select>
+                                        </div>
+                                    </div>
+
+                                    <!-- Following the printer by itself, and the inventory that
+                                         makes it safe to. Both are about the same question -
+                                         which roll is really in there - so they sit together,
+                                         directly under the label type they decide. -->
+                                    <div class="grid-2">
+                                        <div class="field">
+                                            <label class="lbl" for="media-auto-switch">When the printer reports another roll</label>
+                                            <select id="media-auto-switch">
+                                                <option value="false">Ask me first</option>
+                                                <option value="true">Switch automatically</option>
+                                            </select>
+                                            <div class="hint hint-prose">
+                                                Automatic switching changes the stored label type on its own,
+                                                so it is off until you turn it on. It never guesses: when the
+                                                printer cannot tell two rolls apart and nothing below settles
+                                                it, the app asks, exactly as it does now.
+                                            </div>
+                                        </div>
+                                        <div class="field">
+                                            <span class="lbl" id="owned-media-label">
+                                                Media you own
+                                                <span class="lbl-count" id="owned-media-count" hidden></span>
+                                            </span>
+                                            <!-- Borrows the label picker: the catalogue, the search
+                                                 and the product codes are already there, and a second
+                                                 list of thirty identifiers would be a second list to
+                                                 keep right. -->
+                                            <div class="owned-media" id="owned-media">
+                                                <button type="button" class="lp-trigger owned-media-add" id="owned-media-add"
+                                                        aria-haspopup="listbox" aria-expanded="false"
+                                                        aria-controls="label-picker-list" aria-labelledby="owned-media-label">
+                                                    <i class="bi bi-plus-lg lp-chevron" aria-hidden="true"></i>
+                                                    <span class="lp-trigger-name">Choose the rolls you have</span>
+                                                </button>
+                                            </div>
+                                            <ul class="owned-chips" id="owned-media-chips"></ul>
+                                            <div class="hint hint-prose" id="owned-media-empty">
+                                                Nothing listed, so every detected candidate is offered. List
+                                                the rolls you actually have and an ambiguous detection narrows
+                                                to them — if you only own the plain 62 mm roll, 62 mm stops
+                                                being a question.
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <!-- Both of these speak about the whole Media block and both
+                                         run to several lines, so they sit under the two-column
+                                         row rather than inside one half of it. -->
+                                    <!-- Whether the label type is stored on the server.
+                                         A label change is written straight away, from
+                                         here and from the top bar alike, so this line
+                                         says which of the two happened. -->
+                                    <div class="media-save-state" id="label-save-state" role="status" hidden></div>
+                                    <!-- Raised when the printer reports a roll that is
+                                         not the configured one. Names both sides and
+                                         offers the way across; never blocks anything. -->
+                                    <div class="media-mismatch d-none" id="media-mismatch" role="status">
+                                        <i class="bi bi-exclamation-triangle media-mismatch-icon" aria-hidden="true"></i>
+                                        <div class="media-mismatch-body">
+                                            <p class="media-mismatch-text" id="media-mismatch-text"></p>
+                                            <p class="media-mismatch-reason" id="media-mismatch-reason" hidden></p>
+                                            <div class="media-mismatch-actions" id="media-mismatch-actions"></div>
                                         </div>
                                     </div>
 
@@ -697,7 +787,7 @@
                                         type</strong>, and applied when printing only, never to the preview.
                                     </p>
                                     <div id="calibration-list" class="cal-list"></div>
-                                    <div class="hint cal-list-note">Opening a row selects that label type in Media above</div>
+                                    <div class="hint hint-prose cal-list-note">Opening a row selects that label type in Media above</div>
                                     <button type="button" id="calibration-open" class="btn-ghost cal-open">
                                         <i class="bi bi-crosshair"></i>
                                         Calibrate <span id="calibration-open-label">the selected label type</span>
@@ -818,7 +908,7 @@
                             <i class="bi bi-card-image"></i>
                             <p>Enter content in the form to see a live preview</p>
                         </div>
-                        <div id="preview-medium-hint" class="hint preview-medium-hint d-none"></div>
+                        <div id="preview-medium-hint" class="hint hint-prose preview-medium-hint d-none"></div>
                     </div>
                 </div>
             </section>
@@ -900,7 +990,7 @@
                                 </div>
                                 <div id="cal-preview-empty" class="cal-preview-empty">Rendering the calibration target…</div>
                             </div>
-                            <div class="hint" id="cal-preview-hint"></div>
+                            <div class="hint hint-prose" id="cal-preview-hint"></div>
                         </div>
 
                         <!-- Directional controls -->
@@ -978,7 +1068,7 @@
                                         <i class="bi bi-arrow-counterclockwise" aria-hidden="true"></i>
                                     </button>
                                 </div>
-                                <div class="hint cal-size-hint">
+                                <div class="hint hint-prose cal-size-hint">
                                     Corrects a printer that prints slightly large or small — below zero prints
                                     smaller. It does not resize your design, and the preview does not change.
                                 </div>
@@ -1034,6 +1124,7 @@
     <script src="js/preview.js"></script>
     <script src="js/api.js"></script>
     <script src="js/calibration.js"></script>
+    <script src="js/media.js"></script>
     <script src="js/core.js"></script>
 </body>
 </html>

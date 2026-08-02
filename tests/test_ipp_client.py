@@ -11,12 +11,18 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+import media_payloads
+
 from src.services import ipp_client
 from src.services.ipp_client import (
+    EMPTY_MEDIA,
     _attr,
     _decode_datetime,
     _parse_attributes,
+    extract_media,
+    get_media_ready,
     get_printer_attributes,
+    parse_input_tray,
     _TAG_ENUM,
     _TAG_INTEGER,
     _TAG_DATETIME,
@@ -111,7 +117,192 @@ def test_parse_attributes_empty_payload():
     assert _parse_attributes(_build_response(b"")) == {}
 
 
+# --- collections -------------------------------------------------------------
+#
+# media-col-ready is an IPP collection whose members carry no attribute names of
+# their own, so the parser has to understand begin/end-collection (0x34/0x37)
+# and memberAttrName (0x4A) rather than reading the members positionally.
+
+def test_parse_attributes_reads_a_collection_as_a_dict():
+    payload = media_payloads.collection(
+        b"media-col-ready",
+        media_payloads.member(0x44, b"media-type", b"labels")
+        + media_payloads.member(0x21, b"media-bottom-margin", struct.pack(">i", 303)),
+    )
+    attrs = _parse_attributes(_build_response(payload + bytes([_TAG_END_OF_ATTRS])))
+    assert attrs["media-col-ready"] == {"media-type": "labels", "media-bottom-margin": 303}
+
+
+def test_parse_attributes_reads_a_nested_collection():
+    payload = media_payloads.collection(
+        b"media-col-ready",
+        media_payloads.member(0x44, b"media-type", b"labels")
+        + media_payloads.media_size(2400, struct.pack(">i", 2400)),
+    )
+    attrs = _parse_attributes(_build_response(payload + bytes([_TAG_END_OF_ATTRS])))
+    assert attrs["media-col-ready"]["media-size"] == {"x-dimension": 2400, "y-dimension": 2400}
+
+
+def test_parse_attributes_decodes_a_range_of_integer():
+    """Continuous media reports its length as a range, which must survive."""
+    payload = media_payloads.collection(
+        b"media-col-ready",
+        media_payloads.media_size(6200, media_payloads.CONTINUOUS_LENGTH_RANGE, y_tag=0x33),
+    )
+    attrs = _parse_attributes(_build_response(payload + bytes([_TAG_END_OF_ATTRS])))
+    assert attrs["media-col-ready"]["media-size"]["y-dimension"] == (1270, 100000)
+
+
+def test_parse_attributes_keeps_attributes_after_a_collection():
+    """A collection must not swallow the attributes that follow it."""
+    payload = media_payloads.collection(
+        b"media-col-ready", media_payloads.member(0x44, b"media-type", b"roll"))
+    payload += _attr(_TAG_ENUM, b"printer-state", struct.pack(">i", 5))
+    attrs = _parse_attributes(_build_response(payload + bytes([_TAG_END_OF_ATTRS])))
+    assert attrs["media-col-ready"] == {"media-type": "roll"}
+    assert attrs["printer-state"] == 5
+
+
+def test_parse_attributes_collects_repeated_collections_into_a_list():
+    members = media_payloads.member(0x44, b"media-type", b"labels")
+    payload = media_payloads.collection(b"media-col-ready", members)
+    payload += media_payloads.collection(b"", media_payloads.member(0x44, b"media-type", b"roll"))
+    attrs = _parse_attributes(_build_response(payload + bytes([_TAG_END_OF_ATTRS])))
+    assert attrs["media-col-ready"] == [{"media-type": "labels"}, {"media-type": "roll"}]
+
+
+def test_parse_attributes_survives_an_empty_collection():
+    payload = media_payloads.collection(b"media-col-ready", b"")
+    payload += _attr(0x44, b"media-ready", b"")
+    attrs = _parse_attributes(_build_response(payload + bytes([_TAG_END_OF_ATTRS])))
+    assert attrs["media-col-ready"] == {}
+    assert attrs["media-ready"] == ""
+
+
+# --- printer-input-tray ------------------------------------------------------
+
+def test_parse_input_tray_splits_key_value_pairs():
+    fields = parse_input_tray('type=sheetFeedManual;medianame=62mm / 2.4";mediacolor=unknown;')
+    assert fields["medianame"] == '62mm / 2.4"'
+    assert fields["mediacolor"] == "unknown"
+
+
+def test_parse_input_tray_ignores_a_non_string():
+    assert parse_input_tray(None) == {}
+
+
+@pytest.mark.parametrize("name, expected", [
+    ('24mm Dia / 0.94" Dia', True),
+    ('62mm / 2.4"', False),
+    ('29mm x 90mm', False),
+    (None, None),
+    ("", None),
+])
+def test_round_media_is_marked_by_a_dia_token(name, expected):
+    assert ipp_client._is_round_media_name(name) is expected
+
+
+# --- extract_media: the five measured states ---------------------------------
+
+def _media_from(payload: bytes):
+    return extract_media(_parse_attributes(payload))
+
+
+def test_media_die_cut_24mm_round():
+    media = _media_from(media_payloads.die_cut_24mm_round())
+    assert media["width_mm"] == 24.0
+    assert media["length_mm"] == 24.0
+    assert media["media_type"] == "labels"
+    assert media["media_name"] == '24mm Dia / 0.94" Dia'
+    assert media["is_round"] is True
+    assert media["source"] == "media-col-ready"
+
+
+def test_media_continuous_12mm():
+    media = _media_from(media_payloads.continuous_12mm())
+    assert media["width_mm"] == 12.0
+    # Continuous tape has no length of its own; the y-dimension is a range.
+    assert media["length_mm"] == 0.0
+    assert media["media_type"] == "roll"
+    assert media["is_round"] is False
+
+
+def test_media_continuous_62mm():
+    media = _media_from(media_payloads.continuous_62mm())
+    assert media["width_mm"] == 62.0
+    assert media["length_mm"] == 0.0
+    assert media["media_type"] == "roll"
+    assert media["media_name"] == '62mm / 2.4"'
+
+
+def test_media_no_roll_reports_nothing_at_all():
+    """An empty media-ready must not be dressed up with tray metadata."""
+    media = _media_from(media_payloads.no_media())
+    assert media == EMPTY_MEDIA
+
+
+def test_media_cover_open_still_reports_the_loaded_roll():
+    media = _media_from(media_payloads.cover_open())
+    assert media["width_mm"] == 62.0
+    assert media["media_type"] == "roll"
+
+
+def test_media_default_is_never_used():
+    """media-default stays on the factory 29x90 in every state, including with
+    no roll at all, so reading it would be reading a lie."""
+    attrs = _parse_attributes(media_payloads.continuous_62mm())
+    assert attrs["media-default"] == media_payloads.FACTORY_MEDIA_DEFAULT.decode()
+    assert extract_media(attrs)["width_mm"] == 62.0
+    assert extract_media(_parse_attributes(media_payloads.no_media())) == EMPTY_MEDIA
+
+
+def test_media_dimensions_are_hundredths_of_a_millimetre():
+    """Despite the tray blob declaring dimunit=micrometers -- a firmware bug,
+    since 6200 um would be 6.2 mm rather than the 62 mm roll that produced it."""
+    attrs = _parse_attributes(media_payloads.continuous_62mm())
+    assert "dimunit=micrometers" in attrs["printer-input-tray"]
+    assert attrs["media-col-ready"]["media-size"]["x-dimension"] == 6200
+    assert extract_media(attrs)["width_mm"] == 62.0
+
+
+def test_media_falls_back_to_the_media_ready_name():
+    """A printer that answers media-ready but not media-col-ready still works."""
+    payload = _attr(0x44, b"media-ready", b"om_brother-label-29x62mm_29x62mm")
+    payload += media_payloads.input_tray(b"29mm x 62mm")
+    media = extract_media(_parse_attributes(
+        media_payloads.response(payload)))
+    assert media["width_mm"] == 29.0
+    assert media["length_mm"] == 62.0
+    assert media["media_type"] == "labels"
+    assert media["source"] == "media-ready"
+
+
+def test_media_falls_back_for_a_roll_name():
+    payload = _attr(0x44, b"media-ready", b"roll_current_62x0mm")
+    media = extract_media(_parse_attributes(media_payloads.response(payload)))
+    assert media["width_mm"] == 62.0
+    assert media["media_type"] == "roll"
+    assert media["source"] == "media-ready"
+
+
+def test_media_empty_attributes_give_the_empty_report():
+    assert extract_media({}) == EMPTY_MEDIA
+
+
 # --- get_printer_attributes (mocked HTTP) ------------------------------------
+
+def _make_response(status: int, payload: bytes):
+    resp = MagicMock()
+    resp.status = status
+    resp.read.return_value = payload
+    return resp
+
+
+def _good_ipp_payload():
+    payload = _attr(_TAG_ENUM, b"printer-state", struct.pack(">i", 3))  # idle
+    payload += _attr(0x47, b"printer-make-and-model", b"Brother QL-800")
+    payload += bytes([_TAG_END_OF_ATTRS])
+    return _build_response(payload)
 
 def _make_response(status: int, payload: bytes):
     resp = MagicMock()
@@ -176,3 +367,81 @@ def test_get_printer_attributes_unreachable_when_all_paths_fail():
 
     assert result["reachable"] is False
     assert result["error"] == "HTTP 500"
+
+
+def test_get_printer_attributes_carries_the_media():
+    """The media rides along with the status in one request, so reading it
+    costs no extra round-trip."""
+    conn = MagicMock()
+    conn.getresponse.return_value = _make_response(200, media_payloads.continuous_62mm())
+
+    with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn):
+        result = get_printer_attributes("192.168.1.100", timeout=0.1)
+
+    assert result["reachable"] is True
+    assert result["printer_state"] == "idle"
+    assert result["media"]["width_mm"] == 62.0
+    assert result["media"]["media_type"] == "roll"
+    assert conn.request.call_count == 1
+
+
+def test_get_printer_attributes_requests_the_media_attributes():
+    conn = MagicMock()
+    conn.getresponse.return_value = _make_response(200, media_payloads.continuous_62mm())
+
+    with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn):
+        get_printer_attributes("192.168.1.100", timeout=0.1)
+
+    body = conn.request.call_args[0][2]
+    for attribute in (b"media-ready", b"media-col-ready", b"printer-input-tray"):
+        assert attribute in body
+    # media-default is measured to be stuck on the factory value, so it is not
+    # even asked for.
+    assert b"media-default" not in body
+
+
+def test_get_printer_attributes_reports_empty_media_when_unreachable():
+    conn = MagicMock()
+    conn.request.side_effect = OSError("connection refused")
+
+    with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn):
+        result = get_printer_attributes("192.168.1.100", timeout=0.1)
+
+    assert result["reachable"] is False
+    assert result["media"] == EMPTY_MEDIA
+
+
+def test_get_printer_attributes_survives_a_broken_media_report():
+    """A media read must never take a status read down with it."""
+    conn = MagicMock()
+    conn.getresponse.return_value = _make_response(200, media_payloads.continuous_62mm())
+
+    with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn), \
+         patch.object(ipp_client, "extract_media", side_effect=ValueError("boom")):
+        result = get_printer_attributes("192.168.1.100", timeout=0.1)
+
+    assert result["reachable"] is True
+    assert result["printer_state"] == "idle"
+    assert result["media"] == EMPTY_MEDIA
+
+
+def test_get_media_ready_returns_only_the_media():
+    conn = MagicMock()
+    conn.getresponse.return_value = _make_response(200, media_payloads.die_cut_24mm_round())
+
+    with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn):
+        media = get_media_ready("192.168.1.100", timeout=0.1)
+
+    assert media["width_mm"] == 24.0
+    assert media["is_round"] is True
+
+
+def test_get_media_ready_is_all_none_when_unreachable():
+    conn = MagicMock()
+    conn.request.side_effect = OSError("no route to host")
+
+    with patch.object(ipp_client.http.client, "HTTPConnection", return_value=conn):
+        media = get_media_ready("192.168.1.100", timeout=0.1)
+
+    assert media == EMPTY_MEDIA
+    assert all(value is None for value in media.values())

@@ -95,6 +95,16 @@ async function loadSettings() {
         if (typeof syncLabelPicker === 'function') syncLabelPicker();
         updateTextOrientationUI();
         if (typeof updatePreviewMediumUI === 'function') updatePreviewMediumUI();
+        // Automatic media switching, the list of media the user owns and the
+        // remembered choice per ambiguous roll. All three are optional: a
+        // settings document without them leaves the app never switching by
+        // itself, which is how it behaved before the feature existed.
+        // applyMediaSettings() repaints the media UI itself.
+        if (typeof applyMediaSettings === 'function') {
+            applyMediaSettings(settings);
+        } else if (typeof refreshMediaUI === 'function') {
+            refreshMediaUI();
+        }
         document.getElementById('rotate').value = settings.rotate || '0';
         document.getElementById('threshold').value = settings.threshold || '70';
         document.getElementById('dither').value = settings.dither ? 'true' : 'false';
@@ -314,7 +324,13 @@ async function checkPrinterStatus() {
         }
         
         const data = await response.json();
-        
+
+        // Hand the same response to the loaded-media UI (top bar pill, label
+        // picker, mismatch warning). It reads its own fields and degrades to
+        // "nothing detected" on a server that does not send them.
+        if (typeof applyPrinterStatusMedia === 'function') applyPrinterStatusMedia(data);
+        const mediaLine = (typeof mediaStatusLine === 'function') ? mediaStatusLine() : '';
+
         if (data.available) {
             // Update status result in modal
             if (statusResult) {
@@ -324,7 +340,7 @@ async function checkPrinterStatus() {
                             <i class="bi bi-check-circle-fill me-2 fs-4"></i>
                             <div>
                                 <strong>Printer is available</strong><br>
-                                ${data.status}
+                                ${data.status}${mediaLine}
                             </div>
                         </div>
                     </div>
@@ -340,6 +356,13 @@ async function checkPrinterStatus() {
                 navbarStatusBtn.classList.add('online');
             }
         } else {
+            // "Not available" now covers two different things: a printer that
+            // did not answer, and one that answered and cannot print (cover
+            // open, no roll). Saying "Offline" for the second would be wrong,
+            // so the reachability flag picks the word. A server that does not
+            // send it keeps the old wording.
+            const blocked = data.reachable === true;
+
             // Update status result in modal
             if (statusResult) {
                 statusResult.innerHTML = `
@@ -347,17 +370,17 @@ async function checkPrinterStatus() {
                         <div class="d-flex align-items-center">
                             <i class="bi bi-exclamation-triangle-fill me-2 fs-4"></i>
                             <div>
-                                <strong>Printer is not available</strong><br>
-                                ${data.status}
+                                <strong>${blocked ? 'Printer cannot print right now' : 'Printer is not available'}</strong><br>
+                                ${data.status}${mediaLine}
                             </div>
                         </div>
                     </div>
                 `;
             }
-            
+
             // Update navbar status indicator
             if (statusIndicator) {
-                statusIndicator.textContent = 'Offline';
+                statusIndicator.textContent = blocked ? 'Blocked' : 'Offline';
             }
             if (navbarStatusBtn) {
                 navbarStatusBtn.classList.remove('online');
@@ -366,7 +389,11 @@ async function checkPrinterStatus() {
         }
     } catch (error) {
         console.error('Error checking printer status:', error);
-        
+
+        // An unreachable printer knows nothing about the roll either; clear the
+        // detection rather than leaving a stale medium on display.
+        if (typeof applyPrinterStatusMedia === 'function') applyPrinterStatusMedia(null);
+
         // Update status result in modal
         if (statusResult) {
             // Check if it's a connection error
@@ -395,6 +422,57 @@ async function checkPrinterStatus() {
             navbarStatusBtn.classList.add('offline');
         }
     }
+}
+
+// Whether a manually triggered status check is still outstanding. The 30 s poll
+// and the automatic re-checks are deliberately not covered by this: they are
+// silent, and holding them off because a button is busy would only make the
+// display older.
+let statusRefreshInFlight = false;
+
+/**
+ * Ask the printer for its status right now, on request.
+ *
+ * This is the same call the 30 s poll makes - including the loaded media it
+ * carries - only without the wait, which is what a roll change needs: swap the
+ * paper, press it, watch the medium pill follow. The button is put into a
+ * visible in-flight state for the duration and cannot be fired again while it
+ * is, so a printer that takes seconds to answer (or never does) neither looks
+ * dead nor stacks up requests behind it.
+ *
+ * @returns {Promise<boolean>} true when this call ran the check, false when it
+ *   was dropped because one was already in flight
+ */
+async function refreshPrinterStatus() {
+    if (statusRefreshInFlight) return false;
+    statusRefreshInFlight = true;
+
+    // aria-disabled rather than the disabled property: a button that disables
+    // itself under the user's finger drops keyboard focus to the document, and
+    // the guard above is what actually stops a second run.
+    const button = document.getElementById('navbar-refresh');
+    if (button) {
+        button.classList.add('is-busy');
+        button.setAttribute('aria-busy', 'true');
+        button.setAttribute('aria-disabled', 'true');
+    }
+
+    try {
+        // checkPrinterStatus() reports its own failures (in the status pill and
+        // in the dialog) and clears the media detection, so there is nothing to
+        // add here - but it must never leave the button stuck if it throws.
+        await checkPrinterStatus();
+    } catch (error) {
+        console.error('Error refreshing printer status:', error);
+    } finally {
+        statusRefreshInFlight = false;
+        if (button) {
+            button.classList.remove('is-busy');
+            button.removeAttribute('aria-busy');
+            button.removeAttribute('aria-disabled');
+        }
+    }
+    return true;
 }
 
 /**
@@ -1170,12 +1248,18 @@ async function handleSaveSettings(event) {
         submitBtn.disabled = true;
         submitBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Saving...';
         
+        // The Media block's own settings are written the moment they are
+        // changed, the same way the label type is. They ride along here so that
+        // a full save cannot roll them back to whatever the form was built
+        // with, which is the one way the two paths could disagree.
+        const mediaPatch = (typeof mediaSettingsPatch === 'function') ? mediaSettingsPatch() : {};
+
         const response = await fetch('/api/v1/settings', {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({
+            body: JSON.stringify(Object.assign({
                 printer_uri: printerUri,
                 printer_model: printerModel,
                 label_size: labelSize,
@@ -1194,7 +1278,7 @@ async function handleSaveSettings(event) {
                 keep_alive_interval: keepAliveInterval,
                 keep_alive_mode: keepAliveMode,
                 keep_alive_duration_seconds: keepAliveDurationSeconds
-            })
+            }, mediaPatch))
         });
         
         // Reset button state
@@ -1949,6 +2033,7 @@ function applySettingsToForm(settings) {
     if (typeof syncLabelPicker === 'function') syncLabelPicker();
     if (typeof updateTextOrientationUI === 'function') updateTextOrientationUI();
     if (typeof updatePreviewMediumUI === 'function') updatePreviewMediumUI();
+    if (typeof refreshMediaUI === 'function') refreshMediaUI();
 }
 
 /**

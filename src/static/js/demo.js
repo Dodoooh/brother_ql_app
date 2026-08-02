@@ -415,7 +415,29 @@
 
         // ----- Printer status / keep-alive -----
         if (p === '/printers/status' && method === 'POST') {
-            return jsonResponse({ available: true, status: 'Ready (demo printer)' });
+            // The demo printer has the 62 mm continuous roll in it, which is
+            // one of the three media the printer cannot pin down on its own:
+            // plain paper and the black/red roll share a geometry.
+            return jsonResponse({
+                available: true,
+                reachable: true,
+                state: 'ready',
+                blocking_reasons: [],
+                status: 'Ready (demo printer)',
+                media: {
+                    width_mm: 62,
+                    length_mm: null,
+                    media_type: 'continuous',
+                    is_round: false,
+                    detected: true,
+                    detection: 'ok',
+                    candidates: ['62', '62red'],
+                    ambiguous: true,
+                    reason: 'The printer reports 62 mm continuous media without a colour.',
+                    label_size: state.settings.label_size,
+                    matches_label_size: ['62', '62red'].indexOf(state.settings.label_size) !== -1
+                }
+            });
         }
         if (p === '/printers/keep-alive' && method === 'GET') {
             return jsonResponse({

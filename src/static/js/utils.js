@@ -19,11 +19,15 @@ function showNotification(message, type = 'info', duration = 5000) {
     const notification = document.createElement('div');
     notification.className = `notification ${type}`;
     
-    // Create notification content
+    // Create notification content.
+    //
+    // The icon is the only part that changes colour with the type: the card
+    // itself is identical for every severity, so a warning and a confirmation
+    // are the same object saying different things rather than two designs.
     const icon = getNotificationIcon(type);
     notification.innerHTML = `
         <div class="d-flex align-items-center">
-            <i class="${icon} me-2"></i>
+            <i class="${icon} notification-icon me-2" aria-hidden="true"></i>
             <div>${message}</div>
             <button type="button" class="notification-close ms-3" aria-label="Close">
                 <i class="bi bi-x"></i>

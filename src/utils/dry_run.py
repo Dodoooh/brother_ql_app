@@ -45,15 +45,21 @@ def build_dry_run_response(settings: Dict[str, Any], data_url: Optional[str] = N
             pass
 
     reachable = False
+    media = None
     try:
         status = printer_service.check_printer_status(
-            settings.get("printer_uri", ""), settings.get("printer_model", "")
+            settings.get("printer_uri", ""), settings.get("printer_model", ""),
+            label_size=settings.get("label_size"),
         )
-        reachable = bool(status.get("available"))
+        # Reachability comes from its own field. It used to be read off
+        # ``available``, which has since been narrowed to mean "ready to print"
+        # -- an open cover would otherwise report the printer as unreachable.
+        reachable = bool(status.get("reachable"))
+        media = status.get("media")
     except Exception:  # noqa: BLE001 - reachability is best-effort, never fatal
         reachable = False
 
-    return {
+    response = {
         "ok": True,
         "dry_run": True,
         "printer_reachable": reachable,
@@ -64,3 +70,8 @@ def build_dry_run_response(settings: Dict[str, Any], data_url: Optional[str] = N
             "height_px": height,
         },
     }
+    if media is not None:
+        # A dry run is exactly where "the roll in the printer is not the roll
+        # you are printing for" is worth knowing, so carry the media check.
+        response["media"] = media
+    return response

@@ -28,30 +28,50 @@ def get_printers() -> List[Dict[str, Any]]:
 
 def check_printer_status(body: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Check printer status.
-    
+    Check printer status, including the media it is loaded with.
+
     Args:
-        body: Dict containing printer information.
-        
+        body: Dict containing printer information. An optional ``label_size``
+            says which label the loaded media should be compared against;
+            without it the configured one is used.
+
     Returns:
-        Dict containing printer status.
+        Dict containing printer status. Its ``media`` section carries the loaded
+        medium, the label identifiers it could be, which single one those come
+        down to (``resolution``) and what automatic mode wants done about it
+        (``auto_switch``).
+
+        The switch itself is the client's to make. ``label_size`` already has one
+        writer -- PUT /settings, on every change -- and a status check that wrote
+        it too would be racing that from a poll the UI repeats every 30 seconds,
+        besides turning a read into an edit of the user's configuration.
     """
     try:
         logger.info("Checking printer status")
-        
+
         # Extract and validate parameters
         printer_uri = body.get("printer_uri")
         printer_model = body.get("printer_model")
-        
+        label_size = body.get("label_size")
+
         if not printer_uri:
             raise ValidationError("printer_uri is required", "printer_uri")
         if not printer_model:
             raise ValidationError("printer_model is required", "printer_model")
-        
+        if label_size is not None and not isinstance(label_size, str):
+            raise ValidationError("label_size must be a string", "label_size")
+
         # Check printer status. An offline/unreachable printer is a normal,
-        # queryable state (available=false), not an error, so we return the
+        # queryable state (reachable=false), not an error, so we return the
         # status with HTTP 200 and let the client render it.
-        status = printer_service.check_printer_status(printer_uri, printer_model)
+        #
+        # The media/label comparison is done here rather than in the browser on
+        # purpose: the rules for it -- which identifiers are the same physical
+        # medium, which sizes cannot be told apart -- live with the label
+        # catalogue, and a second copy of them in JavaScript would be a second
+        # thing to keep right.
+        status = printer_service.check_printer_status(printer_uri, printer_model,
+                                                      label_size=label_size)
         return status
     except ValidationError as e:
         logger.error("Validation error", error=str(e), exc_info=True)

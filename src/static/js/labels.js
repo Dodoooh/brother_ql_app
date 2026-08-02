@@ -611,6 +611,40 @@ function labelCodesText(entry) {
 }
 
 /**
+ * The product codes of an entry, abbreviated for the closed picker: the leading
+ * code, and how many others share this identifier.
+ *
+ * "62 mm continuous" alone covers twelve products, and a line of twelve codes
+ * is what turned the closed control into a paragraph. The leading code is the
+ * one worth reordering by (and the one the copy button puts on the clipboard);
+ * the count says the list is longer without spelling it out. The full list is
+ * one click away in the open list, and in the trigger's tooltip.
+ * @param {?Object} entry - a catalogue entry
+ * @returns {string} e.g. "DK-11218", "DK-22205 +11", or "" without any code
+ */
+function labelCodeSummary(entry) {
+    const code = labelPrimaryCode(entry);
+    if (!code) return '';
+    const others = entry.product_codes.length - 1;
+    return others > 0 ? code + ' +' + others : code;
+}
+
+/**
+ * The closed picker's tooltip: everything the one line cannot hold, so nothing
+ * that used to be on display is actually gone.
+ * @param {?Object} entry - a catalogue entry
+ * @returns {string} name, description and every product code, one per line
+ */
+function labelTriggerTitle(entry) {
+    if (!entry) return '';
+    const parts = [entry.name];
+    if (entry.description) parts.push(entry.description);
+    const codes = labelCodesText(entry);
+    if (codes) parts.push(codes);
+    return parts.join('\n');
+}
+
+/**
  * The code to put on the clipboard for an entry, or an empty string when the
  * medium has no Brother product behind it.
  *
@@ -694,6 +728,87 @@ function labelFlag(entry) {
 let labelPickerActive = null;
 
 /**
+ * The places the one popover can be anchored, as host id -> its trigger and
+ * what a choice made there means.
+ *
+ * There is deliberately only one list in the page. The Settings field is its
+ * home; the top bar's medium pill borrows it while it is open, so changing the
+ * roll from the header and changing it in Settings are the same control with
+ * the same contents, and cannot drift apart. The owned-media field borrows it
+ * too, for the same reason in reverse: thirty identifiers with their product
+ * codes and their grouping already exist here, and a second list of them would
+ * be a second place to keep correct.
+ *
+ * Two modes:
+ *   'select' - one choice, written to #label-size, and the list closes;
+ *   'own'    - a membership list, toggled row by row, and the list stays open.
+ */
+const LABEL_PICKER_HOSTS = {
+    'label-picker': { trigger: 'label-picker-trigger', mode: 'select' },
+    'medium-switcher': { trigger: 'navbar-medium', mode: 'select' },
+    'owned-media': { trigger: 'owned-media-add', mode: 'own' }
+};
+
+/** The host the popover lives in while closed. */
+const LABEL_PICKER_HOME = 'label-picker';
+
+// Host id the popover is currently anchored to, or null while it is closed.
+let labelPickerHostId = null;
+
+// What a choice means right now: 'select' or 'own'. Always back to 'select'
+// when the list is closed, so nothing can be left in the other mode.
+let labelPickerMode = 'select';
+
+/**
+ * What the printer reports as loaded, in the form the picker needs: the
+ * candidate identifiers and, when there is more than one, why.
+ *
+ * media.js pushes this in; labels.js never fetches anything itself, so the
+ * picker keeps working (and stays testable) on its own.
+ * @type {{candidates: string[], reason: string}}
+ */
+let labelPickerLoadedMedia = { candidates: [], reason: '' };
+
+/**
+ * Tell the picker which label types the printer reports as loaded, so they can
+ * be offered first. Passing nothing clears the detection and returns the list
+ * to exactly what it looked like before this feature existed.
+ * @param {?{candidates: string[], reason: string}} info - detected media
+ */
+function setLabelPickerLoadedMedia(info) {
+    const candidates = (info && Array.isArray(info.candidates))
+        ? info.candidates.filter(id => typeof id === 'string' && id.length > 0)
+        : [];
+    const reason = (info && typeof info.reason === 'string') ? info.reason : '';
+    labelPickerLoadedMedia = { candidates: candidates, reason: reason };
+
+    // Repaint an open list, so a roll changed while the user is looking at the
+    // list moves to the top under them rather than after the next open.
+    if (labelPickerHostId) {
+        const search = document.getElementById('label-picker-search');
+        renderLabelPickerList(search ? search.value : '');
+    }
+}
+
+/**
+ * The detected candidates that the <select> actually accepts, as catalogue
+ * entries. Anything unknown is dropped rather than offered.
+ * @returns {Object[]} catalogue entries, in the order the printer reported them
+ */
+function loadedLabelEntries() {
+    const select = document.getElementById('label-size');
+    if (!select) return [];
+
+    const available = {};
+    Array.prototype.forEach.call(select.options, option => { available[option.value] = true; });
+
+    return labelPickerLoadedMedia.candidates
+        .filter(identifier => available[identifier])
+        .map(labelEntryFor)
+        .filter(entry => entry !== null);
+}
+
+/**
  * Wire up the label picker. Called from setupEventListeners() in core.js.
  */
 function setupLabelPicker() {
@@ -725,11 +840,11 @@ function setupLabelPicker() {
     const copyButton = document.getElementById('label-picker-copy');
     if (copyButton) copyButton.addEventListener('click', copySelectedLabelCode);
 
-    trigger.addEventListener('click', toggleLabelPicker);
+    trigger.addEventListener('click', () => toggleLabelPicker(LABEL_PICKER_HOME));
     trigger.addEventListener('keydown', event => {
         if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
             event.preventDefault();
-            openLabelPicker();
+            openLabelPicker(LABEL_PICKER_HOME);
         }
     });
 
@@ -738,7 +853,7 @@ function setupLabelPicker() {
 
     list.addEventListener('click', event => {
         const option = event.target.closest('.lp-opt');
-        if (option) selectLabelIdentifier(option.dataset.identifier);
+        if (option) commitLabelPickerChoice(option.dataset.identifier);
     });
     list.addEventListener('pointerover', event => {
         const option = event.target.closest('.lp-opt');
@@ -747,11 +862,12 @@ function setupLabelPicker() {
         }
     });
 
-    // Clicking or tapping anywhere else closes the picker.
+    // Clicking or tapping anywhere else closes the picker, wherever it is
+    // currently anchored.
     document.addEventListener('pointerdown', event => {
-        if (!picker.hidden && picker.classList.contains('is-open') && !picker.contains(event.target)) {
-            closeLabelPicker(false);
-        }
+        if (!labelPickerHostId) return;
+        const host = document.getElementById(labelPickerHostId);
+        if (host && !host.contains(event.target)) closeLabelPicker(false);
     });
 
     // Any change of the select - by the picker or by code that loads settings -
@@ -770,8 +886,8 @@ function syncLabelPicker() {
     if (!select || !picker || picker.hidden) return;
 
     const nameEl = document.getElementById('label-picker-name');
-    const useEl = document.getElementById('label-picker-use');
-    const codesEl = document.getElementById('label-picker-codes');
+    const metaEl = document.getElementById('label-picker-meta');
+    const triggerEl = document.getElementById('label-picker-trigger');
     const noteEl = document.getElementById('label-picker-note');
     const entry = labelEntryFor(select.value);
 
@@ -780,22 +896,22 @@ function syncLabelPicker() {
             ? entry.name
             : (select.value || 'Select a label type');
     }
-    if (useEl) {
-        useEl.textContent = entry ? entry.description : '';
-        useEl.hidden = !(entry && entry.description);
-    }
-    if (codesEl) {
+    if (metaEl) {
         // An entry without codes says so through its caveat line below, so the
         // code slot simply disappears instead of repeating the message.
-        const codes = entry ? labelCodesText(entry) : '';
-        codesEl.textContent = codes;
-        codesEl.hidden = !codes;
-        // The closed control is one line; an identifier shared by several
-        // products keeps its full code list in the tooltip (and in the list).
-        if (codes) {
-            codesEl.setAttribute('title', codes);
+        const summary = labelCodeSummary(entry);
+        metaEl.textContent = summary;
+        metaEl.hidden = !summary;
+    }
+    if (triggerEl) {
+        // The closed control is one line, so the description and the full code
+        // list are carried by the tooltip - and by the open list, where they
+        // have the room to be read.
+        const title = labelTriggerTitle(entry);
+        if (title) {
+            triggerEl.setAttribute('title', title);
         } else {
-            codesEl.removeAttribute('title');
+            triggerEl.removeAttribute('title');
         }
     }
     if (noteEl) {
@@ -880,56 +996,120 @@ function copySelectedLabelCode() {
 }
 
 /**
- * Open the picker: show the popover, reset the query and focus the search box.
+ * Open the picker under one of its hosts: move the popover there, reset the
+ * query and focus the search box.
+ *
+ * Opening it under a host while it is already open under another one closes it
+ * first, so there is never more than one popover in the page.
+ *
+ * @param {string} [hostId] - a key of LABEL_PICKER_HOSTS; defaults to the
+ *   Settings field
  */
-function openLabelPicker() {
-    const picker = document.getElementById('label-picker');
-    const pop = document.getElementById('label-picker-pop');
-    const trigger = document.getElementById('label-picker-trigger');
-    const search = document.getElementById('label-picker-search');
-    if (!picker || !pop || !trigger || !search || picker.classList.contains('is-open')) return;
+function openLabelPicker(hostId) {
+    const wanted = LABEL_PICKER_HOSTS[hostId] ? hostId : LABEL_PICKER_HOME;
+    if (labelPickerHostId === wanted) return;
 
-    picker.classList.add('is-open');
+    const host = document.getElementById(wanted);
+    const trigger = document.getElementById(LABEL_PICKER_HOSTS[wanted].trigger);
+    const pop = document.getElementById('label-picker-pop');
+    const search = document.getElementById('label-picker-search');
+    const list = document.getElementById('label-picker-list');
+    if (!host || !trigger || !pop || !search) return;
+
+    if (labelPickerHostId) closeLabelPicker(false);
+
+    if (pop.parentNode !== host) host.appendChild(pop);
+    // The header anchors the popover to the whole status cluster's right edge;
+    // the Settings and owned-media fields stretch it across the field.
+    pop.classList.toggle('lp-pop--header', wanted === 'medium-switcher');
+
+    labelPickerHostId = wanted;
+    labelPickerMode = LABEL_PICKER_HOSTS[wanted].mode;
+    host.classList.add('is-open');
     pop.hidden = false;
+    pop.classList.toggle('lp-pop--own', labelPickerMode === 'own');
     trigger.setAttribute('aria-expanded', 'true');
     search.setAttribute('aria-expanded', 'true');
+    search.setAttribute('placeholder', labelPickerMode === 'own'
+        ? 'Search the media you have — DK-11218, 62x29, round…'
+        : 'Search DK-11218, 62x29, round, shipping…');
+    if (list) {
+        // Ticking several rolls off a list is a multi-select; saying so is what
+        // stops a screen reader announcing each tick as "the label type is now
+        // 62 mm", which is exactly what it is not.
+        list.setAttribute('aria-multiselectable', labelPickerMode === 'own' ? 'true' : 'false');
+    }
     search.value = '';
     renderLabelPickerList('');
     search.focus();
 }
 
 /**
- * Close the picker.
- * @param {boolean} focusTrigger - move focus back to the closed control
+ * Close the picker and park the popover back on the Settings field, so the DOM
+ * ends up in the same shape whichever host it was opened from.
+ * @param {boolean} focusTrigger - move focus back to the control it opened from
  */
 function closeLabelPicker(focusTrigger) {
-    const picker = document.getElementById('label-picker');
     const pop = document.getElementById('label-picker-pop');
-    const trigger = document.getElementById('label-picker-trigger');
-    const search = document.getElementById('label-picker-search');
-    if (!picker || !pop || !trigger) return;
+    if (!pop || !labelPickerHostId) return;
 
-    picker.classList.remove('is-open');
+    const host = document.getElementById(labelPickerHostId);
+    const trigger = document.getElementById(LABEL_PICKER_HOSTS[labelPickerHostId].trigger);
+    const search = document.getElementById('label-picker-search');
+
     pop.hidden = true;
-    trigger.setAttribute('aria-expanded', 'false');
+    pop.classList.remove('lp-pop--header', 'lp-pop--own');
+    if (host) host.classList.remove('is-open');
+    if (trigger) {
+        trigger.setAttribute('aria-expanded', 'false');
+        if (focusTrigger) trigger.focus();
+    }
     if (search) {
         search.setAttribute('aria-expanded', 'false');
         search.setAttribute('aria-activedescendant', '');
     }
+
+    const home = document.getElementById(LABEL_PICKER_HOME);
+    if (home && pop.parentNode !== home) home.appendChild(pop);
+
+    labelPickerHostId = null;
+    labelPickerMode = 'select';
     labelPickerActive = null;
-    if (focusTrigger) trigger.focus();
+
+    // An automatic media switch holds off while a list is open rather than
+    // moving the selection under whoever is reading it; this is where it gets
+    // its turn. A no-op when there is nothing to switch to.
+    if (typeof mediaPickerClosed === 'function') mediaPickerClosed();
 }
 
 /**
- * Toggle the picker open/closed (the trigger's click handler).
+ * Is the picker currently open under a particular host?
+ * @param {string} hostId - a key of LABEL_PICKER_HOSTS
+ * @returns {boolean}
  */
-function toggleLabelPicker() {
-    const picker = document.getElementById('label-picker');
-    if (!picker) return;
-    if (picker.classList.contains('is-open')) {
+function labelPickerIsOpenIn(hostId) {
+    return labelPickerHostId === hostId;
+}
+
+/**
+ * Is the picker open anywhere? Read by the automatic media switch, which will
+ * not move the selection out from under a list somebody is reading.
+ * @returns {boolean}
+ */
+function labelPickerIsOpen() {
+    return labelPickerHostId !== null;
+}
+
+/**
+ * Toggle the picker open/closed under a host (the triggers' click handler).
+ * @param {string} [hostId] - a key of LABEL_PICKER_HOSTS
+ */
+function toggleLabelPicker(hostId) {
+    const wanted = LABEL_PICKER_HOSTS[hostId] ? hostId : LABEL_PICKER_HOME;
+    if (labelPickerHostId === wanted) {
         closeLabelPicker(true);
     } else {
-        openLabelPicker();
+        openLabelPicker(wanted);
     }
 }
 
@@ -947,23 +1127,46 @@ function labelOptionId(identifier) {
  * Build one option row.
  * @param {Object} entry - a catalogue entry
  * @param {string} current - the currently selected identifier
+ * @param {string} [loaded] - '' for an ordinary row, 'only' when the printer
+ *   identified this medium outright, 'one-of' when it is one of several the
+ *   printer cannot tell apart
  * @returns {HTMLLIElement}
  */
-function buildLabelOption(entry, current) {
+function buildLabelOption(entry, current, loaded) {
+    // In "own" mode a row is a tick box rather than a choice: what it reports
+    // as selected is membership of the owned list, not what the app prints for.
+    const owning = labelPickerMode === 'own';
+    const owned = owning && typeof ownsMedium === 'function' && ownsMedium(entry.identifier);
+
     const option = document.createElement('li');
-    option.className = 'lp-opt';
+    option.className = 'lp-opt' + (loaded ? ' lp-opt--loaded' : '') + (owned ? ' lp-opt--owned' : '');
     option.id = labelOptionId(entry.identifier);
     option.dataset.identifier = entry.identifier;
     option.setAttribute('role', 'option');
-    option.setAttribute('aria-selected', entry.identifier === current ? 'true' : 'false');
+    option.setAttribute('aria-selected',
+        (owning ? owned : entry.identifier === current) ? 'true' : 'false');
 
     const head = document.createElement('span');
     head.className = 'lp-opt-head';
+
+    if (owning) {
+        const tick = document.createElement('i');
+        tick.className = owned ? 'bi bi-check-square-fill lp-tick' : 'bi bi-square lp-tick';
+        tick.setAttribute('aria-hidden', 'true');
+        head.appendChild(tick);
+    }
 
     const name = document.createElement('span');
     name.className = 'lp-opt-name';
     name.textContent = entry.name;
     head.appendChild(name);
+
+    if (loaded) {
+        const mark = document.createElement('span');
+        mark.className = 'lp-loaded-mark';
+        mark.textContent = loaded === 'one-of' ? 'Loaded — one of these' : 'Loaded';
+        head.appendChild(mark);
+    }
 
     // One or two codes are the regional pair of a single product and trail the
     // name. More than that means several products share the identifier (62 mm
@@ -1016,12 +1219,65 @@ function renderLabelPickerList(query) {
     const available = {};
     Array.prototype.forEach.call(select.options, option => { available[option.value] = true; });
     const matches = filterLabelEntries(query).filter(entry => available[entry.identifier]);
-    const groups = groupLabelEntries(matches);
     const current = select.value;
+
+    // What the printer says is in it goes first, as a group of its own, and is
+    // taken out of the ordinary groups rather than repeated in them: one row per
+    // identifier keeps the ids unique and the arrow keys sane. Everything else
+    // stays exactly where it was, because preparing a job for a roll that is
+    // not loaded is a perfectly ordinary thing to do.
+    //
+    // Not in "own" mode: that list is about the cupboard, not about the
+    // printer, and promoting the loaded roll in it would suggest that ticking
+    // a row says something about what is in the machine right now.
+    const owning = labelPickerMode === 'own';
+    const loadedEntries = owning ? [] : loadedLabelEntries();
+    const isLoaded = {};
+    loadedEntries.forEach(entry => { isLoaded[entry.identifier] = true; });
+
+    const loadedMatches = matches.filter(entry => isLoaded[entry.identifier]);
+    const groups = groupLabelEntries(matches.filter(entry => !isLoaded[entry.identifier]));
 
     list.innerHTML = '';
     let firstIdentifier = null;
     let currentVisible = false;
+
+    if (owning) {
+        const note = document.createElement('li');
+        note.className = 'lp-groupnote lp-groupnote--lead';
+        note.setAttribute('role', 'presentation');
+        note.textContent = 'Tick every roll you actually have. When the printer reports a ' +
+            'medium it cannot pin down, the app offers only the ones on this list.';
+        list.appendChild(note);
+    }
+
+    if (loadedMatches.length > 0) {
+        const head = document.createElement('li');
+        head.className = 'lp-grouphead lp-grouphead--loaded';
+        head.setAttribute('role', 'presentation');
+        head.textContent = loadedMatches.length > 1
+            ? 'Loaded in the printer — pick one'
+            : 'Loaded in the printer';
+        list.appendChild(head);
+
+        // Several candidates means the printer genuinely cannot tell them
+        // apart, and which one it is is the user's intent rather than a fact
+        // the device can supply. Say why, and choose nothing.
+        if (loadedEntries.length > 1 && labelPickerLoadedMedia.reason) {
+            const note = document.createElement('li');
+            note.className = 'lp-groupnote';
+            note.setAttribute('role', 'presentation');
+            note.textContent = labelPickerLoadedMedia.reason;
+            list.appendChild(note);
+        }
+
+        const mark = loadedEntries.length > 1 ? 'one-of' : 'only';
+        loadedMatches.forEach(entry => {
+            list.appendChild(buildLabelOption(entry, current, mark));
+            if (firstIdentifier === null) firstIdentifier = entry.identifier;
+            if (entry.identifier === current) currentVisible = true;
+        });
+    }
 
     groups.forEach(group => {
         const head = document.createElement('li');
@@ -1031,7 +1287,7 @@ function renderLabelPickerList(query) {
         list.appendChild(head);
 
         group.entries.forEach(entry => {
-            list.appendChild(buildLabelOption(entry, current));
+            list.appendChild(buildLabelOption(entry, current, ''));
             if (firstIdentifier === null) firstIdentifier = entry.identifier;
             if (entry.identifier === current) currentVisible = true;
         });
@@ -1112,13 +1368,40 @@ function handleLabelPickerKeydown(event) {
         closeLabelPicker(true);
     } else if (key === 'Enter') {
         event.preventDefault();
-        if (labelPickerActive) selectLabelIdentifier(labelPickerActive);
+        if (labelPickerActive) commitLabelPickerChoice(labelPickerActive);
     } else if (key === 'Tab') {
         closeLabelPicker(false);
     } else if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'Home' || key === 'End') {
         event.preventDefault();
         moveLabelPickerActive(key);
     }
+}
+
+/**
+ * Act on a row, according to what the list is currently for.
+ *
+ * The two meanings are kept apart here rather than inside
+ * selectLabelIdentifier(), which is called from outside this module (the
+ * mismatch buttons, the automatic switch) and must always mean exactly one
+ * thing: set the label type.
+ *
+ * @param {string} identifier - label type identifier
+ */
+function commitLabelPickerChoice(identifier) {
+    if (!identifier) return;
+
+    if (labelPickerMode === 'own') {
+        if (typeof toggleOwnedMedium === 'function') toggleOwnedMedium(identifier);
+        // Owning several rolls is the normal case, so the list stays open and
+        // the query stays put: ticking three boxes should not cost three trips
+        // through the trigger.
+        const search = document.getElementById('label-picker-search');
+        renderLabelPickerList(search ? search.value : '');
+        setLabelPickerActive(identifier);
+        return;
+    }
+
+    selectLabelIdentifier(identifier);
 }
 
 /**

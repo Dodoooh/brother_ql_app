@@ -247,6 +247,12 @@ def register_routes(app):
 
         Returns 200 when reachable (pass/warn) and 503 when not (fail), using
         the IPP-based status check. Includes a clock-drift sub-check.
+
+        The HTTP code follows *reachability* rather than readiness on purpose: a
+        printer with its cover open or no roll in it is a supply problem for a
+        human to fix, not an infrastructure failure for an orchestrator to
+        restart something over. Those states report "warn" with the blocking
+        reason instead, alongside the media that was detected.
         """
         settings = settings_service.get_settings()
         printer_uri = settings.get("printer_uri", "")
@@ -259,16 +265,35 @@ def register_routes(app):
                                       mimetype="application/health+json")
 
         status = printer_service.check_printer_status(printer_uri, printer_model)
-        available = status.get("available", False)
+        reachable = status.get("reachable", status.get("available", False))
+        blocking = status.get("blocking_reasons") or []
         details = status.get("details", {})
 
-        printer_check = {"status": "pass" if available else "fail",
-                         "output": status.get("status")}
+        if not reachable:
+            printer_status = "fail"
+        elif blocking:
+            printer_status = "warn"
+        else:
+            printer_status = "pass"
+
+        printer_check = {"status": printer_status, "output": status.get("status")}
         if details.get("printer_state"):
             printer_check["printer_state"] = details["printer_state"]
+        if blocking:
+            printer_check["blocking_reasons"] = blocking
 
-        body = {"status": "pass" if available else "fail",
+        body = {"status": printer_status,
                 "checks": {"printer": [printer_check]}}
+
+        media = status.get("media")
+        if media and media.get("detection"):
+            body["checks"]["media"] = [{
+                "status": "pass" if media.get("matches_label_size") is not False else "warn",
+                "observedValue": media.get("candidates"),
+                "output": media.get("reason"),
+            }]
+            if media.get("matches_label_size") is False and printer_status == "pass":
+                body["status"] = "warn"
 
         clock = details.get("clock")
         if clock:
@@ -277,10 +302,10 @@ def register_routes(app):
                 "observedValue": clock.get("printer_time"),
                 "output": clock.get("note"),
             }]
-            if available and clock.get("in_sync") is False:
+            if reachable and clock.get("in_sync") is False and body["status"] == "pass":
                 body["status"] = "warn"
 
-        http_status = 200 if available else 503
+        http_status = 200 if reachable else 503
         return app.response_class(json.dumps(body), status=http_status,
                                   mimetype="application/health+json")
 

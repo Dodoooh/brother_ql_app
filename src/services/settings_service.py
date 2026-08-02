@@ -8,7 +8,7 @@ import json
 import structlog
 import copy  # For deepcopy
 import threading
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any, List, Optional
 from brother_ql.backends import guess_backend
 
 from src.utils.uri_validation import validate_printer_uri
@@ -21,12 +21,25 @@ try:
         CALIBRATION_LIMIT_MM,
         CALIBRATION_SCALE_MAX,
         CALIBRATION_SCALE_MIN,
+        medium_key,
+        medium_variants,
+        supported_label_identifiers,
     )
 except ImportError:
     BLEED_LIMIT_MM = 5.0
     CALIBRATION_LIMIT_MM = 10.0
     CALIBRATION_SCALE_MIN = 0.95
     CALIBRATION_SCALE_MAX = 1.05
+
+    def medium_key(label_size):  # type: ignore[misc]
+        return label_size
+
+    def medium_variants(label_size):  # type: ignore[misc]
+        return (label_size,)
+
+    def supported_label_identifiers():  # type: ignore[misc]
+        return None
+
     logger = structlog.get_logger()
     logger.error("Failed to import DEFAULT_SETTINGS. Using fallback defaults.")
     # Define fallback defaults directly if import fails
@@ -36,6 +49,7 @@ except ImportError:
         "dither": False, "compress": False, "red": False,
         "keep_alive_enabled": False, "keep_alive_interval": 60, "calibration": {},
         "bleed_mm": {},
+        "media_auto_switch": False, "owned_media": [], "media_memory": {},
         "printers": [{"id": "default", "name": "Default Printer", "printer_uri": "tcp://192.168.1.100", "printer_model": "QL-800", "label_size": "62"}]
     }
 
@@ -66,8 +80,37 @@ class SettingsService:
         self._cached_settings: Optional[Dict[str, Any]] = None
         self._cached_mtime: Optional[float] = None
 
+        # Callables that may contribute keys to a settings write. See
+        # register_update_hook.
+        self._update_hooks: List[
+            Callable[[Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]]
+        ] = []
+
         self.settings: Dict[str, Any] = self._load_settings()
         logger.info("SettingsService initialized", initial_settings_source=self.settings_file)
+
+    def register_update_hook(
+        self,
+        hook: Callable[[Dict[str, Any], Dict[str, Any]], Optional[Dict[str, Any]]],
+    ) -> None:
+        """Let another layer contribute keys to a settings write.
+
+        The hook is called from :meth:`update_settings` with the merged settings
+        about to be written and the ones currently on disk, and whatever mapping
+        it returns is folded into that same write before validation. Anything it
+        raises is logged and dropped -- a hook is an enrichment, and an
+        enrichment that fails must not cost the user the change they asked for.
+
+        This exists so the media layer can record which label type was settled on
+        for the loaded roll without this module having to know what a roll is,
+        and without a second write that could disagree with the first. The
+        dependency runs one way only: the printer service imports this module,
+        registers its hook, and nothing here imports the printer service back.
+
+        Args:
+            hook: ``hook(new_settings, previous_settings) -> dict | None``.
+        """
+        self._update_hooks.append(hook)
 
     def _load_settings(self) -> Dict[str, Any]:
         """
@@ -120,6 +163,9 @@ class SettingsService:
             "copies": int, "cut_mode": str, "dpi_600": bool, "hq": bool,
             "calibration": dict,
             "bleed_mm": dict,
+            "media_auto_switch": bool,
+            "owned_media": list,
+            "media_memory": dict,
             "printers": list
         }
         for field, expected_type in type_checks.items():
@@ -195,6 +241,15 @@ class SettingsService:
         # _validate_bleed).
         if "bleed_mm" in settings_to_validate: # Type check confirmed it's a dict
             self._validate_bleed(settings_to_validate["bleed_mm"])
+
+        # Validate the media the user says they own and the label type
+        # remembered per medium. Unlike calibration and bleed, these are checked
+        # against the catalogue -- see _validate_owned_media for why.
+        if "owned_media" in settings_to_validate: # Type check confirmed it's a list
+            self._validate_owned_media(settings_to_validate["owned_media"])
+
+        if "media_memory" in settings_to_validate: # Type check confirmed it's a dict
+            self._validate_media_memory(settings_to_validate["media_memory"])
 
         # Validate printers list structure
         if "printers" in settings_to_validate: # Type check confirmed it's a list
@@ -367,6 +422,114 @@ class SettingsService:
                     f"so a larger value is a wrong unit rather than a request."
                 )
 
+    @staticmethod
+    def _validate_owned_media(owned: Any) -> None:
+        """
+        Validate ``owned_media``: the label identifiers the user says they own.
+
+            ["62red", "d24"]
+
+        It narrows an ambiguous detection -- when the printer reports a 62 mm
+        roll and only one of 62/62red is a tape the user has, the other one is
+        not in the building. It is a hint and never a filter: a medium the
+        printer reports is identified and reported whether or not it is listed
+        here, because what is in the machine is a fact and this list is only a
+        claim about a cupboard.
+
+        The identifiers **are** checked against the media catalogue, which is a
+        deliberate departure from ``calibration`` and ``bleed_mm``. Those may
+        legitimately carry entries for media that is not loaded now or that a
+        newer brother_ql knows about, and an entry that matches nothing simply
+        never applies. An entry here does something else: it helps *choose* a
+        label size on the user's behalf. A misspelt identifier would sit in the
+        list looking like a claim, narrow nothing, and leave the user wondering
+        why the roll they own is still being guessed at.
+
+        Args:
+            owned: The ``owned_media`` list to validate.
+
+        Raises:
+            ValueError: If an entry is not a usable, known label identifier.
+        """
+        known = supported_label_identifiers()
+        for index, identifier in enumerate(owned):
+            if not isinstance(identifier, str) or not identifier.strip():
+                raise ValueError(
+                    f"Invalid owned_media entry at index {index}: expected a label "
+                    f"identifier such as '62red', got {identifier!r}"
+                )
+            if known is not None and identifier not in known:
+                raise ValueError(
+                    f"Invalid owned_media entry '{identifier}': there is no such "
+                    f"label identifier. Use the identifiers the label picker "
+                    f"uses, e.g. '62', '62red', '62x29' or 'd24'."
+                )
+
+    @staticmethod
+    def _validate_media_memory(memory: Dict[str, Any]) -> None:
+        """
+        Validate ``media_memory``: the label type last settled on per medium.
+
+            {"62": "62red"}
+
+        The key names a *medium* and is always its plain variant, because that is
+        the one name for it that survives a catalogue edit (see
+        :func:`src.config.default_settings.medium_key`). The value is the label
+        type to return to when that medium is loaded again, and it has to be one
+        of the identifiers that medium can be addressed by -- for the 62 mm roll,
+        62 or 62red.
+
+        Both halves are checked against the catalogue, and the value is checked
+        against its key, because this map is the one setting that can *change*
+        ``label_size`` without the user acting. An entry pointing at a medium
+        that does not exist can only mislead; an entry pointing at a label type
+        the medium cannot be -- ``{"62": "d24"}`` -- would switch a 62 mm roll to
+        a die-cut label size and fail the print, which is precisely the outcome
+        the memory exists to prevent. Rejecting both at the door, by name, is
+        cheaper than diagnosing either later.
+
+        Args:
+            memory: The ``media_memory`` map to validate.
+
+        Raises:
+            ValueError: If a key or value is unknown, or they do not belong
+                together.
+        """
+        known = supported_label_identifiers()
+        for medium, chosen in memory.items():
+            if not isinstance(medium, str) or not medium.strip():
+                raise ValueError("media_memory keys must be non-empty label identifiers.")
+            if known is not None and medium not in known:
+                raise ValueError(
+                    f"Invalid media_memory key '{medium}': there is no such label "
+                    f"identifier, so it names no medium."
+                )
+            canonical = medium_key(medium)
+            if canonical != medium:
+                raise ValueError(
+                    f"Invalid media_memory key '{medium}': it is one way of "
+                    f"addressing the '{canonical}' medium, not a medium of its "
+                    f"own. Key the memory on '{canonical}' and store '{medium}' "
+                    f"as the value."
+                )
+            if not isinstance(chosen, str) or not chosen.strip():
+                raise ValueError(
+                    f"Invalid media_memory entry for '{medium}': expected a label "
+                    f"identifier, got {chosen!r}"
+                )
+            if known is not None and chosen not in known:
+                raise ValueError(
+                    f"Invalid media_memory entry for '{medium}': '{chosen}' is not "
+                    f"a label identifier this app knows."
+                )
+            variants = medium_variants(medium)
+            if chosen not in variants:
+                raise ValueError(
+                    f"Invalid media_memory entry for '{medium}': '{chosen}' is a "
+                    f"different medium, so it can never be what is loaded when "
+                    f"'{medium}' is. Expected one of {', '.join(variants)}."
+                )
+
     def save_settings(self, settings_to_save: Dict[str, Any]) -> bool:
         """
         Atomically saves the provided settings dictionary to the JSON file.
@@ -478,6 +641,14 @@ class SettingsService:
 
     # Settings keys a print/preview request may inherit from the saved config
     # when omitted. keep_alive_*/ipp_port/printers are excluded (not per-print).
+    #
+    # media_auto_switch/owned_media/media_memory are excluded for the same
+    # reason, and it is worth stating rather than leaving to inference: they
+    # decide what label_size *becomes*, not how a label is rendered once it has
+    # one. By the time a print request is resolved that decision is already made
+    # and label_size carries it, so inheriting them would hand the render path
+    # three settings it has no use for -- and would invite a print request to
+    # start re-deciding the medium mid-job.
     _INHERITABLE_PRINT_KEYS = (
         "printer_uri", "printer_model", "label_size", "font_size", "alignment",
         "orientation", "vertical_alignment", "rotate", "threshold", "dither",
@@ -546,6 +717,21 @@ class SettingsService:
             merged_settings = copy.deepcopy(current_settings_from_file)
             # Merge the updates
             merged_settings.update(settings_update)
+
+            # Let the registered hooks add to this same write (see
+            # register_update_hook). They see the merged result, so a hook reads
+            # the values that are actually about to be stored rather than
+            # whichever subset the caller happened to send.
+            for hook in self._update_hooks:
+                try:
+                    contributed = hook(merged_settings, current_settings_from_file)
+                except Exception as hook_err:  # noqa: BLE001 - never fail a save
+                    logger.warning("Settings update hook failed, ignoring it",
+                                   error=str(hook_err), exc_info=True)
+                    continue
+                if contributed:
+                    merged_settings.update(contributed)
+
             logger.debug("Merged settings prepared for saving", merged_settings=merged_settings)
 
             # Attempt to save the fully merged and validated settings object

@@ -89,6 +89,13 @@ function setupEventListeners() {
         });
     }
 
+    // Manual status refresh, next to the pills it updates. No dialog: the point
+    // is to see the header follow a roll change on the spot.
+    const navbarRefreshButton = document.getElementById('navbar-refresh');
+    if (navbarRefreshButton && typeof refreshPrinterStatus === 'function') {
+        navbarRefreshButton.addEventListener('click', () => { refreshPrinterStatus(); });
+    }
+
     // Always-visible keep-alive toggle in the navbar
     const navbarKeepAlive = document.getElementById('navbar-keepalive');
     if (navbarKeepAlive && typeof toggleKeepAliveFromNavbar === 'function') {
@@ -388,6 +395,13 @@ function setupEventListeners() {
     // keeps working unchanged.
     if (typeof setupLabelPicker === 'function') {
         setupLabelPicker();
+    }
+
+    // Loaded-media detection: the top bar pill (which doubles as the roll
+    // switcher), the picker's pre-sorted candidates and the mismatch warning.
+    // It is fed by the printer status poll below, never by one of its own.
+    if (typeof setupMediumSwitcher === 'function') {
+        setupMediumSwitcher();
     }
 
     // Label type -> only continuous rolls have a length to run text along, so

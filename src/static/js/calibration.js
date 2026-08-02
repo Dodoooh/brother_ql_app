@@ -625,8 +625,24 @@ function calibrationErrorMessage(result) {
 function setCalibrationStatus(message, kind = 'info') {
     const el = document.getElementById('cal-status');
     if (!el) return;
-    el.textContent = message || '';
+
+    el.textContent = '';
     el.className = `cal-status cal-status--${kind}` + (message ? '' : ' d-none');
+    if (!message) return;
+
+    // The line carries no colour of its own any more, so the severity has to be
+    // legible without one. Same icon vocabulary as the notifications, so "this
+    // failed" looks the same wherever the app says it.
+    const icon = document.createElement('i');
+    icon.className = (typeof getNotificationIcon === 'function'
+        ? getNotificationIcon(kind)
+        : 'bi bi-info-circle-fill') + ' cal-status-icon';
+    icon.setAttribute('aria-hidden', 'true');
+    el.appendChild(icon);
+
+    const text = document.createElement('span');
+    text.textContent = message;
+    el.appendChild(text);
 }
 
 /**
