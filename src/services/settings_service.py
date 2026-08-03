@@ -11,7 +11,7 @@ import threading
 from typing import Callable, Dict, Any, List, Optional
 from brother_ql.backends import guess_backend
 
-from src.utils.uri_validation import validate_printer_uri
+from src.utils.uri_validation import validate_printer_uri, validate_webhook_url
 
 # Attempt to import default settings, handle potential import errors during startup phases
 try:
@@ -21,6 +21,8 @@ try:
         CALIBRATION_LIMIT_MM,
         CALIBRATION_SCALE_MAX,
         CALIBRATION_SCALE_MIN,
+        PRINTER_AUTO_POWER_OFF_CHOICES,
+        TURN_OFF_DELAY_LIMIT_MINUTES,
         medium_key,
         medium_variants,
         supported_label_identifiers,
@@ -30,6 +32,8 @@ except ImportError:
     CALIBRATION_LIMIT_MM = 10.0
     CALIBRATION_SCALE_MIN = 0.95
     CALIBRATION_SCALE_MAX = 1.05
+    PRINTER_AUTO_POWER_OFF_CHOICES = (10, 20, 30, 40, 50, 60)
+    TURN_OFF_DELAY_LIMIT_MINUTES = 60
 
     def medium_key(label_size):  # type: ignore[misc]
         return label_size
@@ -50,6 +54,11 @@ except ImportError:
         "keep_alive_enabled": False, "keep_alive_interval": 60, "calibration": {},
         "bleed_mm": {},
         "media_auto_switch": False, "owned_media": [], "media_memory": {},
+        "media_preference": {},
+        "relay_webhook_enabled": False, "relay_webhook_turn_on_url": "",
+        "relay_webhook_turn_off_url": "", "relay_webhook_turn_off_enabled": False,
+        "relay_webhook_turn_off_delay_minutes": 5,
+        "printer_auto_power_off_minutes": 10,
         "printers": [{"id": "default", "name": "Default Printer", "printer_uri": "tcp://192.168.1.100", "printer_model": "QL-800", "label_size": "62"}]
     }
 
@@ -166,6 +175,13 @@ class SettingsService:
             "media_auto_switch": bool,
             "owned_media": list,
             "media_memory": dict,
+            "media_preference": dict,
+            "relay_webhook_enabled": bool,
+            "relay_webhook_turn_on_url": str,
+            "relay_webhook_turn_off_url": str,
+            "relay_webhook_turn_off_enabled": bool,
+            "relay_webhook_turn_off_delay_minutes": int,
+            "printer_auto_power_off_minutes": int,
             "printers": list
         }
         for field, expected_type in type_checks.items():
@@ -232,6 +248,10 @@ class SettingsService:
             if guess_backend(settings_to_validate["printer_uri"]) != "network":
                 raise ValueError("Keep alive is not useful for non-network backends")
 
+        # Relay power control: the webhook URLs, the printer's own
+        # auto-power-off interval, and the arithmetic that ties them together.
+        self._validate_relay_power(settings_to_validate)
+
         # Validate the per-label print offsets (nested, so the shape matters as
         # much as the type).
         if "calibration" in settings_to_validate: # Type check confirmed it's a dict
@@ -250,6 +270,9 @@ class SettingsService:
 
         if "media_memory" in settings_to_validate: # Type check confirmed it's a dict
             self._validate_media_memory(settings_to_validate["media_memory"])
+
+        if "media_preference" in settings_to_validate: # Type check confirmed it's a dict
+            self._validate_media_preference(settings_to_validate["media_preference"])
 
         # Validate printers list structure
         if "printers" in settings_to_validate: # Type check confirmed it's a list
@@ -271,6 +294,102 @@ class SettingsService:
                     except ValueError as ve:
                         raise ValueError(f"Printer at index {i}: {ve}")
         logger.debug("Settings validation passed")
+
+    @staticmethod
+    def _validate_relay_power(settings: Dict[str, Any]) -> None:
+        """
+        Validate the relay power-control settings.
+
+        Three separate things are checked, and they fail for different reasons:
+
+        1. **Shape.** The auto-power-off interval must be one the device
+           actually offers, and the turn-off delay must be a plausible safety
+           margin. Both are checked whenever present, enabled or not, so a bad
+           value cannot sit in the file waiting to be switched on.
+        2. **URLs.** Any non-empty URL is validated whenever it is present --
+           again regardless of whether the feature is on -- so a typo is caught
+           where it is made rather than the first time the printer is switched
+           off. A ``turn_on`` URL becomes *required* once the feature is
+           enabled, because there is otherwise nothing to call.
+        3. **The timing chain.** ``turn_off`` is measured from the end of the
+           timed keep-alive window, so it needs one to exist; and the window
+           cannot be shorter than the printer's own auto-power-off interval,
+           because that interval is subtracted from it.
+
+        Args:
+            settings: The settings dictionary to validate.
+
+        Raises:
+            ValueError: With a message naming what is wrong and what to do.
+        """
+        if "printer_auto_power_off_minutes" in settings:
+            minutes = settings["printer_auto_power_off_minutes"]
+            if isinstance(minutes, bool) or minutes not in PRINTER_AUTO_POWER_OFF_CHOICES:
+                raise ValueError(
+                    f"Invalid printer_auto_power_off_minutes value: {minutes}. Must be "
+                    f"one of {list(PRINTER_AUTO_POWER_OFF_CHOICES)} — these are the only "
+                    "intervals the printer's own menu offers, so no other value can "
+                    "describe the device.")
+
+        if "relay_webhook_turn_off_delay_minutes" in settings:
+            delay = settings["relay_webhook_turn_off_delay_minutes"]
+            if isinstance(delay, bool) or not (0 <= delay <= TURN_OFF_DELAY_LIMIT_MINUTES):
+                raise ValueError(
+                    f"Invalid relay_webhook_turn_off_delay_minutes value: {delay}. Must "
+                    f"be between 0 and {TURN_OFF_DELAY_LIMIT_MINUTES}.")
+
+        # URLs are checked whenever they carry a value, whether or not the
+        # feature is switched on.
+        for field in ("relay_webhook_turn_on_url", "relay_webhook_turn_off_url"):
+            value = settings.get(field)
+            if isinstance(value, str) and value.strip():
+                try:
+                    validate_webhook_url(value)
+                except ValueError as ve:
+                    raise ValueError(f"Invalid {field}: {ve}") from ve
+
+        if not settings.get("relay_webhook_enabled"):
+            # Everything below describes how the feature behaves while it runs.
+            # With it off, the remaining keys are inert and must not be able to
+            # block an unrelated settings write.
+            return
+
+        turn_on_url = settings.get("relay_webhook_turn_on_url") or ""
+        if not str(turn_on_url).strip():
+            raise ValueError(
+                "relay_webhook_turn_on_url is required when relay_webhook_enabled is "
+                "true: there is nothing to call to switch the printer on.")
+
+        hardware_seconds = int(settings.get("printer_auto_power_off_minutes",
+                                            PRINTER_AUTO_POWER_OFF_CHOICES[0])) * 60
+        keep_alive_on = bool(settings.get("keep_alive_enabled"))
+        timed = settings.get("keep_alive_mode", "forever") == "timed"
+        duration = int(settings.get("keep_alive_duration_seconds", 0) or 0)
+        has_window = keep_alive_on and timed and duration > 0
+
+        # The window has the hardware interval subtracted from it, so it cannot
+        # be shorter than that interval. Equal IS allowed and is a real
+        # configuration: the keep-alive heartbeat then does nothing and the
+        # printer's own timer carries the whole window.
+        if has_window and duration < hardware_seconds:
+            raise ValueError(
+                f"keep_alive_duration_seconds ({duration}s) is shorter than the "
+                f"printer's own auto-power-off interval "
+                f"({hardware_seconds // 60} min = {hardware_seconds}s). With relay "
+                "power control on, the hardware interval is subtracted from the "
+                "keep-alive window so the printer sleeps at exactly the moment "
+                "configured — a total shorter than the hardware interval cannot be "
+                f"expressed. Raise keep_alive_duration_seconds to at least "
+                f"{hardware_seconds}s, or lower printer_auto_power_off_minutes on the "
+                "printer and here.")
+
+        if settings.get("relay_webhook_turn_off_enabled") and not has_window:
+            raise ValueError(
+                "relay_webhook_turn_off_enabled requires keep-alive to be enabled in "
+                "\"timed\" mode with a non-zero keep_alive_duration_seconds. The "
+                "turn_off moment is measured from the end of that window; without an "
+                "expiry there is no origin to measure from, so there is no moment at "
+                "which cutting mains power would be known to be safe.")
 
     @staticmethod
     def _validate_calibration(calibration: Dict[str, Any]) -> None:
@@ -479,14 +598,9 @@ class SettingsService:
         of the identifiers that medium can be addressed by -- for the 62 mm roll,
         62 or 62red.
 
-        Both halves are checked against the catalogue, and the value is checked
-        against its key, because this map is the one setting that can *change*
-        ``label_size`` without the user acting. An entry pointing at a medium
-        that does not exist can only mislead; an entry pointing at a label type
-        the medium cannot be -- ``{"62": "d24"}`` -- would switch a 62 mm roll to
-        a die-cut label size and fail the print, which is precisely the outcome
-        the memory exists to prevent. Rejecting both at the door, by name, is
-        cheaper than diagnosing either later.
+        Both halves are checked against the catalogue and the value against its
+        key, by the rules in :meth:`_validate_medium_map`, which
+        ``media_preference`` shares.
 
         Args:
             memory: The ``media_memory`` map to validate.
@@ -495,37 +609,116 @@ class SettingsService:
             ValueError: If a key or value is unknown, or they do not belong
                 together.
         """
+        SettingsService._validate_medium_map(memory, "media_memory", "memory")
+
+    @staticmethod
+    def _validate_media_preference(preference: Dict[str, Any]) -> None:
+        """
+        Validate ``media_preference``: which variant of a medium wins.
+
+            {"62": "62red"}
+
+        Same shape as ``media_memory`` and validated by the same rules, because
+        it is the same statement about the same thing -- a medium, named by its
+        plain variant, paired with one of the identifiers that medium can be
+        addressed by. What differs is only where it sits in the resolution order:
+        the preference is consulted first, ahead of the memory, the owned-media
+        list and the plain-variant default.
+
+        Being consulted first makes the checks matter more, not less. This is the
+        setting with the most authority over what ``label_size`` becomes without
+        the user acting, so an entry that names no medium, an entry keyed on a
+        variant (``{"62red": "62red"}``, which would file a preference under a
+        medium that never comes back as a key) and an entry pairing a medium with
+        a label type it cannot be (``{"62": "d24"}``) are each rejected by name
+        rather than left to fail at the printer.
+
+        **A preference for a medium with only one variant is inert, not an
+        error.** ``{"d24": "d24"}`` says a d24 should resolve to d24, which is
+        what detection already produces on its own; the resolution never even
+        consults this map for a medium that came back unambiguous. So it can
+        neither change an outcome nor break one, and there are two reasons not to
+        reject it. It would be rejecting a true statement -- the app would be
+        refusing to save a setting whose only fault is that it agrees with
+        reality. And group membership comes from the media catalogue, which
+        moves: a medium with one variant today can have two after a brother_ql
+        upgrade, so a preference that was rejected as meaningless would have been
+        rejected for a claim that later became the useful one. An entry that
+        does nothing is cheaper than a settings file that cannot be saved.
+
+        Args:
+            preference: The ``media_preference`` map to validate.
+
+        Raises:
+            ValueError: If a key or value is unknown, or they do not belong
+                together.
+        """
+        SettingsService._validate_medium_map(preference, "media_preference",
+                                             "preference")
+
+    @staticmethod
+    def _validate_medium_map(mapping: Dict[str, Any], setting: str,
+                             noun: str) -> None:
+        """
+        Validate a medium -> variant map: ``media_memory`` or ``media_preference``.
+
+        Both say the same kind of thing about the same kind of key, so both are
+        checked the same way and one set of rules is kept right rather than two.
+        The key names a *medium* and is always its plain variant, because that is
+        the one name for it that survives a catalogue edit (see
+        :func:`src.config.default_settings.medium_key`). The value is a label
+        type that medium can actually be addressed by.
+
+        Both halves are checked against the catalogue, and the value against its
+        key, because these are the settings that can *change* ``label_size``
+        without the user acting. An entry pointing at a medium that does not
+        exist can only mislead; an entry pointing at a label type the medium
+        cannot be -- ``{"62": "d24"}`` -- would switch a 62 mm roll to a die-cut
+        label size and fail the print, which is precisely the outcome these maps
+        exist to prevent. Rejecting both at the door, by name, is cheaper than
+        diagnosing either later.
+
+        Args:
+            mapping: The map to validate.
+            setting: The settings key, named in every message so the user is told
+                which of the two maps is at fault.
+            noun: What one entry is called in prose -- "memory" or "preference".
+
+        Raises:
+            ValueError: If a key or value is unknown, or they do not belong
+                together.
+        """
         known = supported_label_identifiers()
-        for medium, chosen in memory.items():
+        for medium, chosen in mapping.items():
             if not isinstance(medium, str) or not medium.strip():
-                raise ValueError("media_memory keys must be non-empty label identifiers.")
+                raise ValueError(f"{setting} keys must be non-empty label identifiers.")
             if known is not None and medium not in known:
                 raise ValueError(
-                    f"Invalid media_memory key '{medium}': there is no such label "
+                    f"Invalid {setting} key '{medium}': there is no such label "
                     f"identifier, so it names no medium."
                 )
             canonical = medium_key(medium)
             if canonical != medium:
                 raise ValueError(
-                    f"Invalid media_memory key '{medium}': it is one way of "
+                    f"Invalid {setting} key '{medium}': it is one way of "
                     f"addressing the '{canonical}' medium, not a medium of its "
-                    f"own. Key the memory on '{canonical}' and store '{medium}' "
+                    f"own. Key the {noun} on '{canonical}' and store '{medium}' "
                     f"as the value."
                 )
             if not isinstance(chosen, str) or not chosen.strip():
                 raise ValueError(
-                    f"Invalid media_memory entry for '{medium}': expected a label "
+                    f"Invalid {setting} entry for '{medium}': expected a label "
                     f"identifier, got {chosen!r}"
                 )
             if known is not None and chosen not in known:
                 raise ValueError(
-                    f"Invalid media_memory entry for '{medium}': '{chosen}' is not "
+                    f"Invalid {setting} entry for '{medium}': '{chosen}' is not "
                     f"a label identifier this app knows."
                 )
             variants = medium_variants(medium)
             if chosen not in variants:
                 raise ValueError(
-                    f"Invalid media_memory entry for '{medium}': '{chosen}' is a "
+                    f"Invalid {setting} entry for '{medium}': '{chosen}' is a "
                     f"different medium, so it can never be what is loaded when "
                     f"'{medium}' is. Expected one of {', '.join(variants)}."
                 )
@@ -642,13 +835,13 @@ class SettingsService:
     # Settings keys a print/preview request may inherit from the saved config
     # when omitted. keep_alive_*/ipp_port/printers are excluded (not per-print).
     #
-    # media_auto_switch/owned_media/media_memory are excluded for the same
-    # reason, and it is worth stating rather than leaving to inference: they
-    # decide what label_size *becomes*, not how a label is rendered once it has
-    # one. By the time a print request is resolved that decision is already made
-    # and label_size carries it, so inheriting them would hand the render path
-    # three settings it has no use for -- and would invite a print request to
-    # start re-deciding the medium mid-job.
+    # media_auto_switch/owned_media/media_memory/media_preference are excluded
+    # for the same reason, and it is worth stating rather than leaving to
+    # inference: they decide what label_size *becomes*, not how a label is
+    # rendered once it has one. By the time a print request is resolved that
+    # decision is already made and label_size carries it, so inheriting them
+    # would hand the render path four settings it has no use for -- and would
+    # invite a print request to start re-deciding the medium mid-job.
     _INHERITABLE_PRINT_KEYS = (
         "printer_uri", "printer_model", "label_size", "font_size", "alignment",
         "orientation", "vertical_alignment", "rotate", "threshold", "dither",

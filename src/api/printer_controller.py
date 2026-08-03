@@ -6,6 +6,7 @@ import structlog
 from typing import Dict, Any, List
 
 from src.services.printer_service import printer_service
+from src.services.relay_service import relay_service
 from src.services.settings_service import settings_service
 from src.utils.exceptions import ValidationError, PrinterError
 
@@ -99,6 +100,28 @@ def get_keep_alive_status() -> Dict[str, Any]:
     except Exception as e:
         logger.error("Error getting keep alive status", error=str(e), exc_info=True)
         raise PrinterError(f"Error getting keep alive status: {str(e)}")
+
+def get_relay_power_status() -> Dict[str, Any]:
+    """
+    Get the current state of relay power control.
+
+    Read-only and side-effect free: it reports the configuration, the timing
+    chain derived from it, when the turn_off webhook is next due, and the
+    outcome of the most recent one. It never sends a webhook and never contacts
+    the printer.
+
+    Returns:
+        Dict containing the relay power-control status. When the feature and its
+        turn_off half are both on, it carries a ``warning`` naming the one thing
+        the app cannot check for the user — that the configured
+        ``printer_auto_power_off_minutes`` matches the device.
+    """
+    try:
+        logger.info("Getting relay power status")
+        return relay_service.status()
+    except Exception as e:
+        logger.error("Error getting relay power status", error=str(e), exc_info=True)
+        raise PrinterError(f"Error getting relay power status: {str(e)}")
 
 def update_keep_alive(body: Dict[str, Any]) -> Dict[str, Any]:
     """

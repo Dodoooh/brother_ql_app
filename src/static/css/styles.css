@@ -1281,6 +1281,12 @@ body.dark-mode .queue-badge { color: #06222B; }
    reads as an answer rather than as just another heading - but it is only ever
    put at the top, never chosen. */
 .lp-grouphead--loaded { color: var(--accent-strong); }
+/* The user's own rolls, directly under the loaded one. A step brighter than an
+   ordinary heading because it is a shortcut worth finding, but deliberately not
+   the accent: the accent means "the printer said so", and this group is a
+   statement by the user rather than a report from the device. Both themes carry
+   --muted, so this follows the theme without a second rule. */
+.lp-grouphead--mine { color: var(--muted); }
 .lp-groupnote {
     padding: 0 10px 7px;
     font-size: 11px;
@@ -1666,6 +1672,9 @@ body.dark-mode .queue-badge { color: #06222B; }
     text-align: right;
 }
 
+.cal-medium-elsewhere { margin-top: -6px; margin-bottom: 12px; }
+.cal-medium-elsewhere[hidden] { display: none; }
+
 .cal-copy {
     margin: 0 0 16px;
     font-size: 12px;
@@ -1943,4 +1952,246 @@ body.dark-mode .queue-badge { color: #06222B; }
     .cal-footer-remove { margin-right: 0; }
     .cal-actions { flex-direction: column; }
     .cal-actions .btn-print, .cal-actions .btn-ghost { width: 100%; }
+}
+
+/* ===================== Relay power control ===================== */
+/* Settings shows only the state of the feature; the configuration, the timing
+   chain and the warning live in #relayModal, the same division the print
+   alignment block uses. */
+
+.relay-intro {
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.55;
+    margin: 0 0 12px;
+}
+.relay-intro strong { color: var(--ink); font-weight: 600; }
+
+.relay-summary {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    padding: 11px 13px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-2);
+    margin-bottom: 10px;
+}
+.relay-summary-head { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; }
+.relay-summary-detail { font-size: 12.5px; color: var(--muted); min-width: 0; }
+.relay-summary-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+}
+.relay-summary-row i { flex: 0 0 auto; margin-top: 2px; font-size: 12px; color: var(--muted-dim); }
+.relay-summary-row--error { color: var(--ink); }
+
+/* State chip. Three states, three readings: not switching anything, switching
+   the printer on, and armed to cut mains power — which is the one worth a
+   colour of its own. */
+.relay-summary-state,
+.relay-state-flag {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    color: var(--muted-dim);
+    white-space: nowrap;
+    flex: 0 0 auto;
+}
+.relay-state--on {
+    color: var(--green);
+    border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+    background: color-mix(in srgb, var(--green) 10%, transparent);
+}
+.relay-state--armed {
+    color: var(--warn);
+    border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+    background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+.relay-icon-ok { color: var(--green) !important; }
+.relay-icon-error { color: var(--red) !important; }
+.relay-countdown { font-variant-numeric: tabular-nums; color: var(--accent-strong); font-weight: 600; }
+
+.relay-open { width: auto; }
+
+/* ---- Dialog ---- */
+.relay-state {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel-2);
+    margin-bottom: 14px;
+}
+.relay-state-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.relay-state-name { font-size: 14px; font-weight: 600; }
+.relay-state-detail { font-size: 11.5px; color: var(--muted); }
+
+.relay-copy {
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.6;
+    margin: 0 0 16px;
+}
+.relay-copy strong { color: var(--ink); font-weight: 600; }
+.relay-copy .mono { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
+
+.lbl-optional {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    color: var(--muted-dim);
+    text-transform: uppercase;
+    margin-left: 6px;
+}
+
+/* The turn-off fields say nothing while turn_off is never sent, so they are
+   dimmed rather than removed: the margin is still worth reading as the value
+   that would apply. */
+.relay-inert { opacity: .5; }
+
+/* ---- The warning ---- */
+/* Full width, at the setting it belongs to, in the server's own words. It is
+   the only element in the app that keeps a tinted panel: a line of prose in the
+   body colour is exactly what gets skipped, and this one must not be. */
+.relay-warning {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-top: 10px;
+    padding: 12px 14px;
+    border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--border));
+    border-radius: 10px;
+    background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+}
+.relay-warning[hidden] { display: none; }
+.relay-warning-icon { flex: 0 0 auto; margin-top: 2px; color: var(--warn); font-size: 15px; }
+.relay-warning-text {
+    margin: 0;
+    font-size: 12.5px;
+    line-height: 1.6;
+    color: var(--ink);
+}
+/* Nothing has been read from the server yet: same box, no alarm. */
+.relay-warning.is-pending {
+    border-color: var(--border);
+    background: var(--panel-2);
+}
+.relay-warning.is-pending .relay-warning-icon { color: var(--muted-dim); }
+.relay-warning.is-pending .relay-warning-text { color: var(--muted); }
+
+/* ---- The timing chain ---- */
+.relay-chain {
+    list-style: none;
+    margin: 0 0 8px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+}
+.relay-chain-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    padding: 10px 13px;
+    background: var(--panel);
+}
+.relay-chain-row + .relay-chain-row { border-top: 1px solid var(--border-soft); }
+.relay-chain-time {
+    flex: 0 0 auto;
+    min-width: 46px;
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent-strong);
+    font-weight: 600;
+    padding-top: 1px;
+}
+.relay-chain-body { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.relay-chain-what { font-size: 12.5px; color: var(--ink); }
+.relay-chain-why { font-size: 11px; color: var(--muted-dim); line-height: 1.5; }
+.relay-chain-row.is-quiet .relay-chain-time { color: var(--muted-dim); }
+.relay-chain-row.is-cut .relay-chain-time { color: var(--warn); }
+.relay-chain-empty {
+    padding: 12px 13px;
+    font-size: 12.5px;
+    color: var(--muted);
+    background: var(--panel);
+}
+
+/* ---- What has actually happened ---- */
+.relay-live {
+    margin-top: 16px;
+    padding: 12px 14px;
+    border: 1px solid var(--border-soft);
+    border-radius: 10px;
+    background: var(--panel-2);
+}
+.relay-live[hidden] { display: none; }
+.relay-live-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+.relay-live-row + .relay-live-row { margin-top: 7px; }
+.relay-live-key {
+    font-family: var(--mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.07em;
+    color: var(--muted-dim);
+    white-space: nowrap;
+}
+.relay-live-value { font-size: 12.5px; color: var(--ink); text-align: right; min-width: 0; }
+.relay-live-value--idle { color: var(--muted-dim); }
+.relay-live-at { font-size: 11px; color: var(--muted-dim); }
+.relay-live-row--error .relay-live-value { color: var(--ink); }
+
+/* ---- The line that says what would be refused ---- */
+/* Same shape as the calibration status line: no colour of its own, the icon
+   carries the severity, exactly like the notifications. */
+.relay-check {
+    display: flex;
+    align-items: flex-start;
+    gap: 9px;
+    margin-top: 14px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--panel-2);
+    font-size: 12.5px;
+    line-height: 1.55;
+    color: var(--ink);
+}
+.relay-check.d-none { display: none; }
+.relay-check-icon { flex: 0 0 auto; margin-top: 2px; color: var(--accent); font-size: 13px; }
+.relay-check--success .relay-check-icon { color: var(--green); }
+.relay-check--warning .relay-check-icon { color: var(--warn); }
+.relay-check--error .relay-check-icon { color: var(--red); }
+
+/* The Settings copy of that line sits between Keep Alive and the button, so it
+   needs the spacing of a block rather than of a dialog footer. */
+#relay-constraint { margin-top: 0; margin-bottom: 12px; }
+
+@media (max-width: 768px) {
+    .relay-state { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .relay-live-row { flex-direction: column; gap: 2px; }
+    .relay-live-value { text-align: left; }
+    .relay-chain-row { gap: 10px; }
+    .relay-chain-time { min-width: 40px; }
+    .relay-footer { flex-direction: column-reverse; align-items: stretch; }
+    .relay-footer .btn { width: 100%; }
+    .relay-open { width: 100%; justify-content: center; }
 }

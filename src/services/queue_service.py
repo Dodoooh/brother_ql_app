@@ -83,6 +83,28 @@ class PrintQueueService:
         # state.
         self._resume_event = threading.Event()
         self._resume_event.set()
+        # Optional callable run once per job, immediately before the job is
+        # marked "printing". See set_pre_job_gate.
+        self._pre_job_gate: Optional[Callable[[], Any]] = None
+
+    def set_pre_job_gate(self, gate: Optional[Callable[[], Any]]) -> None:
+        """Install a callable run just before each job starts.
+
+        The gate runs while the job is still in the "queued" state and may block
+        for as long as it needs to; anything it raises fails that job with the
+        raised message and the worker moves on to the next one.
+
+        This is how relay power control hooks in: a job that arrives at a
+        printer whose mains supply is switched off waits here, in the queue,
+        while the relay is closed and the printer boots -- rather than failing
+        because the printer happened to be off. The queue keeps knowing nothing
+        about relays or printers; it only knows that something may need to
+        happen before a job may start.
+
+        Args:
+            gate: ``gate() -> None``, or None to remove the current one.
+        """
+        self._pre_job_gate = gate
 
     # ------------------------------------------------------------------ #
     # Persisted job-file helpers
@@ -430,6 +452,33 @@ class PrintQueueService:
                 with self._lock:
                     job = self._jobs.get(job_id)
                     # Skip vanished or already-cancelled jobs.
+                    if job is None or job["status"] == "cancelled":
+                        continue
+
+                # Run the pre-job gate while the job is still "queued", so a job
+                # waiting for its printer to be powered up shows as waiting
+                # rather than as printing -- and still counts as pending work,
+                # which is what stops the relay switching off underneath it.
+                gate = self._pre_job_gate
+                if gate is not None:
+                    try:
+                        gate()
+                    except Exception as e:  # noqa: BLE001 - fail this job, keep the worker
+                        error = str(e)
+                        logger.error("Pre-job gate failed", job_id=job_id,
+                                     error=error, exc_info=True)
+                        with self._lock:
+                            job = self._jobs.get(job_id)
+                            if job is not None:
+                                job["status"] = "failed"
+                                job["error"] = error
+                                job["finished_at"] = _now_iso()
+                        continue
+
+                with self._lock:
+                    job = self._jobs.get(job_id)
+                    # The gate may have taken a while; re-check the job is still
+                    # there and was not cancelled meanwhile.
                     if job is None or job["status"] == "cancelled":
                         continue
                     job["status"] = "printing"

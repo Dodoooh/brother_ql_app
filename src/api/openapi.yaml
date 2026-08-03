@@ -139,6 +139,36 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  /printers/relay-power:
+    get:
+      summary: Get relay power-control status
+      description: >-
+        Reports the state of relay power control: whether it is switched on, the
+        timing chain it derives from the settings, when the "turn_off" webhook is
+        next due, and the outcome of the most recent webhook.
+
+
+        Read-only and side-effect free — it never sends a webhook and never
+        contacts the printer.
+
+
+        While relay power control is enabled together with its turn_off half, the
+        response carries a `warning` field naming the one thing the app cannot
+        check on the user's behalf: that printer_auto_power_off_minutes matches
+        what the device is really set to. Show it wherever the setting is made.
+      operationId: api.printer_controller.get_relay_power_status
+      tags:
+        - printer
+      responses:
+        '200':
+          description: Relay power-control status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RelayPowerStatus'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
   /text/print:
     post:
       summary: Print text on a label
@@ -1171,7 +1201,124 @@ components:
           type: boolean
           description: Whether the keep alive thread is currently running
           example: true
-    
+
+    RelayPowerStatus:
+      type: object
+      description: >-
+        The state of relay power control and the timing chain it derives from
+        the settings. Every duration is in seconds; every moment is a unix
+        timestamp.
+      properties:
+        enabled:
+          type: boolean
+          description: Whether relay power control is switched on.
+          example: false
+        turn_off_enabled:
+          type: boolean
+          description: Whether the "turn_off" half of the feature is switched on.
+          example: false
+        turn_on_url_configured:
+          type: boolean
+          description: >-
+            Whether a turn_on URL is set. The URL itself is not returned; it can
+            carry a token in its query string, and this endpoint is about state.
+          example: false
+        turn_off_url_configured:
+          type: boolean
+          description: >-
+            Whether a URL is available for turn_off, counting the fallback to the
+            turn_on URL.
+          example: false
+        authorization_configured:
+          type: boolean
+          description: >-
+            Whether RELAY_WEBHOOK_AUTHORIZATION is set in the environment, so an
+            Authorization header will be sent. The value itself is never returned.
+          example: false
+        printer_auto_power_off_minutes:
+          type: integer
+          description: The printer's own auto-power-off interval as configured.
+          example: 10
+        configured_window_seconds:
+          type: integer
+          nullable: true
+          description: >-
+            The window the user asked for, measured from the last print. Null
+            when no timed keep-alive window is in force, in which case nothing is
+            scheduled.
+          example: 14400
+        effective_keep_alive_seconds:
+          type: integer
+          nullable: true
+          description: >-
+            How long the keep-alive heartbeat actually runs after a print: the
+            configured window minus the printer's own auto-power-off interval,
+            so the device sleeps at exactly the configured moment. Zero is a real
+            answer, not a disabled feature — it means the hardware timer carries
+            the whole window. Null when the heartbeat runs continuously.
+          example: 13800
+        turn_off_delay_seconds:
+          type: integer
+          description: The safety margin between the window closing and turn_off.
+          example: 300
+        scheduled_turn_off_at:
+          type: number
+          format: double
+          nullable: true
+          description: >-
+            When the turn_off webhook is next due, as a unix timestamp, or null
+            when nothing is scheduled. Persisted, so it survives a restart.
+          example: 1767225600.0
+        seconds_until_turn_off:
+          type: number
+          format: double
+          nullable: true
+          description: Seconds remaining until that moment, or null.
+          example: 14700.0
+        last_action:
+          type: string
+          nullable: true
+          description: The most recent webhook that was delivered successfully.
+          enum: [turn_on, turn_off, null]
+          example: null
+        last_action_at:
+          type: string
+          nullable: true
+          description: When that webhook was sent (ISO-8601 UTC).
+          example: null
+        last_error:
+          type: string
+          nullable: true
+          description: >-
+            The most recent webhook failure, or null. A webhook that could not be
+            delivered is reported here as well as logged — it is never treated as
+            one that was.
+          example: null
+        last_error_at:
+          type: string
+          nullable: true
+          description: When that failure happened (ISO-8601 UTC).
+          example: null
+        warning:
+          type: string
+          description: >-
+            Always present. Names the one thing the app cannot verify — that
+            printer_auto_power_off_minutes matches the device — and what happens
+            if it does not. Sent unconditionally because the moment it is most
+            needed is while someone decides whether to arm the turn-off;
+            withholding it until they have would be exactly backwards. Display
+            it where the setting is made.
+          example: >-
+            This app cannot read or change the printer's built-in auto-power-off
+            time…
+        warning_armed:
+          type: boolean
+          description: >-
+            Whether the warning describes a live hazard (relay control and its
+            turn_off half both on) rather than a caution about what arming it
+            would mean. Lets a client show the same wording at two weights.
+          example: false
+
     KeepAliveRequest:
       type: object
       properties:
@@ -1425,11 +1572,20 @@ components:
 
 
         The steps are tried in a fixed order and the first that yields exactly
-        one identifier wins: the label type last settled on for this medium
+        one identifier wins: the variant declared for this medium
+        (`media_preference`), then the label type last settled on for it
         (`media_memory`), then the one candidate the user says they own
         (`owned_media`), then the documented plain variant -- 62 over 62red, 12
-        over 12+17, 103 over 104. Each of the three is something the user said;
+        over 12+17, 103 over 104. Each of the four is something the user said;
         none of them is a tie-break the app invented.
+
+
+        The preference comes ahead of the memory deliberately. The memory is
+        inferred -- it is what happened last time. The preference is stated. A
+        standing instruction that any single contrary pick could repeal would
+        not be a standing instruction, so a run of plain 62 labels on a roll
+        preferred as 62red is still remembered, it just does not outrank the
+        preference.
       properties:
         label_size:
           type: string
@@ -1444,18 +1600,20 @@ components:
           type: string
           nullable: true
           description: >-
-            Which step settled it. `detection` = the printer's report left only
-            one possibility; `memory` = this is what was last used on this
-            medium; `owned` = it is the only candidate in owned_media;
-            `default` = the documented plain variant of an ambiguous medium.
-            Null when nothing settled it.
-          enum: [detection, memory, owned, default]
+            Which step settled it, and therefore what a UI can say about why
+            this candidate won. `detection` = the printer's report left only one
+            possibility; `preference` = it is the variant set as preferred for
+            this medium in media_preference; `memory` = this is what was last
+            used on this medium; `owned` = it is the only candidate in
+            owned_media; `default` = the documented plain variant of an
+            ambiguous medium. Null when nothing settled it.
+          enum: [detection, preference, memory, owned, default]
           nullable: true
-          example: memory
+          example: preference
         reason:
           type: string
           description: Why this candidate won, or why no candidate could.
-          example: "62red was the label type last used on this medium"
+          example: "62red is the variant set as preferred for this medium"
 
     MediaAutoSwitch:
       type: object
@@ -2106,7 +2264,156 @@ components:
             Maintained by the app while media_auto_switch is on — an entry is
             recorded when a settings write moves label_size to something the
             currently loaded medium could actually be, which is the point at
-            which a choice has been settled rather than merely written.
+            which a choice has been settled rather than merely written. That
+            recording continues even for a medium that has a media_preference:
+            the two answer different questions — what happened, and what was
+            meant — and clearing a preference should fall back to the user's
+            most recent real choice rather than to whatever predated it.
+        media_preference:
+          allOf:
+            - $ref: '#/components/schemas/MediaPreferenceMap'
+          description: >-
+            Which variant of a medium you mean when both are possible: "for
+            62 mm rolls, the red one". Consulted **first**, ahead of
+            media_memory, owned_media and the plain-variant default.
+
+
+            It exists because ownership was meant to settle these three media
+            and mostly cannot. 12/12+17 and 103/104 are one physical roll under
+            two identifiers, so nobody can own one without the other; and
+            62/62red is settled by ownership only for someone who owns the red
+            roll and no plain one. Own a black roll and a black/red roll — the
+            ordinary case, on the one medium where a wrong guess yields a
+            finished bad label rather than an error — and ownership narrows
+            nothing.
+
+
+            Empty by default: an installation that never sets one resolves
+            exactly as it did before.
+        relay_webhook_enabled:
+          type: boolean
+          description: >-
+            Switch the printer's mains supply through a relay driven over a
+            webhook, so it draws nothing between print runs.
+
+
+            When a print job arrives and the printer does not answer, a
+            "turn_on" webhook is fired and **the job waits in the queue** while
+            the printer boots, rather than failing. Optionally a "turn_off"
+            webhook is sent once everything has wound down.
+
+
+            Off by default. While it is off no outbound request is ever made,
+            the keep-alive timing is exactly what it has always been, and every
+            other relay_* setting is inert.
+          example: false
+          default: false
+        relay_webhook_turn_on_url:
+          type: string
+          description: >-
+            URL POSTed to switch the printer on. Required once
+            relay_webhook_enabled is true.
+
+
+            The body is JSON — `{"action": "turn_on", "source":
+            "brother_ql_app", "printer_uri": "tcp://192.168.1.100",
+            "printer_model": "QL-800", "timestamp": "<ISO-8601 UTC>"}` — and
+            "action" is the only field a relay flow needs to branch on. The rest
+            is context, so one flow serving two printers can tell which asked.
+
+
+            http:// and https:// only. LAN and private addresses are allowed,
+            because that is where a relay lives; link-local, loopback and cloud
+            metadata endpoints are refused.
+
+
+            If the endpoint needs a credential, set the
+            RELAY_WEBHOOK_AUTHORIZATION environment variable and its value is
+            sent verbatim as the Authorization header. It is deliberately not a
+            setting: settings are returned in full by GET /settings, so a secret
+            stored here would be handed to every client that can read the
+            configuration.
+          example: "http://192.168.1.42/relay/0?turn=on"
+          default: ""
+        relay_webhook_turn_off_url:
+          type: string
+          description: >-
+            URL POSTed to cut power. Optional — empty means "use
+            relay_webhook_turn_on_url", which is right for a relay that switches
+            on the body it is sent. A separate URL exists because many relays
+            switch on the address instead (…/relay/0?turn=on versus
+            …/relay/0?turn=off) and never read the body. The body is the same
+            shape as for turn_on, with "action": "turn_off".
+          example: "http://192.168.1.42/relay/0?turn=off"
+          default: ""
+        relay_webhook_turn_off_enabled:
+          type: boolean
+          description: >-
+            Whether to send the "turn_off" webhook at all. Opt-in separately
+            from relay_webhook_enabled: cutting mains power is the half of this
+            feature that can go wrong, so switching the feature on does not
+            switch this on with it.
+
+
+            Requires keep-alive enabled in "timed" mode with a non-zero
+            keep_alive_duration_seconds. The turn-off moment is measured from
+            the end of that window; without an expiry there is no origin to
+            measure from, and the combination is rejected.
+
+
+            ⚠️ Read the warning on printer_auto_power_off_minutes before
+            enabling this. Sending "turn_off" is the only thing here that can
+            physically damage the printer.
+
+
+            Never fires while a job is queued or printing — pending work resets
+            the clock, whatever the rest of the configuration says. The
+            scheduled moment is persisted, so a restart mid-window does not
+            strand the relay in the on state.
+          example: false
+          default: false
+        relay_webhook_turn_off_delay_minutes:
+          type: integer
+          description: >-
+            How long after the configured window closes the "turn_off" webhook
+            goes out. This is the safety margin that lets the printer's own
+            auto-power-off complete before the mains are cut.
+          example: 5
+          default: 5
+          minimum: 0
+          maximum: 60
+        printer_auto_power_off_minutes:
+          type: integer
+          description: >-
+            The printer's own built-in auto-power-off interval, in minutes, as
+            set on the device. Only the six values the device's menu offers are
+            accepted; a free field could only ever hold a number the printer
+            cannot be set to.
+
+
+            While relay power control is on, this is subtracted from
+            keep_alive_duration_seconds so the printer sleeps at exactly the
+            moment configured rather than that moment plus its own timer. With a
+            4 h window and a 10 min device timer: keep-alive stops at 3:50, the
+            printer switches itself off at 4:00, and "turn_off" goes out at 4:05.
+
+
+            A duration equal to this interval is valid and intended — the
+            keep-alive heartbeat then does nothing and the hardware carries the
+            whole window. A duration shorter than it is rejected: the window
+            would have to end before it began.
+
+
+            ⚠️ **This app cannot read or change the printer's built-in
+            auto-power-off time.** The value here is a statement about the
+            device, not a setting on it, and nothing verifies the two agree. Set
+            it to exactly what the printer's own menu shows. **If the real
+            interval on the device is LONGER than the value configured here, the
+            relay will cut mains power while the printer is still running, which
+            can interrupt a print mid-feed and can damage the printer.**
+          example: 10
+          default: 10
+          enum: [10, 20, 30, 40, 50, 60]
       required:
         - printer_uri
         - printer_model
@@ -2208,6 +2515,41 @@ components:
         name. This is the one setting that can change label_size without the
         user acting, so an entry that would switch a continuous roll to a
         die-cut label size is caught at the door rather than at the printer.
+      additionalProperties:
+        type: string
+      example:
+        "62": "62red"
+
+    MediaPreferenceMap:
+      type: object
+      description: >-
+        The variant that wins for each medium, keyed exactly as MediaMemoryMap
+        is — on the medium's **plain variant**, "62" for the 62 mm continuous
+        roll, "12" for the 12 mm one, "103" for the 103/104 pair — and for the
+        same reasons: the key has to name the medium rather than the detection
+        if it is to survive a catalogue that grows a variant, reorders a table
+        or quantises a measurement.
+
+
+        `{"62": "62red"}` reads "when a 62 mm roll is loaded, I mean the red
+        one", and it is consulted before the memory. The memory is inferred from
+        what happened last; this is a statement of intent, and one contrary pick
+        on some Tuesday should not overwrite it.
+
+
+        The value must be one of the identifiers that medium can be addressed
+        by. `{"62": "d24"}` is rejected by name, as is a key that is itself a
+        variant — `{"62red": "62red"}` would file a preference under a name the
+        resolution never looks up. Of the settings that can move label_size
+        without you acting this is the one with the most authority, so both
+        halves are checked at the door.
+
+
+        A preference for a medium that has only one variant — `{"d24": "d24"}` —
+        is accepted and does nothing: detection already resolves such a medium
+        on its own, so the map is never consulted for it. It is not rejected
+        because it states something true, and because a medium with one variant
+        today may have two after a brother_ql upgrade.
       additionalProperties:
         type: string
       example:

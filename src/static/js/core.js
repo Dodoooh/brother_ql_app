@@ -438,6 +438,14 @@ function setupEventListeners() {
         setupCalibration();
     }
 
+    // ---- Relay power control (Settings summary + dialog) ----
+    // No polling of its own: the status is refreshed by the printer-status
+    // check that already runs on load, every 30 s and on the refresh button,
+    // and the countdown between those is repainted locally.
+    if (typeof setupRelayPower === 'function') {
+        setupRelayPower();
+    }
+
     // ---- Print queue wiring (polling + actions) ----
     setupQueue();
 

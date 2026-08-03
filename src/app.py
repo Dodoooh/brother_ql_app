@@ -17,6 +17,7 @@ from src.utils.auth import auth_enabled, is_valid_api_key, API_KEY_HEADER
 from src.services.printer_service import printer_service
 from src.services.settings_service import settings_service
 from src.services.queue_service import print_queue
+from src.services.relay_service import relay_service
 
 # Configure structured logging
 structlog.configure(
@@ -148,8 +149,18 @@ def create_app():
     # Register routes
     register_routes(app)
 
+    # Relay power control: let a job that arrives at a switched-off printer wait
+    # in the queue while the relay is closed, instead of failing. The gate is a
+    # no-op when the feature is disabled, which is the default.
+    print_queue.set_pre_job_gate(relay_service.ensure_printer_powered)
+
     # Start the in-process print-queue worker thread (idempotent).
     print_queue.start()
+
+    # Start the relay turn-off scheduler. It ticks once immediately, which is
+    # what recovers a turn-off moment that fell due while the app was down --
+    # without it, a restart mid-window would leave the relay on forever.
+    relay_service.start()
 
     # Start the keep-alive feature (if enabled in settings)
     init_keep_alive()

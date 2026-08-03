@@ -565,6 +565,20 @@ function filterLabelEntries(query) {
 }
 
 /**
+ * The picker's reading order for two entries: ascending width, then length,
+ * then identifier. Shared by every group, so a roll sits in the same relative
+ * place wherever it is shown.
+ * @param {Object} a - a catalogue entry
+ * @param {Object} b - a catalogue entry
+ * @returns {number} the usual comparator sign
+ */
+function compareLabelEntries(a, b) {
+    return a.width_mm - b.width_mm ||
+        (a.length_mm || 0) - (b.length_mm || 0) ||
+        a.identifier.localeCompare(b.identifier);
+}
+
+/**
  * Split entries into the picker's groups, in group order, each sorted by
  * ascending width (then length, then identifier). Empty groups are dropped.
  * @param {Object[]} entries - catalogue entries
@@ -576,11 +590,7 @@ function groupLabelEntries(entries) {
     LABEL_GROUPS.forEach(group => {
         const members = entries
             .filter(entry => labelGroupKey(entry.form) === group.form)
-            .sort((a, b) => (
-                a.width_mm - b.width_mm ||
-                (a.length_mm || 0) - (b.length_mm || 0) ||
-                a.identifier.localeCompare(b.identifier)
-            ));
+            .sort(compareLabelEntries);
         if (members.length > 0) {
             groups.push({ title: group.title, entries: members });
         }
@@ -809,6 +819,31 @@ function loadedLabelEntries() {
 }
 
 /**
+ * The entries to show under "My media": the ones the user says they own, minus
+ * anything already shown as loaded.
+ *
+ * It is fed the query's matches rather than the whole catalogue, so the group
+ * narrows with the search like every other group does - searching for a roll
+ * you own finds it under "My media" instead of hiding it, and searching for one
+ * you do not own simply leaves the group out. Owning nothing leaves it out too,
+ * which is the default and wants no heading and no prompt.
+ *
+ * Ownership is read through media.js's ownsMedium() behind a guard, the same
+ * way buildLabelOption() reads it, so labels.js still stands up on its own.
+ *
+ * @param {Object[]} entries - the catalogue entries matching the query
+ * @param {Object} isLoaded - identifier -> true for the rows already shown as
+ *   loaded, which are not repeated here
+ * @returns {Object[]} owned entries in the picker's usual reading order
+ */
+function ownedLabelEntries(entries, isLoaded) {
+    if (typeof ownsMedium !== 'function') return [];
+    return entries
+        .filter(entry => !isLoaded[entry.identifier] && ownsMedium(entry.identifier))
+        .sort(compareLabelEntries);
+}
+
+/**
  * Wire up the label picker. Called from setupEventListeners() in core.js.
  */
 function setupLabelPicker() {
@@ -1031,7 +1066,7 @@ function openLabelPicker(hostId) {
     trigger.setAttribute('aria-expanded', 'true');
     search.setAttribute('aria-expanded', 'true');
     search.setAttribute('placeholder', labelPickerMode === 'own'
-        ? 'Search the media you have — DK-11218, 62x29, round…'
+        ? 'Find a roll to tick — DK-11218, 62x29, round…'
         : 'Search DK-11218, 62x29, round, shipping…');
     if (list) {
         // Ticking several rolls off a list is a multi-select; saying so is what
@@ -1154,6 +1189,19 @@ function buildLabelOption(entry, current, loaded) {
         tick.className = owned ? 'bi bi-check-square-fill lp-tick' : 'bi bi-square lp-tick';
         tick.setAttribute('aria-hidden', 'true');
         head.appendChild(tick);
+
+        // Room for a preferred-variant control, when there is one to build.
+        // Ticking both 62 and 62red is the case ownership cannot decide, and
+        // the conflict is visible here, on the tick that caused it - so this is
+        // where the choice belongs, appended to `head` after the tick. The row
+        // is in that state exactly when
+        //
+        //   (MEDIA_VARIANT_GROUPS[mediaMemoryKeyFor(entry.identifier)] || [])
+        //       .filter(ownsMedium).length > 1
+        //
+        // using only what media.js already exports. It also needs a stored
+        // preference of its own and a place for it in the resolution order,
+        // neither of which is invented here.
     }
 
     const name = document.createElement('span');
@@ -1221,22 +1269,40 @@ function renderLabelPickerList(query) {
     const matches = filterLabelEntries(query).filter(entry => available[entry.identifier]);
     const current = select.value;
 
-    // What the printer says is in it goes first, as a group of its own, and is
-    // taken out of the ordinary groups rather than repeated in them: one row per
-    // identifier keeps the ids unique and the arrow keys sane. Everything else
-    // stays exactly where it was, because preparing a job for a roll that is
-    // not loaded is a perfectly ordinary thing to do.
+    // Two shortcuts sit above the catalogue, in this order:
     //
-    // Not in "own" mode: that list is about the cupboard, not about the
-    // printer, and promoting the loaded roll in it would suggest that ticking
-    // a row says something about what is in the machine right now.
+    //   1. what the printer says is in it. At most two rows, it is the answer
+    //      to "which one should I pick right now" almost every time the list is
+    //      opened, and when it is ambiguous it carries the explanation and the
+    //      "pick one" heading. It keeps the top spot: a personal shortlist of
+    //      unbounded length above it could push the actionable row out of view,
+    //      and that is the one moment the picker exists for.
+    //   2. "My media" - what the user says they own. Most people have three or
+    //      four rolls, and finding them should not mean reading thirty rows.
+    //
+    // Both are taken out of the ordinary groups rather than repeated in them:
+    // one row per identifier keeps the ids unique and the arrow keys sane. A
+    // roll that is both loaded and owned appears once, under "Loaded in the
+    // printer", so the two groups never claim the same row. Everything else
+    // stays exactly where it was, because preparing a job for a roll that is
+    // not loaded - or not owned yet - is a perfectly ordinary thing to do.
+    //
+    // Neither in "own" mode: that list is about the cupboard, not about the
+    // printer, promoting the loaded roll in it would suggest that ticking a row
+    // says something about what is in the machine right now, and hoisting the
+    // ticked rows would make every tick shuffle the list under the cursor -
+    // which is precisely the case that list is built to make quick.
     const owning = labelPickerMode === 'own';
     const loadedEntries = owning ? [] : loadedLabelEntries();
     const isLoaded = {};
     loadedEntries.forEach(entry => { isLoaded[entry.identifier] = true; });
 
     const loadedMatches = matches.filter(entry => isLoaded[entry.identifier]);
-    const groups = groupLabelEntries(matches.filter(entry => !isLoaded[entry.identifier]));
+    const mineMatches = owning ? [] : ownedLabelEntries(matches, isLoaded);
+    const isMine = {};
+    mineMatches.forEach(entry => { isMine[entry.identifier] = true; });
+    const groups = groupLabelEntries(matches.filter(entry =>
+        !isLoaded[entry.identifier] && !isMine[entry.identifier]));
 
     list.innerHTML = '';
     let firstIdentifier = null;
@@ -1246,8 +1312,9 @@ function renderLabelPickerList(query) {
         const note = document.createElement('li');
         note.className = 'lp-groupnote lp-groupnote--lead';
         note.setAttribute('role', 'presentation');
-        note.textContent = 'Tick every roll you actually have. When the printer reports a ' +
-            'medium it cannot pin down, the app offers only the ones on this list.';
+        note.textContent = 'Tick the rolls you actually have. They get a "My media" group at ' +
+            'the top of the label picker, so the few you use are the first thing you see ' +
+            'instead of all thirty.';
         list.appendChild(note);
     }
 
@@ -1274,6 +1341,22 @@ function renderLabelPickerList(query) {
         const mark = loadedEntries.length > 1 ? 'one-of' : 'only';
         loadedMatches.forEach(entry => {
             list.appendChild(buildLabelOption(entry, current, mark));
+            if (firstIdentifier === null) firstIdentifier = entry.identifier;
+            if (entry.identifier === current) currentVisible = true;
+        });
+    }
+
+    // The user's own rolls. No heading when there are none to put under it, so
+    // the default - owning nothing - looks exactly like the list always did.
+    if (mineMatches.length > 0) {
+        const head = document.createElement('li');
+        head.className = 'lp-grouphead lp-grouphead--mine';
+        head.setAttribute('role', 'presentation');
+        head.textContent = 'My media';
+        list.appendChild(head);
+
+        mineMatches.forEach(entry => {
+            list.appendChild(buildLabelOption(entry, current, ''));
             if (firstIdentifier === null) firstIdentifier = entry.identifier;
             if (entry.identifier === current) currentVisible = true;
         });

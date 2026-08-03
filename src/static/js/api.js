@@ -136,6 +136,13 @@ async function loadSettings() {
             setCalibrationMap(settings.calibration);
         }
 
+        // Relay power control. The configuration is read from here rather than
+        // from the status endpoint, so the panel still describes itself
+        // correctly on a server build that has no status endpoint yet.
+        if (typeof applyRelaySettings === 'function') {
+            applyRelaySettings(settings);
+        }
+
         // Also check the current keep alive status
         loadKeepAliveStatus();
         
@@ -290,7 +297,15 @@ async function checkPrinterStatus() {
     const statusResult = document.getElementById('status-result');
     const statusIndicator = document.getElementById('status-indicator');
     const navbarStatusBtn = document.getElementById('navbar-check-status');
-    
+
+    // Relay power control rides along with the status check rather than
+    // polling on its own: it is asked on load, every 30 s and on the manual
+    // refresh, which is the same cadence everything else in the top bar
+    // follows. It is deliberately not awaited — the printer check must not wait
+    // on it, and it reports its own failures.
+    if (typeof refreshRelayStatus === 'function') refreshRelayStatus();
+
+
     // Show loading state
     if (statusResult) {
         statusResult.innerHTML = '<div class="d-flex justify-content-center"><div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div></div>';
@@ -1241,7 +1256,23 @@ async function handleSaveSettings(event) {
         if (keepAliveInterval < 10) {
             throw new Error('Keep alive interval must be at least 10 seconds');
         }
-        
+
+        // Relay power control puts two rules on the keep-alive window, and the
+        // server enforces them on the settings document as a whole: a window
+        // shorter than the printer's own auto-power-off interval, or no timed
+        // window at all while turn_off is armed, is refused. Saying so here
+        // keeps the refusal from arriving as a failed save of everything else
+        // in this form. The line in the Mains Power block says the same thing
+        // in place, next to the fields it is about.
+        if (typeof relayKeepAliveBlocker === 'function') {
+            const blocked = relayKeepAliveBlocker();
+            if (blocked) {
+                showNotification(blocked, 'warning', 12000);
+                return;
+            }
+        }
+
+
         // Show loading state
         const submitBtn = event.target.querySelector('button[type="submit"]');
         const originalBtnText = submitBtn.innerHTML;
@@ -1294,6 +1325,13 @@ async function handleSaveSettings(event) {
         
         showNotification('Settings saved successfully', 'success');
         console.log('Settings saved:', data);
+
+        // The keep-alive window is half of the relay's timing chain, so the
+        // relay panel is told what is now stored rather than left comparing
+        // against the values this save replaced.
+        if (typeof relayNoteKeepAliveSaved === 'function') {
+            relayNoteKeepAliveSaved(keepAliveEnabled, keepAliveMode, keepAliveDurationSeconds);
+        }
         
         // Update keep alive status based on new settings
         await updateKeepAlive(keepAliveEnabled, keepAliveInterval);

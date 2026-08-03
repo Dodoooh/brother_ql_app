@@ -50,7 +50,9 @@ let calibrationMap = {};
 
 // ---- State of the currently open dialog ----
 
-// Label identifier being calibrated (taken from #label-size when opening).
+// Label identifier being calibrated. The dialog's own, deliberately not read
+// back out of #label-size: it may be a medium other than the configured one,
+// and opening it must not change what the app prints on.
 let calibrationLabelSize = '';
 
 // Working value, not yet saved.
@@ -831,6 +833,21 @@ function renderCalibrationMedium() {
             : 'not calibrated';
         stateEl.classList.toggle('is-set', !!calibrationSaved);
     }
+
+    // The dialog can be open on a medium other than the one the app is set to
+    // print on, and it no longer changes that by being opened — so it says so,
+    // rather than leaving two different media on screen unexplained.
+    const elsewhereEl = document.getElementById('cal-medium-elsewhere');
+    if (elsewhereEl) {
+        const labelSizeEl = document.getElementById('label-size');
+        const configured = labelSizeEl ? labelSizeEl.value : '';
+        const differs = !!configured && configured !== calibrationLabelSize;
+        elsewhereEl.hidden = !differs;
+        elsewhereEl.textContent = differs
+            ? `The app still prints on ${calibrationMediumName(configured)} (${configured}); ` +
+              'calibrating here does not change that.'
+            : '';
+    }
 }
 
 /**
@@ -905,24 +922,25 @@ function loadCalibrationTargetPreview() {
 /**
  * Open the calibration dialog for a label type.
  *
- * The label type comes from the settings form's <select id="label-size">, which
- * stays the single source of truth: opening the dialog for another medium
- * selects it there first, so the rest of the app follows along.
+ * The dialog carries its own target medium and does not touch
+ * <select id="label-size">. Every label change is now written to the server the
+ * moment it is made, so selecting the row's medium there would mean that
+ * opening a stored calibration to look at it silently changed what the app
+ * prints on. A dialog opened to inspect something must not change anything.
+ *
+ * Nothing in the dialog needs the select: the calibration endpoints take
+ * `label_size` per request, and the round-media treatment, the banner and the
+ * target preview all read the identifier below.
  *
  * @param {string} [identifier] - label type to calibrate; defaults to the
- *     currently selected one
+ *     configured one
  */
 function openCalibrationDialog(identifier) {
     const labelSizeEl = document.getElementById('label-size');
     const modalEl = document.getElementById('calibrationModal');
-    if (!labelSizeEl || !modalEl) return;
+    if (!modalEl) return;
 
-    if (identifier && identifier !== labelSizeEl.value) {
-        labelSizeEl.value = identifier;
-        labelSizeEl.dispatchEvent(new Event('change', { bubbles: true }));
-    }
-
-    calibrationLabelSize = labelSizeEl.value;
+    calibrationLabelSize = identifier || (labelSizeEl ? labelSizeEl.value : '');
     if (!calibrationLabelSize) {
         showNotification('Select a label type first', 'warning');
         return;

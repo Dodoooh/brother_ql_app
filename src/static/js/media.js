@@ -322,7 +322,15 @@ let mediaRecheckTimers = [];
 /** Whether the app follows the printer by itself. */
 let mediaAutoSwitch = false;
 
-/** Label identifiers the user says they own; empty means "no list given". */
+/**
+ * Label identifiers the user says they own; empty means "no list given".
+ *
+ * This is first of all what makes a thirty-entry picker usable: the rolls on it
+ * get a "My media" group at the top of the list, which is where three or four
+ * media out of thirty belong. That it also narrows an ambiguous detection when
+ * it happens to leave exactly one candidate is a side effect worth keeping -
+ * see narrowByOwnedMedia - not the reason the list exists.
+ */
 let ownedMedia = [];
 
 /** Medium key -> the identifier last settled on for it. */
@@ -585,6 +593,10 @@ function ownsMedium(identifier) {
 /**
  * Add or remove a label type from the list of media the user owns, and store
  * the list straight away - it is a statement about the room, not a draft.
+ *
+ * Re-narrowing afterwards is what makes the change take effect on the roll that
+ * is in the printer right now; the picker's "My media" group is rebuilt from
+ * the same call, because that repaints an open list.
  * @param {string} identifier - a label type identifier
  */
 function toggleOwnedMedium(identifier) {
@@ -647,6 +659,13 @@ function setMediaAutoSwitch(enabled) {
 
 /**
  * Narrow a report to the media the user says they own.
+ *
+ * A side effect of the owned list rather than its purpose. It settles very
+ * little on its own - 12/12+17 and 103/104 are one physical roll under two
+ * identifiers, so nobody owns one and not the other, and 62/62red is only
+ * decided for someone who has the red roll and no plain one. It costs nothing
+ * and it is occasionally right, so it stays; what makes the list worth keeping
+ * is the "My media" group at the top of the picker.
  *
  * Only ever applied to a genuine ambiguity, and only when something is left: a
  * list that rules out every candidate is a list that is out of date, and
@@ -1125,11 +1144,11 @@ function updateMediaMismatch() {
  */
 function ownedMediaSaveMessage() {
     if (ownedMedia.length === 0) {
-        return 'No media listed — every detected roll is offered.';
+        return 'Nothing listed — the label picker shows the whole catalogue.';
     }
     return ownedMedia.length === 1
-        ? '1 medium listed as yours.'
-        : ownedMedia.length + ' media listed as yours.';
+        ? '1 medium listed as yours — it leads the label picker.'
+        : ownedMedia.length + ' media listed as yours — they lead the label picker.';
 }
 
 /**

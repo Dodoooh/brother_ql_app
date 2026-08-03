@@ -3,11 +3,12 @@ Tests for resolving an ambiguous medium and for following the printer.
 
 Detection stops at "these are the identifiers the report is consistent with".
 Automatic switching needs one, and everything here is about where that extra bit
-of information comes from -- because it must never come from a coin flip. Three
+of information comes from -- because it must never come from a coin flip. Four
 sources are consulted in a fixed order, each of them something the *user* said:
-what was last used on this medium, what they own, and the documented plain
-variant. When none of them settles it, nothing is chosen; that case has its own
-tests, because it is the property that makes the feature defensible.
+the variant declared for this medium, what was last used on it, what they own,
+and the documented plain variant. When none of them settles it, nothing is
+chosen; that case has its own tests, because it is the property that makes the
+feature defensible.
 
 Everything runs offline: the media dicts come from the payloads captured from a
 QL-820NWB (``tests/media_payloads.py``), and the printer, the settings file and
@@ -28,6 +29,7 @@ from src.services.printer_service import (
     MEDIA_RESOLVED_BY_DETECTION,
     MEDIA_RESOLVED_BY_MEMORY,
     MEDIA_RESOLVED_BY_OWNED,
+    MEDIA_RESOLVED_BY_PREFERENCE,
     MEDIA_SWITCH_AMBIGUOUS,
     MEDIA_SWITCH_APPLY,
     MEDIA_SWITCH_NONE,
@@ -62,6 +64,7 @@ def _settings(**overrides):
         "media_auto_switch": DEFAULT_SETTINGS["media_auto_switch"],
         "owned_media": list(DEFAULT_SETTINGS["owned_media"]),
         "media_memory": dict(DEFAULT_SETTINGS["media_memory"]),
+        "media_preference": dict(DEFAULT_SETTINGS["media_preference"]),
     }
     base.update(overrides)
     return base
@@ -75,9 +78,10 @@ def test_automatic_switching_is_off_by_default():
     assert DEFAULT_SETTINGS["media_auto_switch"] is False
 
 
-def test_nothing_is_owned_or_remembered_by_default():
+def test_nothing_is_owned_remembered_or_preferred_by_default():
     assert DEFAULT_SETTINGS["owned_media"] == []
     assert DEFAULT_SETTINGS["media_memory"] == {}
+    assert DEFAULT_SETTINGS["media_preference"] == {}
 
 
 # --- the memory key ----------------------------------------------------------
@@ -134,7 +138,95 @@ def test_nothing_detected_resolves_to_nothing():
     assert result.resolved is False
 
 
-# --- step 2: memory ----------------------------------------------------------
+# --- step 2: the preferred variant -------------------------------------------
+#
+# The step that exists because ownership was supposed to settle these three
+# media and mostly cannot: 12/12+17 and 103/104 are one roll under two names, so
+# nobody owns one without the other, and 62/62red is settled by ownership only
+# for someone who owns the red roll and no plain one. Owning both makes it
+# ambiguous again -- which is exactly where a user with a black roll and a
+# black/red roll stands.
+
+@pytest.mark.parametrize("pair", AMBIGUOUS_PAIRS)
+def test_a_preference_resolves_an_ambiguous_medium(pair):
+    plain, other = pair
+    result = resolve_media_label(pair, _settings(media_preference={plain: other}))
+    assert result.label_size == other
+    assert result.resolved_by == MEDIA_RESOLVED_BY_PREFERENCE
+    assert other in result.reason
+    assert "preferred" in result.reason
+
+
+def test_the_user_story_owning_both_62mm_rolls_is_settled_by_the_preference():
+    """The case ownership cannot reach. Both rolls are in the cupboard, so the
+    owned list narrows nothing; the preference says which one is meant."""
+    settings = _settings(label_size="d24", owned_media=["62", "62red"],
+                         media_preference={"62": "62red"})
+    report = printer_service._media_report(_media_for("continuous-62mm"), "d24",
+                                           settings=settings)
+
+    assert report["candidates"] == ["62", "62red"]
+    assert report["resolution"]["label_size"] == "62red"
+    assert report["resolution"]["resolved_by"] == "preference"
+
+
+def test_a_preference_for_a_medium_that_is_not_loaded_does_nothing():
+    """A preference is filed per medium, so one for the 62 mm roll has no say
+    over a 12 mm roll -- or over any other medium in the machine."""
+    settings = _settings(media_preference={"62": "62red"})
+
+    twelve = resolve_media_label(("12", "12+17"), settings)
+    assert (twelve.label_size, twelve.resolved_by) == ("12", MEDIA_RESOLVED_BY_DEFAULT)
+
+    report = printer_service._media_report(_media_for("die-cut-24mm-round"), "62",
+                                           settings=settings)
+    assert report["resolution"]["label_size"] == "d24"
+    assert report["resolution"]["resolved_by"] == MEDIA_RESOLVED_BY_DETECTION
+
+
+def test_a_preferred_label_the_loaded_medium_cannot_be_is_ignored():
+    """Stale or nonsensical, it is skipped rather than trusted -- the same
+    bargain the memory makes, and the resolution simply carries on."""
+    result = resolve_media_label(("62", "62red"),
+                                 _settings(media_preference={"62": "d24"}))
+    assert result.label_size == "62"
+    assert result.resolved_by == MEDIA_RESOLVED_BY_DEFAULT
+
+
+def test_a_malformed_preference_never_costs_a_resolution():
+    for preference in ("62red", ["62red"], {"62": 62}, {"62": ""}):
+        result = resolve_media_label(("62", "62red"),
+                                     _settings(media_preference=preference))
+        assert result.label_size == "62"
+        assert result.resolved_by == MEDIA_RESOLVED_BY_DEFAULT
+
+
+def test_a_preference_can_pin_a_medium_to_its_plain_variant():
+    """Not a no-op: it stops the owned-media step from moving this medium to the
+    other variant, which is the whole point of stating one."""
+    settings = _settings(media_preference={"62": "62"}, owned_media=["62red"])
+    result = resolve_media_label(("62", "62red"), settings)
+    assert (result.label_size, result.resolved_by) == ("62", MEDIA_RESOLVED_BY_PREFERENCE)
+
+
+def test_a_preference_for_a_single_variant_medium_is_inert():
+    """A medium with one variant is resolved by detection before this map is
+    ever consulted, so the entry changes nothing either way."""
+    settings = _settings(media_preference={"d24": "d24"})
+    result = resolve_media_label(("d24",), settings)
+    assert (result.label_size, result.resolved_by) == ("d24", MEDIA_RESOLVED_BY_DETECTION)
+
+
+def test_a_preference_still_needs_a_medium_it_can_belong_to():
+    """No key means no preference, the same as no memory and no default: an
+    ambiguity nobody has documented is not resolved by accident."""
+    settings = _settings(media_preference={"62x29": "62x29"})
+    result = resolve_media_label(UNDOCUMENTED_PAIR, settings)
+    assert result.label_size is None
+    assert result.resolved_by is None
+
+
+# --- step 3: memory ----------------------------------------------------------
 
 @pytest.mark.parametrize("pair", AMBIGUOUS_PAIRS)
 def test_memory_resolves_an_ambiguous_medium(pair):
@@ -173,7 +265,7 @@ def test_a_malformed_memory_never_costs_a_resolution():
         assert result.resolved_by == MEDIA_RESOLVED_BY_DEFAULT
 
 
-# --- step 3: owned media -----------------------------------------------------
+# --- step 4: owned media -----------------------------------------------------
 
 @pytest.mark.parametrize("pair", AMBIGUOUS_PAIRS)
 def test_owning_exactly_one_candidate_resolves_it(pair):
@@ -212,7 +304,7 @@ def test_a_malformed_owned_list_is_ignored_rather_than_fatal():
     assert owned_media(None) == ()
 
 
-# --- step 4: the documented plain-variant default ----------------------------
+# --- step 5: the documented plain-variant default ----------------------------
 
 @pytest.mark.parametrize("plain, other", AMBIGUOUS_PAIRS)
 def test_the_plain_variant_is_the_default_for_every_known_pair(plain, other):
@@ -223,6 +315,42 @@ def test_the_plain_variant_is_the_default_for_every_known_pair(plain, other):
 
 
 # --- the order ---------------------------------------------------------------
+
+@pytest.mark.parametrize("pair", AMBIGUOUS_PAIRS)
+def test_the_preference_beats_a_contrary_memory(pair):
+    """The ordering the preference exists for. The memory is inferred -- what
+    happened last time; the preference is stated -- what was meant. A standing
+    instruction that one contrary afternoon could repeal would not be one."""
+    plain, other = pair
+    settings = _settings(media_preference={plain: other}, media_memory={plain: plain})
+    result = resolve_media_label(pair, settings)
+    assert (result.label_size, result.resolved_by) == (other, MEDIA_RESOLVED_BY_PREFERENCE)
+
+    # And the other way round, so it is the step order deciding rather than the
+    # values happening to favour one variant.
+    settings = _settings(media_preference={plain: plain}, media_memory={plain: other})
+    result = resolve_media_label(pair, settings)
+    assert (result.label_size, result.resolved_by) == (plain, MEDIA_RESOLVED_BY_PREFERENCE)
+
+
+def test_the_preference_beats_ownership():
+    settings = _settings(media_preference={"103": "104"}, owned_media=["103"])
+    result = resolve_media_label(("103", "104"), settings)
+    assert (result.label_size, result.resolved_by) == ("104", MEDIA_RESOLVED_BY_PREFERENCE)
+
+
+def test_the_preference_beats_the_plain_variant_default():
+    settings = _settings(media_preference={"12": "12+17"})
+    result = resolve_media_label(("12", "12+17"), settings)
+    assert (result.label_size, result.resolved_by) == ("12+17", MEDIA_RESOLVED_BY_PREFERENCE)
+
+
+def test_the_preference_beats_everything_below_it_at_once():
+    settings = _settings(media_preference={"62": "62red"}, media_memory={"62": "62"},
+                         owned_media=["62", "62red"])
+    result = resolve_media_label(("62", "62red"), settings)
+    assert (result.label_size, result.resolved_by) == ("62red", MEDIA_RESOLVED_BY_PREFERENCE)
+
 
 def test_memory_beats_ownership():
     settings = _settings(media_memory={"62": "62"}, owned_media=["62red"])
@@ -248,6 +376,52 @@ def test_all_three_steps_agree_when_they_all_apply():
     settings = _settings(media_memory={"62": "62"}, owned_media=["62"])
     result = resolve_media_label(("62", "62red"), settings)
     assert (result.label_size, result.resolved_by) == ("62", MEDIA_RESOLVED_BY_MEMORY)
+
+
+# --- with no preference, the chain is what it always was ---------------------
+
+def _without_preference(**overrides):
+    """Settings as an installation that predates the setting has them: the key
+    is not merely empty, it is absent."""
+    settings = _settings(**overrides)
+    settings.pop("media_preference")
+    return settings
+
+
+@pytest.mark.parametrize("build", [_settings, _without_preference])
+def test_without_a_preference_every_step_below_it_decides_exactly_as_before(build):
+    """Empty and absent both mean the same thing: the feature is not there, and
+    memory, ownership and the plain variant settle things in that order."""
+    remembered = resolve_media_label(("62", "62red"), build(media_memory={"62": "62red"}))
+    assert (remembered.label_size, remembered.resolved_by) == ("62red",
+                                                               MEDIA_RESOLVED_BY_MEMORY)
+
+    owned = resolve_media_label(("103", "104"), build(owned_media=["104"]))
+    assert (owned.label_size, owned.resolved_by) == ("104", MEDIA_RESOLVED_BY_OWNED)
+
+    plain = resolve_media_label(("12", "12+17"), build())
+    assert (plain.label_size, plain.resolved_by) == ("12", MEDIA_RESOLVED_BY_DEFAULT)
+
+    single = resolve_media_label(("d24",), build())
+    assert (single.label_size, single.resolved_by) == ("d24", MEDIA_RESOLVED_BY_DETECTION)
+
+    unresolvable = resolve_media_label(UNDOCUMENTED_PAIR, build())
+    assert unresolvable.label_size is None
+    assert unresolvable.resolved_by is None
+
+
+@pytest.mark.parametrize("build", [_settings, _without_preference])
+def test_without_a_preference_the_status_report_is_unchanged(build):
+    """The same assertions the status path made before the setting existed."""
+    settings = build(media_auto_switch=True, label_size="d24")
+    media = _status(_reachable(), settings)["media"]
+
+    assert media["candidates"] == ["62", "62red"]
+    assert media["ambiguous"] is True
+    assert media["resolution"]["label_size"] == "62"
+    assert media["resolution"]["resolved_by"] == MEDIA_RESOLVED_BY_DEFAULT
+    assert media["auto_switch"]["action"] == MEDIA_SWITCH_APPLY
+    assert media["auto_switch"]["to"] == "62"
 
 
 # --- when nothing resolves ---------------------------------------------------
@@ -368,6 +542,18 @@ def test_the_memory_decides_which_candidate_is_switched_to():
     assert switch["action"] == MEDIA_SWITCH_APPLY
     assert switch["to"] == "62red"
     assert "last used" in switch["reason"]
+
+
+def test_the_preference_decides_which_candidate_is_switched_to():
+    settings = _settings(media_auto_switch=True, label_size="d24",
+                         media_preference={"62": "62red"},
+                         media_memory={"62": "62"}, owned_media=["62", "62red"])
+    switch = _status(_reachable(), settings)["media"]["auto_switch"]
+
+    assert switch["action"] == MEDIA_SWITCH_APPLY
+    assert switch["to"] == "62red"
+    # The reason a UI shows says which step won, not merely which label did.
+    assert "preferred" in switch["reason"]
 
 
 def test_a_label_type_already_consistent_with_the_roll_is_left_alone():
@@ -554,6 +740,50 @@ def test_a_memory_edit_carried_by_the_write_itself_is_not_clobbered():
     assert result == {"media_memory": {"103": "104", "62": "62"}}
 
 
+def test_a_deviation_from_a_preference_is_still_recorded():
+    """The decision about the recording hook, stated as a test.
+
+    A preference outranks the memory, so a memory written while one stands can
+    never win the resolution -- which makes it look like dead data. It is
+    recorded anyway. A preference is a settings entry like any other and can be
+    cleared, and the moment it is, the memory is what the chain falls back to;
+    it should then be the user's most recent real choice rather than whatever
+    predated the preference, which could be months older than everything they
+    have done since. And not recording it would mean deliberately forgetting a
+    deviation the user did make: precedence is a ranking, not a silencing.
+    """
+    previous = _settings(media_auto_switch=True, label_size="12",
+                         media_preference={"62": "62red"})
+    result, _ = _record(dict(previous, label_size="62"), previous)
+    assert result == {"media_memory": {"62": "62"}}
+
+
+def test_the_deviation_comes_back_the_moment_the_preference_is_cleared():
+    """Why the recording is not dead data: clearing the preference falls back to
+    what the user last actually did, not to what predated it."""
+    settings = _settings(media_auto_switch=True, media_preference={"62": "62red"},
+                         media_memory={"62": "62"})
+
+    preferred = resolve_media_label(("62", "62red"), settings)
+    assert (preferred.label_size, preferred.resolved_by) == ("62red",
+                                                             MEDIA_RESOLVED_BY_PREFERENCE)
+
+    settings["media_preference"] = {}
+    fallen_back = resolve_media_label(("62", "62red"), settings)
+    assert (fallen_back.label_size, fallen_back.resolved_by) == ("62",
+                                                                 MEDIA_RESOLVED_BY_MEMORY)
+
+
+def test_recording_a_choice_never_writes_the_preference():
+    """The hook records what happened. What was *meant* is the user's to state,
+    and a pick that quietly promoted itself to a standing instruction would be
+    the app putting words in their mouth."""
+    previous = _settings(media_auto_switch=True, label_size="12",
+                         media_preference={"62": "62red"})
+    result, _ = _record(dict(previous, label_size="62"), previous)
+    assert "media_preference" not in result
+
+
 def test_a_printer_that_cannot_be_asked_costs_nothing():
     with patch.object(printer_service, "get_loaded_media",
                       side_effect=RuntimeError("no route to host")):
@@ -656,6 +886,29 @@ def test_the_remembered_choice_comes_back_when_the_roll_does(tmp_path):
                                          settings["label_size"], settings=settings)
     assert back["resolution"]["resolved_by"] == MEDIA_RESOLVED_BY_MEMORY
     assert back["auto_switch"]["action"] == MEDIA_SWITCH_APPLY
+    assert back["auto_switch"]["to"] == "62red"
+
+
+def test_a_preference_outlasts_a_contrary_pick_end_to_end(tmp_path):
+    """The whole point of the ordering, through the real settings file: a user
+    who prefers 62red runs one batch on plain 62, and the next 62 mm roll still
+    comes back as 62red -- with the deviation on record all the same."""
+    service, _ = _service(tmp_path, _settings(media_auto_switch=True, label_size="12",
+                                              media_preference={"62": "62red"}))
+
+    # One contrary pick, on a Tuesday.
+    with patch.object(printer_service, "get_loaded_media",
+                      return_value=_media_for("continuous-62mm")):
+        assert service.update_settings({"label_size": "62"}) is True
+
+    settings = service.get_settings()
+    assert settings["media_preference"] == {"62": "62red"}
+    assert settings["media_memory"] == {"62": "62"}  # the deviation is not forgotten
+
+    # And the standing instruction still stands.
+    back = printer_service._media_report(_media_for("continuous-62mm"), "d24",
+                                         settings=settings)
+    assert back["resolution"]["resolved_by"] == MEDIA_RESOLVED_BY_PREFERENCE
     assert back["auto_switch"]["to"] == "62red"
 
 

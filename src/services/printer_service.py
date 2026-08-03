@@ -44,6 +44,11 @@ from src.config.default_settings import (
     medium_variants,
 )
 from src.services.settings_service import settings_service
+# The relay service owns the keep-alive/turn-off arithmetic, so this module asks
+# it how long the awake window really is rather than keeping a second copy of the
+# rule. The dependency runs one way at import time: relay_service imports only
+# the settings service here, and reaches back for the printer service lazily.
+from src.services.relay_service import relay_service
 from src.services.ipp_client import EMPTY_MEDIA, get_media_ready, get_printer_attributes
 from src.services.pdf_renderer import render_pdf, parse_page_range
 from src.utils.exceptions import PrinterError, ImageProcessingError, ValidationError
@@ -801,21 +806,39 @@ def identify_label_candidates(media: Optional[Dict[str, Any]]) -> LabelIdentific
 # Identification stops at "these are the identifiers the report is consistent
 # with", because that is all the device says. Automatic switching needs one
 # identifier, and the whole question is where the extra bit of information comes
-# from -- because it must not come from a coin flip. Three sources are consulted,
+# from -- because it must not come from a coin flip. Four sources are consulted,
 # in this order, and each of them is a thing the *user* said rather than a thing
 # the app inferred:
 #
-#   1. memory -- what was last settled on for this very medium. A recollection,
+#   1. preference -- which variant of this medium the user has declared they
+#      mean. "For 62 mm rolls I mean the red one." A standing instruction.
+#   2. memory -- what was last settled on for this very medium. A recollection,
 #      not a guess: if 62red was in use the last time a 62 mm roll was loaded,
 #      loading a 62 mm roll again returns to 62red.
-#   2. owned media -- what the user says they actually have. If only one
+#   3. owned media -- what the user says they actually have. If only one
 #      candidate is a tape they own, the others are not in the building.
-#   3. the documented plain-variant default -- 62 over 62red, 12 over 12+17,
+#   4. the documented plain-variant default -- 62 over 62red, 12 over 12+17,
 #      103 over 104. Not a tie-break so much as a stated convention: the plain
 #      variant is the one that costs nothing to be wrong about, and the other
 #      member of every group is the one that has to be chosen deliberately.
 #
-# If none of the three settles it, nothing is chosen. That is the point of the
+# The preference goes first, ahead of the memory, and the difference between the
+# two is the reason. The memory is *inferred* -- it is the app noticing what the
+# user did last time. The preference is *stated*. When the two disagree, one of
+# them is a standing instruction and the other is a single afternoon's work, and
+# a standing instruction that any one contrary pick could repeal would not be
+# one. So the pick is still remembered (see record_label_choice), it just does
+# not outrank what the user said in as many words.
+#
+# It also fills a real gap rather than adding a preference for its own sake:
+# ownership cannot settle two of these three media at all. 12/12+17 and 103/104
+# are one physical roll addressed two ways, so nobody can own one and not the
+# other; and 62/62red is settled by ownership only for a user who owns the red
+# roll and no plain one. A user with a black roll and a black/red roll -- the
+# ordinary case, on the one medium where a wrong guess produces a finished bad
+# label instead of an error -- gets no help from ownership at all.
+#
+# If none of the four settles it, nothing is chosen. That is the point of the
 # order rather than a gap in it: automatic mode leaves label_size exactly as it
 # was and reports the ambiguity, which is what the manual path already does. A
 # label that did not print is a question; a label printed on the wrong medium is
@@ -830,10 +853,11 @@ def identify_label_candidates(media: Optional[Dict[str, Any]]) -> LabelIdentific
 
 # How a single label identifier was arrived at, reported so a client can show
 # why one candidate won rather than presenting the result as an oracle.
-MEDIA_RESOLVED_BY_DETECTION = "detection"  # the device left only one possibility
-MEDIA_RESOLVED_BY_MEMORY = "memory"        # last settled on for this medium
-MEDIA_RESOLVED_BY_OWNED = "owned"          # the only candidate the user owns
-MEDIA_RESOLVED_BY_DEFAULT = "default"      # the documented plain variant
+MEDIA_RESOLVED_BY_DETECTION = "detection"    # the device left only one possibility
+MEDIA_RESOLVED_BY_PREFERENCE = "preference"  # the variant the user declared for it
+MEDIA_RESOLVED_BY_MEMORY = "memory"          # last settled on for this medium
+MEDIA_RESOLVED_BY_OWNED = "owned"            # the only candidate the user owns
+MEDIA_RESOLVED_BY_DEFAULT = "default"        # the documented plain variant
 
 # What automatic mode wants the client to do about it.
 MEDIA_SWITCH_NONE = "none"            # nothing to do (or the feature is off)
@@ -848,8 +872,9 @@ class MediaResolution(NamedTuple):
         label_size: The winning identifier, or None when the medium could not be
             narrowed to one. None is a result, not a failure: it is what stops
             automatic mode from picking.
-        resolved_by: Which step settled it -- one of ``detection``, ``memory``,
-            ``owned`` or ``default`` -- or None when nothing did.
+        resolved_by: Which step settled it -- one of ``detection``,
+            ``preference``, ``memory``, ``owned`` or ``default`` -- or None when
+            nothing did.
         reason: Human-readable account of why this candidate won, or of why no
             candidate could.
     """
@@ -915,26 +940,54 @@ def owned_media(settings: Optional[Dict[str, Any]]) -> Tuple[str, ...]:
     return tuple(entry for entry in owned if isinstance(entry, str) and entry.strip())
 
 
+def _medium_choice(settings: Optional[Dict[str, Any]], key: Optional[str],
+                   setting: str) -> Optional[str]:
+    """The identifier a per-medium map names for the medium ``key``, if any.
+
+    ``media_memory`` and ``media_preference`` are the same shape -- a medium's
+    plain variant to one of that medium's identifiers -- and are read the same
+    way, including the bargain about malformed data: a bad value is logged and
+    ignored rather than raised, because both are hints consulted on the status
+    path and neither may cost a status check.
+
+    Args:
+        settings: The settings to read from, or None.
+        key: The medium's plain variant, or None when the candidates name no one
+            medium.
+        setting: Which map to read -- ``media_preference`` or ``media_memory``.
+
+    Returns:
+        The identifier stored for that medium, or None.
+    """
+    if not settings or not key:
+        return None
+    stored = settings.get(setting)
+    if not stored:
+        return None
+    if not isinstance(stored, dict):
+        logger.warning("Ignoring a malformed per-medium map",
+                       setting=setting, value_type=str(type(stored)))
+        return None
+    chosen = stored.get(key)
+    if chosen is None:
+        return None
+    if not isinstance(chosen, str) or not chosen.strip():
+        logger.warning("Ignoring a malformed per-medium entry",
+                       setting=setting, medium=key, value=repr(chosen))
+        return None
+    return chosen
+
+
+def _preferred_label(settings: Optional[Dict[str, Any]],
+                     key: Optional[str]) -> Optional[str]:
+    """The variant the user has declared for the medium ``key``, if any."""
+    return _medium_choice(settings, key, "media_preference")
+
+
 def _remembered_label(settings: Optional[Dict[str, Any]],
                       key: Optional[str]) -> Optional[str]:
     """The label identifier last settled on for the medium ``key``, if any."""
-    if not settings or not key:
-        return None
-    memory = settings.get("media_memory")
-    if not memory:
-        return None
-    if not isinstance(memory, dict):
-        logger.warning("Ignoring malformed media memory",
-                       memory_type=str(type(memory)))
-        return None
-    remembered = memory.get(key)
-    if remembered is None:
-        return None
-    if not isinstance(remembered, str) or not remembered.strip():
-        logger.warning("Ignoring malformed media memory entry",
-                       medium=key, value=repr(remembered))
-        return None
-    return remembered
+    return _medium_choice(settings, key, "media_memory")
 
 
 def resolve_media_label(candidates: Tuple[str, ...],
@@ -942,15 +995,17 @@ def resolve_media_label(candidates: Tuple[str, ...],
     """Narrow a detection to one label identifier, or decline to.
 
     The steps are tried in the order documented in the section comment above --
-    memory, then owned media, then the plain-variant default -- and the first one
-    that produces exactly one identifier wins. A remembered choice that is not
-    among the current candidates (the roll was changed, or the catalogue moved
-    under it) is skipped rather than trusted, and so is an owned-media list that
-    leaves two candidates standing.
+    the declared preference, then memory, then owned media, then the
+    plain-variant default -- and the first one that produces exactly one
+    identifier wins. A preferred or remembered choice that is not among the
+    current candidates (a preference for a medium that is not loaded, a roll that
+    was changed, a catalogue that moved underneath) is skipped rather than
+    trusted, and so is an owned-media list that leaves two candidates standing.
 
     Args:
         candidates: The identifiers the printer's report is consistent with.
-        settings: Settings carrying ``media_memory`` and ``owned_media``.
+        settings: Settings carrying ``media_preference``, ``media_memory`` and
+            ``owned_media``.
 
     Returns:
         A :class:`MediaResolution`. ``label_size`` is None when nothing settled
@@ -967,6 +1022,15 @@ def resolve_media_label(candidates: Tuple[str, ...],
 
     listed = ", ".join(candidates)
     key = media_memory_key(candidates)
+
+    preferred = _preferred_label(settings, key)
+    if preferred and preferred in candidates:
+        return MediaResolution(
+            preferred, MEDIA_RESOLVED_BY_PREFERENCE,
+            f"{preferred} is the variant set as preferred for this medium")
+    if preferred:
+        logger.info("Ignoring a preferred label the loaded medium cannot be",
+                    medium=key, preferred=preferred, candidates=list(candidates))
 
     remembered = _remembered_label(settings, key)
     if remembered and remembered in candidates:
@@ -2241,9 +2305,9 @@ class PrinterService:
         never be read as "they disagree".
 
         On top of that it carries ``resolution`` -- which single identifier the
-        documented order (memory, owned media, plain-variant default) comes down
-        to and which step got there -- and ``auto_switch``, what automatic mode
-        wants done about it. The two are separate on purpose: the resolution is
+        documented order (preference, memory, owned media, plain-variant default)
+        comes down to and which step got there -- and ``auto_switch``, what
+        automatic mode wants done about it. The two are separate on purpose: the resolution is
         reported whether or not automatic mode is on, because a client can use it
         to *offer* the switch, while ``auto_switch`` is the only field that ever
         asks for one.
@@ -2334,8 +2398,9 @@ class PrinterService:
         A status check must survive a missing or unreadable settings file: the
         printer is answering, and that answer is worth reporting even when the
         app cannot read its own configuration. Everything the settings supply
-        here -- the configured label size, the owned media, the memory, the
-        automatic-switch flag -- degrades to "not configured" on their own.
+        here -- the configured label size, the owned media, the preference, the
+        memory, the automatic-switch flag -- degrades to "not configured" on
+        their own.
         """
         try:
             return settings_service.get_settings() or {}
@@ -2529,6 +2594,22 @@ class PrinterService:
         * automatic switching is on. The memory exists to feed it, and a feature
           that is off writes nothing at all -- no extra keys in the settings
           file, no probe on the printer. Off means off.
+
+        **A standing preference does not switch the recording off.** When
+        ``media_preference`` names a variant for this medium the memory can never
+        win the resolution while that entry stands, so recording one looks like
+        writing a value nothing will read. It is recorded anyway, for two
+        reasons. A preference is a settings entry like any other and can be
+        cleared; the moment it is, the memory is what the chain falls back to,
+        and it should be the user's most recent actual choice rather than
+        whatever was last recorded before the preference was set -- which could
+        be months older than everything they have done since. And skipping it
+        would mean deliberately forgetting a deviation: a user who prefers 62red
+        but ran a batch on plain 62 did make that choice, and the honest record
+        of it is what makes the preference's precedence a *ranking* rather than a
+        silencing. The two settings answer different questions -- what was meant,
+        and what happened -- so neither one's presence is a reason to stop
+        answering the other.
 
         The medium is read through the ordinary media cache, so a settings save
         that follows a status check costs nothing; only a change of
@@ -4980,6 +5061,11 @@ class PrinterService:
             # Record print activity so the "timed" keep-alive mode extends its
             # awake window from this moment.
             self._last_print_at = time.time()
+            # Same origin for the relay's turn-off clock. Both windows have to be
+            # measured from the same instant or they drift apart, so the two
+            # timestamps are taken here together rather than each where it is
+            # convenient.
+            relay_service.note_print_activity(self._last_print_at)
 
             logger.info("Print job sent to printer",
                        printer_uri=printer_uri,
@@ -5798,21 +5884,29 @@ class PrinterService:
                         break
                 
                 # Dynamic keep-alive window. In "timed" mode we only keep the
-                # printer awake for `keep_alive_duration_seconds` after the last
-                # print; outside that window we pause the heartbeat (letting the
-                # printer sleep) until the next print resets the timer. In
-                # "forever" mode (or duration<=0) we always ping. Settings are
-                # re-read each tick so changes take effect live.
+                # printer awake for a window after the last print; outside that
+                # window we pause the heartbeat (letting the printer sleep) until
+                # the next print resets the timer. In "forever" mode (or
+                # duration<=0) we always ping. Settings are re-read each tick so
+                # changes take effect live.
+                #
+                # How long that window really is comes from the relay service,
+                # because relay power control changes the answer: the printer's
+                # own auto-power-off interval is subtracted, so the heartbeat
+                # stops early and the device switches itself off at exactly the
+                # moment the user configured rather than that moment plus its own
+                # timer. With relay power control off the configured duration is
+                # returned unchanged and this behaves exactly as it always did.
+                #
+                # A window of 0 is a real answer (duration == the hardware
+                # interval): the heartbeat then does nothing at all and the
+                # printer's own timer carries the whole window.
                 ka = settings_service.get_settings()
-                ka_mode = ka.get("keep_alive_mode", "forever")
-                try:
-                    ka_duration = int(ka.get("keep_alive_duration_seconds", 0) or 0)
-                except (TypeError, ValueError):
-                    ka_duration = 0
-                if ka_mode == "timed" and ka_duration > 0 and (time.time() - self._last_print_at) > ka_duration:
+                ka_window = relay_service.effective_keep_alive_seconds(ka)
+                if ka_window is not None and (time.time() - self._last_print_at) > ka_window:
                     if last_active is not False:
                         logger.info("Keep alive paused: no print within the configured window",
-                                    printer_uri=printer_uri, window_seconds=ka_duration)
+                                    printer_uri=printer_uri, window_seconds=ka_window)
                         last_active = False
                     stop_event.wait(interval)
                     continue

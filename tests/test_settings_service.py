@@ -246,21 +246,111 @@ def test_media_auto_switch_must_be_a_boolean(tmp_path):
         _validate(tmp_path, media_auto_switch="yes")
 
 
+# --- the preferred variant ---------------------------------------------------
+#
+# Same shape as the memory and the same rules, because it is the same statement
+# about the same key -- a medium named by its plain variant, paired with one of
+# the identifiers that medium can be addressed by. The checks matter more here
+# than anywhere else in this file: of the settings that can move label_size
+# without the user acting, this is the one consulted first.
+
+def test_media_preference_accepts_a_variant_of_its_own_medium(tmp_path):
+    _validate(tmp_path, media_preference={"62": "62red", "12": "12+17", "103": "104"})
+
+
+def test_media_preference_accepts_the_plain_variant(tmp_path):
+    """Preferring the plain variant is a real statement, not a no-op: it says
+    the ownership step must not move this medium to the other one."""
+    _validate(tmp_path, media_preference={"62": "62"})
+
+
+def test_media_preference_may_be_empty(tmp_path):
+    _validate(tmp_path, media_preference={})
+
+
+def test_media_preference_rejects_an_unknown_medium_by_name(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_preference={"64": "62red"})
+    message = str(excinfo.value)
+    assert "media_preference" in message and "64" in message
+
+
+def test_media_preference_rejects_a_variant_used_as_the_key(tmp_path):
+    """62red is one way of addressing the 62 mm medium, not a medium of its own.
+    A preference filed under it would never be looked up: the resolution asks
+    for the group's plain variant."""
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_preference={"62red": "62red"})
+    message = str(excinfo.value)
+    assert "media_preference" in message
+    assert "62red" in message and "'62'" in message
+    assert "Key the preference on" in message
+
+
+def test_media_preference_rejects_an_unknown_label_as_the_value(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_preference={"62": "62-red"})
+    message = str(excinfo.value)
+    assert "media_preference" in message and "62-red" in message
+
+
+def test_media_preference_rejects_a_value_from_a_different_medium(tmp_path):
+    """The entry that would actually break a print, and the one this setting's
+    position in the order makes most dangerous: preferring d24 for the 62 mm
+    roll would switch a continuous roll to a die-cut label size first, ahead of
+    everything that could have corrected it."""
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_preference={"62": "d24"})
+    message = str(excinfo.value)
+    assert "media_preference" in message
+    assert "d24" in message and "62red" in message  # names the offender and the options
+
+
+def test_media_preference_rejects_a_non_string_value(tmp_path):
+    with pytest.raises(ValueError) as excinfo:
+        _validate(tmp_path, media_preference={"62": None})
+    assert "media_preference" in str(excinfo.value)
+
+
+def test_media_preference_rejects_a_non_dict(tmp_path):
+    with pytest.raises(ValueError):
+        _validate(tmp_path, media_preference=["62red"])
+
+
+def test_a_preference_for_a_single_variant_medium_is_accepted_not_rejected(tmp_path):
+    """Inert rather than an error. It states what detection already produces on
+    its own, so it can neither change an outcome nor break one -- and group
+    membership comes from the catalogue, so a medium with one variant today may
+    have two after a brother_ql upgrade."""
+    _validate(tmp_path, media_preference={"d24": "d24", "62x29": "62x29"})
+
+
+def test_the_memory_and_the_preference_are_rejected_by_the_same_rules(tmp_path):
+    """One set of rules for two maps of the same shape. The messages differ only
+    in naming which map is at fault, so a user is never told the wrong one."""
+    for setting in ("media_memory", "media_preference"):
+        with pytest.raises(ValueError) as excinfo:
+            _validate(tmp_path, **{setting: {"62": "d24"}})
+        assert setting in str(excinfo.value)
+
+
 def test_a_settings_file_predating_the_feature_still_loads(tmp_path):
-    """An older settings file has none of the three keys; the defaults are
-    merged in, off."""
+    """An older settings file has none of the four keys; the defaults are
+    merged in, off and empty."""
     service, _ = _make_service(tmp_path, _valid_settings())
     settings = service.get_settings()
 
     assert settings["media_auto_switch"] is False
     assert settings["owned_media"] == []
     assert settings["media_memory"] == {}
+    assert settings["media_preference"] == {}
 
 
 def test_a_settings_file_predating_the_feature_still_validates(tmp_path):
     service, _ = _make_service(tmp_path)
     stored = _valid_settings()
-    for key in ("media_auto_switch", "owned_media", "media_memory"):
+    for key in ("media_auto_switch", "owned_media", "media_memory",
+                "media_preference"):
         assert key not in stored
     with patch("src.services.settings_service.guess_backend", side_effect=_net_backend):
         service._validate_settings(stored)

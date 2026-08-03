@@ -47,6 +47,50 @@ BLEED_LIMIT_MM = 5.0
 
 
 # --------------------------------------------------------------------------- #
+# Relay power control.
+#
+# The printer's mains supply can be switched by a relay driven over a webhook,
+# so it draws nothing between print runs. Two events exist: ``turn_on``, fired
+# when a print job arrives at a printer that is not answering, and ``turn_off``,
+# fired once everything has wound down.
+# --------------------------------------------------------------------------- #
+
+# The auto-power-off intervals a Brother QL offers, in minutes. The device's own
+# menu has exactly these six steps and no free entry, so this is an enum rather
+# than a bounded number: a free field could only ever hold a value the printer
+# cannot be set to, and every wrong value here is a value that makes the relay
+# fire at the wrong moment.
+PRINTER_AUTO_POWER_OFF_CHOICES = (10, 20, 30, 40, 50, 60)
+DEFAULT_PRINTER_AUTO_POWER_OFF_MINUTES = 10
+
+# Longest delay that may be inserted between the end of the configured window
+# and the ``turn_off`` webhook. The delay exists to let the printer's own
+# auto-power-off complete first, so it is measured in single-digit minutes; an
+# hour is already far past "safety margin" and into "a second, hidden window".
+TURN_OFF_DELAY_LIMIT_MINUTES = 60
+DEFAULT_TURN_OFF_DELAY_MINUTES = 5
+
+# The one thing about this feature the app cannot check for the user, stated in
+# one place so the settings model, the OpenAPI description and the status
+# endpoint all say exactly the same words.
+#
+# The chain is: keep-alive stops at (duration - auto_power_off), the printer's
+# own timer then runs for its real length, and the relay opens at
+# (duration + delay). Those line up only while the number configured here
+# matches the number set on the device. If the device's real interval is LONGER
+# than the configured one, the printer is still awake when the relay opens.
+AUTO_POWER_OFF_MISMATCH_WARNING = (
+    "This app cannot read or change the printer's built-in auto-power-off "
+    "time -- the value here is a statement about the device, not a setting on "
+    "it, and nothing verifies the two agree. Set it to exactly what the "
+    "printer's own menu shows. If the real interval on the device is LONGER "
+    "than the value configured here, the relay will cut mains power while the "
+    "printer is still running, which can interrupt a print mid-feed and can "
+    "damage the printer."
+)
+
+
+# --------------------------------------------------------------------------- #
 # The media a printer cannot tell apart, and what to call each of them.
 #
 # Detection resolves all 15 die-cut sizes to exactly one identifier. Three
@@ -243,6 +287,74 @@ DEFAULT_SETTINGS = {
     # PrinterService.record_label_choice for why that is the moment a choice
     # counts as settled.
     "media_memory": {},
+    # The variant that wins for a medium, keyed the same way the memory is --
+    # on the medium's plain variant (see medium_key above):
+    #   {"62": "62red"}
+    # "When a 62 mm roll is loaded, I mean the red one." Consulted first, ahead
+    # of the memory, the owned-media list and the plain-variant default.
+    #
+    # It exists because ownership was supposed to settle these three media and
+    # mostly cannot. 12/12+17 and 103/104 are one physical roll under two
+    # identifiers, so owning "both" is not a thing anyone can do; and 62/62red is
+    # only settled by ownership for a user who owns the red roll and no plain
+    # one. Own a black roll and a black/red roll -- the ordinary case for the
+    # only medium where guessing wrong costs a finished bad label -- and
+    # ownership narrows nothing, leaving the plain-variant default to decide
+    # something the user may well have an opinion about.
+    #
+    # Ahead of the memory deliberately. The memory is inferred: it records what
+    # happened last. A preference is stated: it records what was meant. One
+    # contrary pick on some Tuesday -- a single run of plain labels on the red
+    # roll -- should not quietly repeal a standing instruction, and it does not:
+    # the pick is still recorded (see PrinterService.record_label_choice), it
+    # simply does not outrank the instruction.
+    #
+    # Empty by default, so an install that never sets one resolves exactly as it
+    # did before: memory, then ownership, then the plain variant.
+    #
+    # An entry for a medium with only one variant -- {"d24": "d24"} -- is inert
+    # rather than rejected: it states the only thing that medium could resolve
+    # to, so it can neither change an outcome nor break one. See
+    # SettingsService._validate_media_preference.
+    "media_preference": {},
+    # ----------------------------------------------------------------------- #
+    # Relay power control via webhook.
+    #
+    # OFF by default, and every field below is inert while it is. An install
+    # that never touches this feature makes no outbound request, keeps the
+    # keep-alive timing it always had, and behaves exactly as before.
+    # ----------------------------------------------------------------------- #
+    "relay_webhook_enabled": False,
+    # POSTed when a print job arrives and the printer does not answer. The body
+    # carries {"action": "turn_on", ...}; see RelayPowerService.build_payload.
+    "relay_webhook_turn_on_url": "",
+    # POSTed when everything has wound down. Empty means "use the turn_on URL",
+    # which is the right default for a relay that switches on the body it is
+    # sent. Two separate URLs exist because plenty of relays switch on the
+    # *address* instead (.../relay/0?turn=on vs .../relay/0?turn=off) and cannot
+    # read a body at all.
+    "relay_webhook_turn_off_url": "",
+    # Sending turn_off is opt-in on its own, separately from the feature. Some
+    # installations only ever want the printer woken and are content to let it
+    # sleep on its own afterwards; cutting mains power is the half of this
+    # feature that can go wrong, so it is not inherited from switching the
+    # feature on.
+    "relay_webhook_turn_off_enabled": False,
+    # How long after the configured window closes the turn_off webhook goes out.
+    # This is the safety margin that lets the printer's own auto-power-off
+    # complete before the mains are cut.
+    "relay_webhook_turn_off_delay_minutes": DEFAULT_TURN_OFF_DELAY_MINUTES,
+    # The printer's built-in auto-power-off interval, in minutes, as set on the
+    # device. It is subtracted from keep_alive_duration_seconds so that the
+    # printer goes to sleep at exactly the moment the user asked for rather than
+    # that moment plus the hardware's own timer: a 4 h window with a 10 min
+    # device timer means keep-alive stops at 3:50 and the printer switches
+    # itself off at 4:00.
+    #
+    # See AUTO_POWER_OFF_MISMATCH_WARNING: nothing here can check this value
+    # against the device, and getting it wrong in one direction can cut power to
+    # a running printer.
+    "printer_auto_power_off_minutes": DEFAULT_PRINTER_AUTO_POWER_OFF_MINUTES,
     "printers": [
         {
             "id": "default",
