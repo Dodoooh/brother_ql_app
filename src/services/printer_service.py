@@ -2164,7 +2164,14 @@ class PrinterService:
         # the printer awake for a configurable window after this moment, then
         # pauses until the next print. Initialised to now so enabling keep-alive
         # gives one window straight away.
+        #
+        # That initial value is a *fallback*, not a print, and the two must never
+        # be confused: a status display reading it as "last print" would name a
+        # print that never happened. ``_printed_since_start`` records which of
+        # the two the timestamp is, and :meth:`last_print_origin` hands both out
+        # together so no caller can read one without the other.
         self._last_print_at = time.time()
+        self._printed_since_start = False
         # Loaded media, per printer URI, with the timestamp it was read at. See
         # MEDIA_CACHE_TTL_SECONDS for why this exists.
         self._media_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -5059,8 +5066,11 @@ class PrinterService:
                 backend.dispose()
 
             # Record print activity so the "timed" keep-alive mode extends its
-            # awake window from this moment.
+            # awake window from this moment. From here on the timestamp really is
+            # a print, which is what lets the status endpoint say so instead of
+            # saying "since the app started".
             self._last_print_at = time.time()
+            self._printed_since_start = True
             # Same origin for the relay's turn-off clock. Both windows have to be
             # measured from the same instant or they drift apart, so the two
             # timestamps are taken here together rather than each where it is
@@ -5082,6 +5092,29 @@ class PrinterService:
         except Exception as e:
             logger.error("Error sending to printer", error=str(e), exc_info=True)
             raise PrinterError(f"Error sending to printer: {str(e)}") from e
+
+    def last_print_origin(self) -> Tuple[float, bool]:
+        """Return the moment every timed window is measured from, and its nature.
+
+        This is the single origin the whole timing chain hangs off: the
+        "timed" keep-alive window is measured from it (see
+        ``_keep_alive_worker``) and so is the relay's turn-off clock, which is
+        why they are set together in the print path rather than each where it
+        happened to be convenient.
+
+        The second element is what stops the first from being misread. The
+        timestamp is initialised to the process start time on purpose, so that
+        switching keep-alive on gives one window immediately, which means it is
+        *not* always "when something was last printed". A caller rendering it as
+        "Last print 13:42" when nothing has printed since the container came up
+        would be stating something that never happened.
+
+        Returns:
+            ``(timestamp, printed)``: the unix timestamp the window runs from,
+            and whether it is a real print (True) or still the startup fallback
+            (False).
+        """
+        return self._last_print_at, self._printed_since_start
 
     def start_keep_alive(self, printer_uri: Optional[str] = None, printer_model: Optional[str] = None, interval: int = 60) -> Dict[str, Any]:
         """

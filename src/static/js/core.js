@@ -30,7 +30,14 @@ function initApp() {
     // Initialize preview elements
     initPreviewElements();
 
-    // Check for a shared file hand-off (?share=token&type=pdf|image)
+    // Bring back the tab named in the URL. After setupEventListeners(), because
+    // it works by showing that tab for real and every listener above has to be
+    // in place when it does.
+    restoreActiveTab();
+
+    // Check for a shared file hand-off (?share=token&type=pdf|image). It picks
+    // a tab of its own, and it wins: a file handed to the app is a more
+    // definite request than the tab that happened to be open last time.
     handleSharedFile();
 
     console.log('Brother QL Printer App initialized');
@@ -57,6 +64,104 @@ function previewModeForTarget(targetId) {
 function getActiveComposeMode() {
     const activePane = document.querySelector('#composeContent > .tab-pane.active');
     return activePane ? previewModeForTarget('#' + activePane.id) : null;
+}
+
+// How the active tab is written into the URL.
+//
+// A hash rather than storage, for what "the same page" should mean: the tab
+// survives a hard reload, a restart and a bookmark, the address bar can be sent
+// to someone else and lands them where you are, and two browser tabs open on
+// this app stay independent of each other, which one shared storage key would
+// not manage. The cost is a short visible token, which is the honest trade.
+//
+// It is deliberately NOT the panel's element id: a hash that matches an id
+// makes the browser scroll to that element on load, and the page would jump
+// past its own header on every reload.
+const TAB_HASH_PREFIX = '#tab=';
+
+/**
+ * The token for a tab button, taken from the pane it shows: '#settings-panel'
+ * becomes 'settings'.
+ * @param {Element} button
+ * @returns {string} the token, or '' when there is nothing to name
+ */
+function tabTokenFor(button) {
+    const target = button && button.getAttribute && button.getAttribute('data-bs-target');
+    if (!target) return '';
+    return target.replace(/^#/, '').replace(/-panel$/, '');
+}
+
+/**
+ * The tab button a token names, or null when this build has no such tab.
+ * @param {string} token
+ * @returns {?Element}
+ */
+function tabButtonForToken(token) {
+    if (!token) return null;
+    const buttons = document.querySelectorAll('button[data-bs-toggle="tab"]');
+    return Array.prototype.find.call(buttons, b => tabTokenFor(b) === token) || null;
+}
+
+/**
+ * Write the active tab into the URL.
+ *
+ * replaceState, not pushState: switching tabs is not navigation, and a Back
+ * button that walked back through every tab visited would be a worse thing than
+ * the reset this fixes.
+ *
+ * @param {string} targetId - the pane selector, e.g. '#settings-panel'
+ */
+function rememberActiveTab(targetId) {
+    const token = tabTokenFor({ getAttribute: () => targetId });
+    if (!token) return;
+    try {
+        const url = new URL(window.location.href);
+        url.hash = TAB_HASH_PREFIX.slice(1) + encodeURIComponent(token);
+        history.replaceState(null, '', url.pathname + url.search + url.hash);
+    } catch (error) {
+        // No history API (or an opaque origin): the tab simply does not persist.
+        console.error('Could not record the active tab:', error);
+    }
+}
+
+/**
+ * Show the tab named in the URL, if there is one and this build still has it.
+ *
+ * It goes through Bootstrap's own show(), which is the same path a click takes,
+ * so the restored tab arrives with the shared preview reset and re-requested
+ * for it. Reaching around that and setting the classes directly would restore
+ * the tab with the previous tab's preview still on screen.
+ *
+ * A token naming a tab that no longer exists (a renamed panel, a link from an
+ * older version) leaves the markup's own active tab alone and drops the token,
+ * so the next reload starts clean.
+ */
+function restoreActiveTab() {
+    const hash = window.location.hash || '';
+    if (hash.indexOf(TAB_HASH_PREFIX) !== 0) return;
+
+    const token = decodeURIComponent(hash.slice(TAB_HASH_PREFIX.length));
+    const button = tabButtonForToken(token);
+
+    if (!button) {
+        try {
+            const url = new URL(window.location.href);
+            history.replaceState(null, '', url.pathname + url.search);
+        } catch (error) {
+            console.error('Could not drop the unknown tab token:', error);
+        }
+        return;
+    }
+
+    // Already the active one: showing it again would do nothing, and Bootstrap
+    // would not fire shown.bs.tab for it anyway.
+    if (button.classList.contains('active')) return;
+
+    if (window.bootstrap && bootstrap.Tab) {
+        new bootstrap.Tab(button).show();
+    } else {
+        button.click();
+    }
 }
 
 /**
@@ -184,6 +289,11 @@ function setupEventListeners() {
             if (serverMode && typeof requestServerPreview === 'function') {
                 requestServerPreview(serverMode);
             }
+
+            // Name the tab in the URL, so a reload comes back to it. Written
+            // here, from the event, so it records what actually happened rather
+            // than what was asked for.
+            rememberActiveTab(targetId);
         });
     });
     

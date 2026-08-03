@@ -4,9 +4,9 @@ Outbound address validation.
 This module provides two defensive helpers used to vet an address *before* the
 app is made to contact it:
 
-* :func:`validate_printer_uri` -- for a printer URI handed to a brother_ql
+* :func:`validate_printer_uri` — for a printer URI handed to a brother_ql
   backend (``tcp://`` / ``usb://``).
-* :func:`validate_webhook_url` -- for the relay power-control webhook
+* :func:`validate_webhook_url` — for the relay power-control webhook
   (``http://`` / ``https://``).
 
 They are deliberately separate functions with separate scheme allowlists. The
@@ -41,7 +41,7 @@ Design goals
 * Block only the genuinely dangerous targets for ``tcp://``: link-local /
   cloud-metadata (169.254.0.0/16), loopback (127.0.0.0/8, ::1) and the
   unspecified address 0.0.0.0 / ::.
-* No third-party dependencies -- standard library only.
+* No third-party dependencies — standard library only.
 """
 
 import ipaddress
@@ -61,7 +61,7 @@ ALLOWED_WEBHOOK_SCHEMES = ("http", "https")
 # link-local and already covered; these three are not:
 #
 #   fd00:ec2::254      AWS IMDS over IPv6. It sits in fd00::/8, the unique-local
-#                      range -- which is exactly the "private/LAN" space the
+#                      range, which is exactly the "private/LAN" space the
 #                      relay allowance opens up, so without this entry it would
 #                      be reachable.
 #   100.100.100.200    Alibaba Cloud metadata, inside the carrier-grade NAT
@@ -154,7 +154,7 @@ def validate_printer_uri(uri: str) -> None:
         _reject(f"loopback addresses are not allowed ({host}).")
 
     if ip.is_link_local:
-        # 169.254.0.0/16 and fe80::/10 -- includes the cloud metadata
+        # 169.254.0.0/16 and fe80::/10, which includes the cloud metadata
         # endpoint 169.254.169.254. Blocking this is the core SSRF guard.
         _reject(f"link-local / metadata addresses are not allowed ({host}).")
 
@@ -184,15 +184,15 @@ def validate_webhook_url(url: str) -> None:
         scheme-relative or scheme-less input.
       * Private / RFC1918 / unique-local / LAN addresses and plain hostnames are
         ALLOWED. This is the whole point.
-      * Link-local (169.254.0.0/16, fe80::/10) is still REFUSED -- this is the
+      * Link-local (169.254.0.0/16, fe80::/10) is still REFUSED. This is the
         cloud metadata endpoint and the classic SSRF target.
       * The metadata services that live outside link-local (AWS over IPv6,
         Alibaba, Oracle, ``metadata.google.internal``) are refused by name.
       * Loopback (127.0.0.0/8, ::1) and the unspecified address are still
         REFUSED, exactly as they are for a printer URI. A mains relay is a
         physical device on the network, never a service inside this app's own
-        container, so nothing legitimate is lost -- while allowing it would turn
-        a settings write into a way to POST at every other service bound on
+        container, so nothing legitimate is lost. Allowing it would turn a
+        settings write into a way to POST at every other service bound on
         localhost, including this app's own API.
       * DNS is not resolved, for the same reasons as in
         :func:`validate_printer_uri`: it costs latency on every settings write
@@ -227,7 +227,7 @@ def validate_webhook_url(url: str) -> None:
         _reject_webhook("URL is missing a host.")
 
     # Port, if given, has to be a real port. urlparse defers validation until
-    # .port is read, and then raises -- so read it here rather than letting it
+    # .port is read, and then raises, so read it here rather than letting it
     # blow up later inside urllib at request time.
     try:
         port = parsed.port

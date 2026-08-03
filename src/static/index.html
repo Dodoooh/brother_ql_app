@@ -875,9 +875,11 @@
                                     <!-- Relay power control. It sits directly under Keep Alive
                                          because its whole timing is measured from that window:
                                          the printer's own auto-power-off is subtracted from it,
-                                         and the turn-off moment is measured from its end. The
-                                         configuration itself lives in #relayModal — this is the
-                                         summary, the constraint line and the way in. -->
+                                         and the turn-off moment is measured from its end.
+                                         Everything past the master switch is inert while the
+                                         feature is off, so it is not shown at all then: a reader
+                                         who does not use this pays for two sentences and one
+                                         select, and nothing more. -->
                                     <p class="relay-intro">
                                         The printer's mains supply can run through a relay on a webhook, so it
                                         draws nothing between print runs: the app switches it on when a job
@@ -885,15 +887,203 @@
                                         off again once everything has wound down. <strong>Off until you turn
                                         it on</strong>, and every setting inert until then.
                                     </p>
-                                    <div class="relay-summary" id="relay-summary" role="status"></div>
+
+                                    <div class="field">
+                                        <label class="lbl" for="relay-enabled">Relay power control</label>
+                                        <select id="relay-enabled">
+                                            <option value="false">Disabled</option>
+                                            <option value="true">Enabled</option>
+                                        </select>
+                                        <div class="hint">No outbound request is made while this is off</div>
+                                    </div>
+
+                                    <!-- The one statement of what the feature is doing: the state,
+                                         the countdown, the last webhook and the last failure. It is
+                                         hidden outright while the relay is off in both the form and
+                                         the stored settings, and stays up while the two disagree so
+                                         that switching the feature off does not take the notice
+                                         that it is still armed away with it. -->
+                                    <div class="relay-summary" id="relay-summary" role="status" hidden></div>
+
                                     <!-- What would stop the next save of this form: both rules the
                                          server enforces are about Keep Alive above and the relay
                                          together, so the line lives between them. -->
                                     <div class="relay-check d-none" id="relay-constraint" role="status"></div>
-                                    <button type="button" id="relay-open" class="btn-ghost relay-open">
-                                        <i class="bi bi-plug"></i>
-                                        Configure the mains relay
-                                    </button>
+
+                                    <!-- The configuration, in place, from the moment it is switched
+                                         on. -->
+                                    <div id="relay-details" hidden>
+                                        <div class="section-cap relay-cap">The two webhooks</div>
+
+                                        <!-- One column per action, each saying whether it is on,
+                                             where it posts and how to fire it by hand. They are
+                                             deliberately not interchangeable: turn-on is what the
+                                             feature needs to work at all, turn-off is a choice on
+                                             top of it, and the tags and the turn-off column's own
+                                             switch say so.
+
+                                             Everything else about them is matched. Each column is
+                                             the same three parts in the same order — what the
+                                             action is and what it needs, then the button, then the
+                                             outcome of pressing it — so the two buttons sit on one
+                                             line whatever each column carries above them. See
+                                             .relay-actions. -->
+                                        <div class="relay-actions">
+                                            <section class="relay-action">
+                                                <div class="relay-action-body">
+                                                    <div class="relay-action-head">
+                                                        <span class="relay-action-name">Turn on</span>
+                                                        <span class="relay-action-tag relay-action-tag--required">required</span>
+                                                    </div>
+                                                    <p class="relay-action-copy">
+                                                        Sent when a job arrives at a printer that is not answering;
+                                                        the job waits in the queue while it boots instead of failing.
+                                                        turn_off falls back to this URL as well, so it is the one
+                                                        the feature cannot run without.
+                                                    </p>
+
+                                                    <div class="field">
+                                                        <label class="lbl" for="relay-turn-on-url">Webhook URL</label>
+                                                        <input type="text" id="relay-turn-on-url" class="mono"
+                                                               placeholder="http://192.168.1.42/relay/0?turn=on" autocomplete="off" spellcheck="false">
+                                                        <div class="hint hint-prose">
+                                                            http:// or https://, and an address on your own network
+                                                            is fine.
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="relay-action-foot">
+                                                    <button type="button" class="btn-ghost btn-sm relay-fire-btn" id="relay-fire-on">
+                                                        <i class="bi bi-lightning-charge"></i>
+                                                        Test turn_on
+                                                    </button>
+                                                </div>
+                                                <div class="relay-check d-none" id="relay-fire-result-on" role="status"></div>
+                                            </section>
+
+                                            <section class="relay-action">
+                                                <div class="relay-action-body">
+                                                    <div class="relay-action-head">
+                                                        <span class="relay-action-name">Turn off</span>
+                                                        <span class="relay-action-tag relay-action-tag--optional">optional</span>
+                                                    </div>
+                                                    <p class="relay-action-copy">
+                                                        Cuts mains power once the keep-alive window has closed and the
+                                                        printer has switched itself off. Opt-in on its own, because it
+                                                        is the half of this that can go wrong.
+                                                    </p>
+
+                                                    <div class="field">
+                                                        <label class="lbl" for="relay-turn-off-enabled">Send turn_off</label>
+                                                        <select id="relay-turn-off-enabled">
+                                                            <option value="false">Never, leave the mains on</option>
+                                                            <option value="true">Yes, cut mains power</option>
+                                                        </select>
+                                                        <div class="hint hint-prose">
+                                                            Needs Keep Alive set to "For a set time after each print".
+                                                            The turn-off moment is measured from the end of that window.
+                                                        </div>
+                                                    </div>
+
+                                                    <!-- Dimmed rather than removed while turn_off is never
+                                                         sent: these values still describe what would apply. -->
+                                                    <div id="relay-turn-off-fields">
+                                                        <div class="field">
+                                                            <span class="lbl" id="relay-turn-off-url-label">Where it posts</span>
+                                                            <div class="relay-choice" role="radiogroup" aria-labelledby="relay-turn-off-url-label">
+                                                                <label class="relay-choice-option" for="relay-turn-off-url-shared">
+                                                                    <input type="radio" name="relay-turn-off-url-mode" id="relay-turn-off-url-shared" value="shared" checked>
+                                                                    <span>Use the same URL as turn on</span>
+                                                                </label>
+                                                                <label class="relay-choice-option" for="relay-turn-off-url-own">
+                                                                    <input type="radio" name="relay-turn-off-url-mode" id="relay-turn-off-url-own" value="own">
+                                                                    <span>Use its own URL</span>
+                                                                </label>
+                                                            </div>
+                                                            <input type="text" id="relay-turn-off-url" class="mono relay-choice-field"
+                                                                   placeholder="http://192.168.1.42/relay/0?turn=off" autocomplete="off" spellcheck="false" hidden>
+                                                            <div class="hint hint-prose">
+                                                                The payload names the action, so one endpoint can serve
+                                                                both. Give turn_off its own URL only for a relay that
+                                                                switches on the address instead of on the body.
+                                                            </div>
+                                                        </div>
+
+                                                        <div class="field">
+                                                            <label class="lbl" for="relay-turn-off-delay">Safety margin (minutes)</label>
+                                                            <input type="number" id="relay-turn-off-delay" class="mono" value="5" min="0" max="60">
+                                                            <div class="hint hint-prose">
+                                                                How long after the window closes turn_off goes out, so the
+                                                                printer's own auto-power-off finishes first.
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                </div>
+
+                                                <div class="relay-action-foot">
+                                                    <button type="button" class="btn-ghost btn-sm relay-fire-btn relay-fire-btn--cut" id="relay-fire-off">
+                                                        <i class="bi bi-power"></i>
+                                                        Test turn_off
+                                                    </button>
+                                                </div>
+                                                <div class="relay-check d-none" id="relay-fire-result-off" role="status"></div>
+                                            </section>
+                                        </div>
+
+                                        <!-- What both URLs accept, said once under both columns. It
+                                             used to sit under the turn-on field alone, where it was
+                                             five lines of rules over a box the reader had usually
+                                             already filled in, and where it left the two columns
+                                             out of step with each other. -->
+                                        <div class="hint hint-prose relay-url-note">
+                                            Either URL can point at anything that answers a webhook — a Shelly, a
+                                            Tasmota plug, an ESPHome switch. http:// and https:// only: LAN and
+                                            private addresses are allowed, since that is where a relay lives, while
+                                            loopback, link-local and cloud metadata endpoints are refused. For an
+                                            endpoint that needs a credential, set
+                                            <span class="mono">RELAY_WEBHOOK_AUTHORIZATION</span> in the environment.
+                                        </div>
+
+                                        <div class="hint hint-prose relay-fire-note" id="relay-fire-note">
+                                            The test buttons send one webhook now, from the settings as they are
+                                            saved. An edit here is not used until you save it, and nothing else
+                                            moves: no schedule, no countdown, no keep-alive window.
+                                        </div>
+
+                                        <div class="section-cap relay-cap">The printer's own timer</div>
+
+                                        <div class="field">
+                                            <label class="lbl" for="relay-auto-power-off">Auto-power-off on the device</label>
+                                            <select id="relay-auto-power-off">
+                                                <option value="10">10 minutes</option>
+                                                <option value="20">20 minutes</option>
+                                                <option value="30">30 minutes</option>
+                                                <option value="40">40 minutes</option>
+                                                <option value="50">50 minutes</option>
+                                                <option value="60">60 minutes</option>
+                                            </select>
+                                            <div class="hint hint-prose">
+                                                Only the six intervals the printer's own menu offers. It is
+                                                subtracted from the keep-alive window, so the printer sleeps at
+                                                exactly the moment you asked for rather than that moment plus its
+                                                own timer.
+                                            </div>
+                                            <!-- The one thing the app cannot check for the user, next to
+                                                 the setting it is about rather than at the end of the
+                                                 block. The text is the server's, verbatim: see
+                                                 renderRelayWarning(). -->
+                                            <div class="relay-warning" id="relay-warning" role="alert" hidden>
+                                                <i class="bi bi-exclamation-triangle-fill relay-warning-icon" aria-hidden="true"></i>
+                                                <p class="relay-warning-text" id="relay-warning-text"></p>
+                                            </div>
+                                        </div>
+
+                                        <div class="section-cap relay-cap">What happens, and when</div>
+
+                                        <ol class="relay-chain" id="relay-chain"></ol>
+                                        <div class="hint hint-prose" id="relay-chain-note"></div>
+                                    </div>
 
                                     <div class="settings-actions">
                                         <button type="submit" class="btn-print">
@@ -971,7 +1161,14 @@
                     <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
                 </div>
                 <div class="modal-body">
-                    <p id="confirm-message">Are you sure?</p>
+                    <!-- Severity is carried by the icon, the same way the
+                         notifications carry it. It appears only for a question
+                         about destroying something; an ordinary confirmation
+                         has no icon and no colour at all. -->
+                    <div class="confirm-body">
+                        <i class="bi bi-exclamation-triangle-fill confirm-icon" id="confirm-icon" aria-hidden="true" hidden></i>
+                        <p id="confirm-message">Are you sure?</p>
+                    </div>
                 </div>
                 <div class="modal-footer">
                     <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="confirm-cancel">Cancel</button>
@@ -1006,8 +1203,8 @@
                         Print the target, look at how far it sits off-centre on the label, then move the
                         print the same way and print again. If the rings come out slightly too large or
                         too small for the label, correct the size as well. Repeat until it lands exactly.
-                        This applies to <strong>this label type only</strong>, and only when printing —
-                        previews always show the label as you designed it.
+                        This applies to <strong>this label type only</strong>, and only when printing.
+                        Previews always show the label as you designed it.
                     </p>
 
                     <div class="cal-grid">
@@ -1099,7 +1296,7 @@
                                     </button>
                                 </div>
                                 <div class="hint hint-prose cal-size-hint">
-                                    Corrects a printer that prints slightly large or small — below zero prints
+                                    Corrects a printer that prints slightly large or small. Below zero prints
                                     smaller. It does not resize your design, and the preview does not change.
                                 </div>
                             </div>
@@ -1143,145 +1340,6 @@
         </div>
     </div>
 
-    <!-- Mains Relay Modal -->
-    <div class="modal fade" id="relayModal" tabindex="-1" aria-labelledby="relayModalLabel" aria-hidden="true">
-        <div class="modal-dialog modal-lg modal-dialog-scrollable modal-dialog-centered">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title" id="relayModalLabel">Mains Relay</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-                </div>
-                <div class="modal-body">
-
-                    <!-- What the feature is doing right now, in one line -->
-                    <div class="relay-state">
-                        <span class="relay-state-body">
-                            <span class="relay-state-name">Relay power control</span>
-                            <span class="relay-state-detail" id="relay-state-detail">The printer is never switched by this app.</span>
-                        </span>
-                        <span class="relay-state-flag relay-state--idle" id="relay-state-flag">off</span>
-                    </div>
-
-                    <p class="relay-copy">
-                        A relay on the printer's mains supply — a Shelly, a Tasmota plug, an ESPHome
-                        switch, a flow in front of any of them — is driven by two webhooks. The app
-                        POSTs <span class="mono">turn_on</span> when a print job arrives and the
-                        printer does not answer, and the job then <strong>waits in the queue</strong>
-                        while the printer boots instead of failing.
-                    </p>
-
-                    <div class="field">
-                        <label class="lbl" for="relay-enabled">Relay power control</label>
-                        <select id="relay-enabled">
-                            <option value="false">Disabled</option>
-                            <option value="true">Enabled</option>
-                        </select>
-                        <div class="hint hint-prose">
-                            While this is off no outbound request is ever made and the keep-alive
-                            timing is exactly what it has always been.
-                        </div>
-                    </div>
-
-                    <!-- Everything below is inert while the feature is off, so it is
-                         not shown at all then. -->
-                    <div id="relay-details" hidden>
-                        <div class="field">
-                            <label class="lbl" for="relay-turn-on-url">Turn-on webhook URL</label>
-                            <input type="text" id="relay-turn-on-url" class="mono"
-                                   placeholder="http://192.168.1.42/relay/0?turn=on" autocomplete="off" spellcheck="false">
-                            <div class="hint hint-prose">
-                                http:// and https:// only. LAN and private addresses are allowed —
-                                that is where a relay lives — while loopback, link-local and cloud
-                                metadata endpoints are refused. If the endpoint needs a credential,
-                                set <span class="mono">RELAY_WEBHOOK_AUTHORIZATION</span> in the
-                                environment; it is deliberately not a setting, because settings are
-                                handed out in full by the API.
-                            </div>
-                        </div>
-
-                        <div class="section-sep"></div>
-                        <div class="section-cap">Switching off</div>
-
-                        <div class="grid-2">
-                            <div class="field">
-                                <label class="lbl" for="relay-turn-off-enabled">Send turn_off</label>
-                                <select id="relay-turn-off-enabled">
-                                    <option value="false">Never — leave the mains on</option>
-                                    <option value="true">Yes — cut mains power</option>
-                                </select>
-                                <div class="hint hint-prose">
-                                    Opt-in on its own: cutting mains power is the half of this that
-                                    can go wrong, so switching the feature on does not switch it on.
-                                </div>
-                            </div>
-                            <div class="field" id="relay-turn-off-fields">
-                                <label class="lbl" for="relay-turn-off-delay">Safety margin (minutes)</label>
-                                <input type="number" id="relay-turn-off-delay" class="mono" value="5" min="0" max="60">
-                                <div class="hint hint-prose">
-                                    How long after the window closes turn_off goes out, so the
-                                    printer's own auto-power-off finishes first.
-                                </div>
-                            </div>
-                        </div>
-
-                        <div class="field">
-                            <label class="lbl" for="relay-turn-off-url">
-                                Turn-off webhook URL <span class="lbl-optional">optional</span>
-                            </label>
-                            <input type="text" id="relay-turn-off-url" class="mono"
-                                   placeholder="http://192.168.1.42/relay/0?turn=off" autocomplete="off" spellcheck="false">
-                            <div class="hint hint-prose">
-                                Empty uses the turn-on URL, which is right for a relay that switches
-                                on the body it is sent. A second URL exists because plenty of relays
-                                switch on the address instead and never read the body.
-                            </div>
-                        </div>
-
-                        <div class="section-sep"></div>
-                        <div class="section-cap">The printer's own timer</div>
-
-                        <div class="field">
-                            <label class="lbl" for="relay-auto-power-off">Auto-power-off on the device</label>
-                            <select id="relay-auto-power-off">
-                                <option value="10">10 minutes</option>
-                                <option value="20">20 minutes</option>
-                                <option value="30">30 minutes</option>
-                                <option value="40">40 minutes</option>
-                                <option value="50">50 minutes</option>
-                                <option value="60">60 minutes</option>
-                            </select>
-                            <div class="hint hint-prose">
-                                Only the six intervals the printer's own menu offers, because no other
-                                value can describe a real device. It is subtracted from the keep-alive
-                                window, so the printer sleeps at exactly the moment you asked for
-                                rather than that moment plus its own timer.
-                            </div>
-                            <!-- The one thing the app cannot check for the user. The text is
-                                 the server's, verbatim: see renderRelayWarning(). -->
-                            <div class="relay-warning" id="relay-warning" role="alert" hidden>
-                                <i class="bi bi-exclamation-triangle-fill relay-warning-icon" aria-hidden="true"></i>
-                                <p class="relay-warning-text" id="relay-warning-text"></p>
-                            </div>
-                        </div>
-
-                        <div class="section-sep"></div>
-                        <div class="section-cap">What happens, and when</div>
-
-                        <ol class="relay-chain" id="relay-chain"></ol>
-                        <div class="hint hint-prose" id="relay-chain-note"></div>
-                    </div>
-
-                    <div id="relay-check" class="relay-check d-none" role="status"></div>
-
-                    <div class="relay-live" id="relay-live" hidden></div>
-                </div>
-                <div class="modal-footer relay-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
-                    <button type="button" class="btn btn-primary" id="relay-save">Save relay settings</button>
-                </div>
-            </div>
-        </div>
-    </div>
 
     <!-- Notifications Container -->
     <div id="notifications" class="notifications"></div>

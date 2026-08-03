@@ -722,6 +722,41 @@ body.dark-mode .modal-header .btn-close { filter: invert(1) grayscale(1) brightn
 }
 .btn.btn-secondary:hover { border-color: var(--accent); color: var(--accent); }
 
+/* ---- The destructive confirmation ---- */
+/* Severity is carried by the icon and by the button that does the damage, not
+   by a coloured bar or a shouting panel — the same division the notifications
+   use. --red rather than --warn: --warn means "this worked, but not the way you
+   asked", while this is a question about destroying something. */
+.confirm-body { display: flex; align-items: flex-start; gap: 12px; }
+.confirm-body p { margin: 0; font-size: 13.5px; line-height: 1.6; color: var(--ink); }
+.confirm-icon { flex: 0 0 auto; margin-top: 1px; font-size: 19px; color: var(--red); }
+.confirm-icon[hidden] { display: none; }
+
+/* Tinted rather than filled, so the label keeps its contrast in both themes —
+   --red is a bright #F87171 on dark panels, which white text does not survive. */
+.btn.btn-danger {
+    background: color-mix(in srgb, var(--red) 12%, var(--panel));
+    border: 1px solid color-mix(in srgb, var(--red) 55%, var(--border));
+    color: var(--red);
+    font-weight: 600;
+}
+.btn.btn-danger:hover {
+    background: color-mix(in srgb, var(--red) 20%, var(--panel));
+    border-color: var(--red);
+    color: var(--red);
+}
+.btn.btn-danger:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 22%, transparent);
+}
+/* The way out must not itself look like a hazard: it stays the calm one, and it
+   is the button that holds the focus when the question opens. */
+#confirmModal.is-danger .btn-secondary:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px var(--accent-soft);
+    border-color: var(--accent);
+}
+
 /* alerts inside status modal */
 .alert { border-radius: 9px; border: 1px solid var(--border); }
 .alert-success { background: color-mix(in srgb, var(--green) 12%, var(--panel)); border-color: color-mix(in srgb, var(--green) 35%, var(--border)); color: var(--ink); }
@@ -1955,9 +1990,10 @@ body.dark-mode .queue-badge { color: #06222B; }
 }
 
 /* ===================== Relay power control ===================== */
-/* Settings shows only the state of the feature; the configuration, the timing
-   chain and the warning live in #relayModal, the same division the print
-   alignment block uses. */
+/* All of it lives inline in Settings, under Keep Alive, and unfolds from the
+   master switch: with the feature off there is an introduction and that switch
+   and nothing else, so a reader who does not use this pays almost nothing for
+   it. Switched on, the configuration appears in place. */
 
 .relay-intro {
     font-size: 12.5px;
@@ -1993,8 +2029,7 @@ body.dark-mode .queue-badge { color: #06222B; }
 /* State chip. Three states, three readings: not switching anything, switching
    the printer on, and armed to cut mains power — which is the one worth a
    colour of its own. */
-.relay-summary-state,
-.relay-state-flag {
+.relay-summary-state {
     font-family: var(--mono);
     font-size: 10px;
     text-transform: uppercase;
@@ -2021,41 +2056,12 @@ body.dark-mode .queue-badge { color: #06222B; }
 .relay-icon-error { color: var(--red) !important; }
 .relay-countdown { font-variant-numeric: tabular-nums; color: var(--accent-strong); font-weight: 600; }
 
-.relay-open { width: auto; }
+.relay-summary[hidden] { display: none; }
 
-/* ---- Dialog ---- */
-.relay-state {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 12px;
-    padding: 12px 14px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--panel-2);
-    margin-bottom: 14px;
-}
-.relay-state-body { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.relay-state-name { font-size: 14px; font-weight: 600; }
-.relay-state-detail { font-size: 11.5px; color: var(--muted); }
-
-.relay-copy {
-    font-size: 12.5px;
-    color: var(--muted);
-    line-height: 1.6;
-    margin: 0 0 16px;
-}
-.relay-copy strong { color: var(--ink); font-weight: 600; }
-.relay-copy .mono { font-family: var(--mono); font-size: 11.5px; color: var(--ink); }
-
-.lbl-optional {
-    font-family: var(--mono);
-    font-size: 9px;
-    letter-spacing: 0.06em;
-    color: var(--muted-dim);
-    text-transform: uppercase;
-    margin-left: 6px;
-}
+/* ---- The configuration, once it is switched on ---- */
+/* Its own captions, spaced as a block inside a form rather than as the top of a
+   panel, so the three parts read apart without a rule between each of them. */
+.relay-cap { margin-top: 22px; }
 
 /* The turn-off fields say nothing while turn_off is never sent, so they are
    dimmed rather than removed: the margin is still worth reading as the value
@@ -2130,34 +2136,124 @@ body.dark-mode .queue-badge { color: #06222B; }
     background: var(--panel);
 }
 
-/* ---- What has actually happened ---- */
-.relay-live {
-    margin-top: 16px;
-    padding: 12px 14px;
-    border: 1px solid var(--border-soft);
-    border-radius: 10px;
-    background: var(--panel-2);
+/* ---- The two webhooks, side by side ---- */
+/* One column per action: what it is, where it posts, and the button that fires
+   it. The columns are symmetric on purpose, but they are not equals: turn-on is
+   what the feature needs to run at all, turn-off is a choice made on top of it,
+   which is what the tags and the turn-off column's own switch carry.
+
+   That difference is in the content, and it is the only difference the two are
+   allowed to show. Each column is the same three parts in the same order —
+   body, button, result — and the columns are stretched to a common height so
+   the two buttons sit on one line however much configuration is above them. */
+.relay-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
 }
-.relay-live[hidden] { display: none; }
-.relay-live-row {
+.relay-action {
     display: flex;
-    align-items: baseline;
-    justify-content: space-between;
-    gap: 12px;
+    flex-direction: column;
+    padding: 14px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+    min-width: 0;
 }
-.relay-live-row + .relay-live-row { margin-top: 7px; }
-.relay-live-key {
+/* Takes the slack, so the foot below it is at the bottom of the card. */
+.relay-action-body { flex: 1 1 auto; min-width: 0; }
+.relay-action-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+.relay-action-name { font-size: 13.5px; font-weight: 600; color: var(--ink); }
+.relay-action-tag {
     font-family: var(--mono);
-    font-size: 10px;
-    text-transform: uppercase;
+    font-size: 9px;
     letter-spacing: 0.07em;
+    text-transform: uppercase;
+    padding: 2px 7px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
     color: var(--muted-dim);
     white-space: nowrap;
 }
-.relay-live-value { font-size: 12.5px; color: var(--ink); text-align: right; min-width: 0; }
-.relay-live-value--idle { color: var(--muted-dim); }
-.relay-live-at { font-size: 11px; color: var(--muted-dim); }
-.relay-live-row--error .relay-live-value { color: var(--ink); }
+.relay-action-tag--required {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.relay-action-copy {
+    margin: 0 0 12px;
+    font-size: 11.5px;
+    line-height: 1.6;
+    color: var(--muted);
+}
+/* The button, held off whatever the body above it ends with. */
+.relay-action-foot { padding-top: 12px; }
+
+/* Where a browser has subgrid, the alignment stops depending on the two cards
+   being the same height: the three parts sit in three shared rows, so the
+   buttons are on one line and so are the two result lines, even once one of
+   them has been fired and the other has not. The flex rules above are the
+   fallback for a browser without it, and they get the resting state right on
+   their own. Row gaps come from the parts themselves here, so the tracks are
+   set flush. */
+@supports (grid-template-rows: subgrid) {
+    .relay-actions {
+        grid-template-rows: auto auto auto;
+        row-gap: 0;
+    }
+    .relay-action {
+        display: grid;
+        grid-row: span 3;
+        grid-template-rows: subgrid;
+    }
+}
+
+/* ---- Where turn_off posts ---- */
+/* A stated choice rather than an empty box to interpret: reusing the turn-on
+   URL is the default and reads as one of two options, not as something left
+   undone. */
+.relay-choice { display: flex; flex-direction: column; gap: 6px; }
+.relay-choice-option {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ink);
+    cursor: pointer;
+}
+.relay-choice-option input { margin-top: 2px; accent-color: var(--accent); cursor: pointer; }
+.relay-choice-field { margin-top: 8px; }
+.relay-choice-field[hidden] { display: none; }
+
+/* ---- Firing a webhook by hand ---- */
+.relay-fire-btn { width: 100%; }
+.relay-fire-btn[disabled] { opacity: .5; cursor: not-allowed; }
+.relay-fire-btn[disabled]:hover { border-color: var(--border); color: var(--ink); }
+/* Cutting mains power is the one destructive thing this app can do, so the
+   button that does it reads as such before it is pressed. */
+.relay-fire-btn--cut:hover:not([disabled]),
+.relay-fire-btn--cut:focus-visible:not([disabled]) {
+    border-color: var(--warn);
+    color: var(--warn);
+    box-shadow: none;
+}
+.relay-fire-btn--cut:focus-visible:not([disabled]) {
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--warn) 18%, transparent);
+}
+.relay-action > .relay-check {
+    margin-top: 10px;
+    padding: 8px 10px;
+    font-size: 11.5px;
+    line-height: 1.5;
+}
+.relay-url-note { margin-top: 12px; }
+.relay-fire-note { margin-top: 10px; }
 
 /* ---- The line that says what would be refused ---- */
 /* Same shape as the calibration status line: no colour of its own, the icon
@@ -2181,17 +2277,56 @@ body.dark-mode .queue-badge { color: #06222B; }
 .relay-check--warning .relay-check-icon { color: var(--warn); }
 .relay-check--error .relay-check-icon { color: var(--red); }
 
-/* The Settings copy of that line sits between Keep Alive and the button, so it
-   needs the spacing of a block rather than of a dialog footer. */
+/* ---- The outcome of a webhook fired by hand ---- */
+/* One line of facts, and the server's own longer account of the same request
+   folded under it: that text names the URL the field above already shows, but
+   it also carries the caveat that the printer itself was not probed, which is
+   worth keeping within reach rather than on screen. */
+.relay-check-body { flex: 1 1 auto; display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.relay-check-more {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 0;
+    border: 0;
+    background: none;
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--muted);
+    cursor: pointer;
+    transition: color .14s;
+}
+.relay-check-more:hover,
+.relay-check-more:focus-visible { color: var(--accent); }
+.relay-check-chevron { font-size: 9px; }
+.relay-check-detail {
+    margin: 0;
+    font-size: 11px;
+    line-height: 1.6;
+    color: var(--muted);
+    /* It quotes a URL, in a column half the width of the panel. */
+    overflow-wrap: anywhere;
+}
+.relay-check-detail[hidden] { display: none; }
+
+/* The constraint line sits between the master switch and the configuration it
+   is about, so it needs the spacing of a block in a form. */
 #relay-constraint { margin-top: 0; margin-bottom: 12px; }
 
 @media (max-width: 768px) {
-    .relay-state { flex-direction: column; align-items: flex-start; gap: 8px; }
-    .relay-live-row { flex-direction: column; gap: 2px; }
-    .relay-live-value { text-align: left; }
     .relay-chain-row { gap: 10px; }
     .relay-chain-time { min-width: 40px; }
-    .relay-footer { flex-direction: column-reverse; align-items: stretch; }
-    .relay-footer .btn { width: 100%; }
-    .relay-open { width: 100%; justify-content: center; }
+    /* Stacked, there is no pair to line up, and the shared rows would only take
+       the gap out from between the two cards. Back to the flow layout.
+       Deliberately after the @supports block above, which it overrides. */
+    .relay-actions {
+        grid-template-columns: 1fr;
+        grid-template-rows: none;
+        row-gap: 14px;
+    }
+    .relay-action {
+        display: flex;
+        grid-row: auto;
+    }
 }

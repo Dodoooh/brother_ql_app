@@ -306,8 +306,8 @@ class SettingsService:
            actually offers, and the turn-off delay must be a plausible safety
            margin. Both are checked whenever present, enabled or not, so a bad
            value cannot sit in the file waiting to be switched on.
-        2. **URLs.** Any non-empty URL is validated whenever it is present --
-           again regardless of whether the feature is on -- so a typo is caught
+        2. **URLs.** Any non-empty URL is validated whenever it is present —
+           again regardless of whether the feature is on — so a typo is caught
            where it is made rather than the first time the printer is switched
            off. A ``turn_on`` URL becomes *required* once the feature is
            enabled, because there is otherwise nothing to call.

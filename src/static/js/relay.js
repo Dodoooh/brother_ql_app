@@ -1,12 +1,15 @@
 // Brother QL Printer App - Relay power control
 //
-// The printer's mains supply can run through a relay driven over a webhook, so
-// it draws nothing between print runs. Two events exist: "turn_on", fired when a
-// print job arrives at a printer that is not answering, and "turn_off", fired
-// once everything has wound down.
+// A Brother QL powers itself up as soon as mains power returns, so a printer
+// whose supply runs through a relay can be left switched off at the wall and
+// still print: the job arrives, the relay closes, the printer boots and prints
+// it. Two events carry that. "turn_on" fires when a job arrives at a printer
+// that is not answering, and "turn_off" fires once everything has wound down.
 //
 // The part a user has to understand is the timing, because three timers are
-// involved and only two of them belong to this app:
+// involved and only two of them belong to this app. With relay power control
+// on, the printer's own interval is taken off the keep-alive window so the
+// device sleeps at the moment that was asked for:
 //
 //     0:00  last print
 //     3:50  keep-alive heartbeat stops   (the configured window minus the
@@ -15,13 +18,26 @@
 //     4:05  turn_off is sent              (after the safety margin, to a device
 //                                          that is already off)
 //
-// None of those numbers are worked out here. GET /printers/relay-power returns
-// the whole chain already derived, and this module only formats it — one place
-// decides what the timing is, and it is the same place that acts on it.
+// With it off, nothing is taken off anything: the heartbeat runs the whole
+// window and the device's own timer starts after it, so the printer sleeps at
+// 4:10 instead. Both shapes are correct, and the status payload says which one
+// is in force (hardware_offset_applied) so this file never has to guess.
 //
-// The same endpoint carries the warning about the printer's built-in
+// None of those numbers are worked out here. GET /printers/relay-power returns
+// the whole chain already derived, and this module only formats it: one place
+// decides what the timing is, and it is the same place that acts on it. The one
+// request this module makes that changes anything is
+// POST /printers/relay-power/send, which fires a single webhook on request.
+//
+// The status endpoint also carries the warning about the printer's built-in
 // auto-power-off, which the app can neither read nor change. That wording is
 // shown verbatim rather than paraphrased, for the same reason: one source.
+//
+// All of it lives inline in Settings, under Keep Alive, and unfolds from the
+// master switch: with relay power control off there is an introduction and that
+// switch, and nothing else. The fields are part of the Settings form and are
+// written by its own Save, so there is one save button on that page and one set
+// of rules checked before it is pressed.
 
 // The auto-power-off intervals the printer's own menu offers, in minutes. This
 // is not a range with a step — the device has exactly these six entries and no
@@ -45,7 +61,7 @@ const RELAY_WARNING_STORAGE_KEY = 'relay-power-warning';
 const RELAY_TICK_MS = 1000;
 
 // The relay settings exactly as last read from GET /settings. The configuration
-// is read from there rather than from the status endpoint so that the panel
+// is read from there rather than from the status endpoint so that the block
 // still describes itself correctly on a server that has no status endpoint yet.
 let relaySettings = {};
 
@@ -69,8 +85,25 @@ let relayWarningText = '';
 // Handle of the countdown repaint timer; null while nothing is counting down.
 let relayTicker = null;
 
-// Bootstrap modal instance, created lazily on first open.
-let relayModal = null;
+// Where a webhook fired by hand is sent. A POST with the action in the body,
+// so neither half can be reached by following a link, and one endpoint answers
+// for both.
+const RELAY_FIRE_ENDPOINT = '/api/v1/printers/relay-power/send';
+
+// Whether this server build has the endpoint at all. It is assumed to be there
+// until it answers otherwise once, at which point the buttons are withdrawn:
+// the feature itself works fine without it, so a build that cannot test by hand
+// is a missing convenience and not a fault to shout about.
+let relayFireSupported = true;
+
+// True while a hand-fired webhook is in flight, so the buttons cannot stack.
+let relayFireInFlight = false;
+
+// Whether the printer answered the last status check: true, false, or null when
+// nothing has been read yet. It is written by that check (see
+// relayNotePrinterReachable) rather than asked for here — cutting mains power
+// must not depend on a request of its own that could be the one that fails.
+let relayPrinterReachable = null;
 
 /**
  * Loose truthiness for a flag that may arrive as a boolean, a number or a
@@ -198,7 +231,7 @@ function loadRelayWarning() {
 
 /**
  * Take the relay settings out of a settings document. Called from
- * loadSettings(), and again after every write this module makes.
+ * loadSettings(), and again after every save of the Settings form.
  *
  * Every key is optional: a settings document from a server that predates the
  * feature simply describes a relay that is switched off, which is what such a
@@ -229,42 +262,75 @@ function applyRelaySettings(settings) {
         keep_alive_duration_seconds: relayNumber(source.keep_alive_duration_seconds) || 0
     };
 
+    // The fields are part of the Settings form, so they are filled from the
+    // stored document exactly like every other field on that page is.
+    fillRelayFields();
     renderRelayUI();
 }
 
 /**
- * Record the keep-alive window that has just been stored by the Settings form.
+ * Take in what the Settings form has just written, so the stored copy this
+ * module checks against is the one now in the file.
  *
- * The relay's whole timing hangs off that window, and both rules the server
- * enforces compare the two — so a save of the form has to move the stored copy
- * here as well, or the dialog would go on checking against values that are no
- * longer in the file.
+ * Both halves matter. The relay keys are the ones this block put in the body,
+ * and the keep-alive window is the other side of both rules the server
+ * enforces: the printer's own interval is subtracted from it, and the turn-off
+ * moment is measured from its end.
  *
- * @param {boolean} enabled - keep_alive_enabled as saved
- * @param {string} mode - keep_alive_mode as saved
- * @param {number} durationSeconds - keep_alive_duration_seconds as saved
+ * @param {Object} saved - the body that was PUT to /settings
  */
-function relayNoteKeepAliveSaved(enabled, mode, durationSeconds) {
-    relaySettings.keep_alive_enabled = !!enabled;
-    relaySettings.keep_alive_mode = mode || 'forever';
-    relaySettings.keep_alive_duration_seconds = relayNumber(durationSeconds) || 0;
+function relayNoteSettingsSaved(saved) {
+    const body = (saved && typeof saved === 'object') ? saved : {};
+
+    // Whether the half that can cut mains power has just been switched on. The
+    // server only issues its warning once that is stored, so this is the moment
+    // to make sure it has been read.
+    const arming = relayTruthy(body.relay_webhook_turn_off_enabled) && !relaySettings.turn_off_enabled;
+
+    applyRelaySettings(Object.assign({}, relayStoredDocument(), body));
     // The chain the server derives has moved with it.
     refreshRelayStatus();
-    renderRelayUI();
+
+    if (arming && relayWarningText && typeof showNotification === 'function') {
+        // Not a second copy of the wording: the same string, said once more at
+        // the moment the thing it warns about becomes possible.
+        showNotification(relayWarningText, 'warning', 15000);
+    }
 }
 
 /**
- * The relay settings this module owns, as a patch for the settings document.
+ * The stored settings, back in the shape of a settings document, so a patch can
+ * be merged onto them without re-reading the server.
  * @returns {Object}
  */
-function relaySettingsPatch() {
+function relayStoredDocument() {
     return {
         relay_webhook_enabled: relaySettings.enabled,
         relay_webhook_turn_on_url: relaySettings.turn_on_url,
         relay_webhook_turn_off_url: relaySettings.turn_off_url,
         relay_webhook_turn_off_enabled: relaySettings.turn_off_enabled,
         relay_webhook_turn_off_delay_minutes: relaySettings.turn_off_delay_minutes,
-        printer_auto_power_off_minutes: relaySettings.auto_power_off_minutes
+        printer_auto_power_off_minutes: relaySettings.auto_power_off_minutes,
+        keep_alive_enabled: relaySettings.keep_alive_enabled,
+        keep_alive_mode: relaySettings.keep_alive_mode,
+        keep_alive_duration_seconds: relaySettings.keep_alive_duration_seconds
+    };
+}
+
+/**
+ * The relay half of the settings document, read from the fields, for the
+ * Settings form's own save to carry. The same shape the Media block uses.
+ * @returns {Object}
+ */
+function relaySettingsPatch() {
+    const values = relayFormValues();
+    return {
+        relay_webhook_enabled: values.enabled,
+        relay_webhook_turn_on_url: values.turn_on_url,
+        relay_webhook_turn_off_url: values.turn_off_url,
+        relay_webhook_turn_off_enabled: values.turn_off_enabled,
+        relay_webhook_turn_off_delay_minutes: values.turn_off_delay_minutes,
+        printer_auto_power_off_minutes: values.auto_power_off_minutes
     };
 }
 
@@ -384,23 +450,20 @@ function stopRelayCountdown() {
 }
 
 /**
- * Repaint just the countdown numbers, in both places they appear. Nothing else
- * in the panel changes between server reads, so nothing else is touched.
+ * Repaint just the countdown number. Nothing else in the block changes between
+ * server reads, so nothing else is touched.
  */
 function paintRelayCountdown() {
     const remaining = relayRemainingMs();
-    const text = remaining === null ? '' : formatRelayCountdown(remaining / 1000);
-    ['relay-countdown', 'relay-countdown-live'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = text;
-    });
+    const el = document.getElementById('relay-countdown');
+    if (el) el.textContent = remaining === null ? '' : formatRelayCountdown(remaining / 1000);
 }
 
 // ===================== Rendering =====================
 
 /**
- * One line saying what state the feature is in, used by both the Settings
- * summary and the dialog's banner.
+ * One line saying what state the feature is in, as it is STORED — which is what
+ * the app is actually doing, whatever the fields currently say.
  * @returns {{flag: string, detail: string, tone: string}}
  */
 function relayStateLine() {
@@ -426,14 +489,27 @@ function relayStateLine() {
 }
 
 /**
- * Paint the Settings summary: the state, the countdown to the next turn-off and
- * the outcome of the last webhook. It is the whole of the feature that is
- * visible without opening the dialog, so it says what is happening rather than
- * what is configured.
+ * Paint the state block: what the feature is doing right now, the countdown to
+ * the next turn-off, the outcome of the last webhook and the last failure. It
+ * is the ONE statement of the current state on this page — the fields under it
+ * say what is configured, and this says what is running.
+ *
+ * It is hidden outright while the relay is off both in the fields and in the
+ * file, which is the state a reader who does not use this feature is in. It
+ * stays up while the two disagree, so that switching the master switch off does
+ * not take the notice that the relay is still armed away with it.
  */
 function renderRelaySummary() {
     const box = document.getElementById('relay-summary');
     if (!box) return;
+
+    const values = relayFormValues();
+    if (!relaySettings.enabled && !values.enabled) {
+        box.innerHTML = '';
+        box.hidden = true;
+        return;
+    }
+    box.hidden = false;
 
     const state = relayStateLine();
     const rows = [];
@@ -461,7 +537,7 @@ function renderRelaySummary() {
             rows.push(
                 '<div class="relay-summary-row">' +
                     '<i class="bi bi-hourglass" aria-hidden="true"></i>' +
-                    '<span>Nothing is scheduled — the window starts at the next print.</span>' +
+                    '<span>Nothing is scheduled. The window starts at the next print.</span>' +
                 '</div>'
             );
         }
@@ -490,6 +566,16 @@ function renderRelaySummary() {
             );
         }
 
+        if (relayStatus && relayStatus.authorization_configured) {
+            rows.push(
+                '<div class="relay-summary-row">' +
+                    '<i class="bi bi-key-fill" aria-hidden="true"></i>' +
+                    '<span>An authorization header is sent with each webhook, from the ' +
+                        'environment.</span>' +
+                '</div>'
+            );
+        }
+
         if (!relayStatusAvailable) {
             rows.push(
                 '<div class="relay-summary-row">' +
@@ -501,17 +587,73 @@ function renderRelaySummary() {
         }
     }
 
+    // The fields below are part of the Settings form, so an edit in them is not
+    // in force until that form is saved. Everything else in this block, and the
+    // two test buttons, describe what IS in force — which is worth saying once,
+    // here, rather than repeating next to each field it applies to.
+    if (relayFieldsAreUnsaved()) {
+        rows.push(
+            '<div class="relay-summary-row">' +
+                '<i class="bi bi-pencil-fill" aria-hidden="true"></i>' +
+                '<span>These fields have unsaved changes. Save Settings to apply them.</span>' +
+            '</div>'
+        );
+    }
+
     box.innerHTML = rows.join('');
+}
+
+/**
+ * Whether the relay fields say something other than what is stored.
+ * @returns {boolean}
+ */
+function relayFieldsAreUnsaved() {
+    const values = relayFormValues();
+    return values.enabled !== !!relaySettings.enabled ||
+        values.turn_on_url !== String(relaySettings.turn_on_url || '') ||
+        values.turn_off_url !== String(relaySettings.turn_off_url || '') ||
+        values.turn_off_enabled !== !!relaySettings.turn_off_enabled ||
+        values.turn_off_delay_minutes !== relaySettings.turn_off_delay_minutes ||
+        values.auto_power_off_minutes !== relaySettings.auto_power_off_minutes;
+}
+
+/**
+ * Whether the printer's own auto-power-off interval was actually taken off the
+ * keep-alive window to produce the heartbeat's length.
+ *
+ * It only is while relay power control is on. With the feature off the window
+ * is left exactly as configured, deliberately, so that an installation ignoring
+ * the relay sees no change in its timing at all.
+ *
+ * The server reports it (hardware_offset_applied), and that flag is the
+ * authority. A build too old to send it is read off its numbers instead: the
+ * interval that would be taken off is one of six values and the smallest is ten
+ * minutes, so a heartbeat exactly as long as the window is one that had nothing
+ * taken off it. That reading cannot produce a false negative, and it is the
+ * case the wording most needs to get right.
+ *
+ * @returns {?boolean} null when neither the flag nor the numbers can say
+ */
+function relaySubtractionApplied() {
+    if (!relayStatus) return null;
+    if (typeof relayStatus.hardware_offset_applied === 'boolean') {
+        return relayStatus.hardware_offset_applied;
+    }
+
+    const window_ = relayNumber(relayStatus.configured_window_seconds);
+    const effective = relayNumber(relayStatus.effective_keep_alive_seconds);
+    const hardware = relayNumber(relayStatus.printer_auto_power_off_minutes);
+    if (window_ === null || effective === null || hardware === null || hardware <= 0) return null;
+    return effective !== window_;
 }
 
 /**
  * Paint the timing chain: the four moments, counted from the last print.
  *
  * Every number in it comes from the status endpoint, which derives the whole
- * chain from the same settings the service acts on. Nothing is recomputed here
- * — the only arithmetic is adding two of the server's own numbers together for
- * the last row, because the moment it names is the sum of a window and a margin
- * the endpoint reports separately.
+ * chain from the same settings the service acts on. Nothing is recomputed here.
+ * The single exception is the turn_off row, whose moment is the sum of a window
+ * and a margin that the endpoint reports separately.
  */
 function renderRelayChain() {
     const list = document.getElementById('relay-chain');
@@ -554,6 +696,22 @@ function renderRelayChain() {
         '</li>'
     );
 
+    // Whether the printer's own interval is coming off the window. It is the
+    // difference between the two shapes this chain can have, so both the
+    // heartbeat row and the row after it are written from it.
+    const subtracted = relaySubtractionApplied();
+    const hardwareText = hardware === null ? 'own interval' : 'own ' + hardware + ' min';
+
+    // When the device's own timer expires, which is not the same as the end of
+    // the window unless the subtraction happened. The server works it out, for
+    // the same reason it works out everything else here; on a build that does
+    // not report it the two numbers it does report are added, which is the same
+    // arithmetic and both terms are still its own.
+    const serverPowerOff = relayNumber(relayStatus.printer_power_off_seconds);
+    const powerOff = serverPowerOff !== null
+        ? serverPowerOff
+        : ((effective !== null && hardware !== null) ? effective + hardware * 60 : null);
+
     const rows = [row(0, 'Last print', 'The window starts here, and any new job starts it again.')];
 
     if (effective === null) {
@@ -562,26 +720,51 @@ function renderRelayChain() {
         rows.push(row(0, 'The keep-alive heartbeat does nothing',
             'The window is exactly the printer\'s own interval, so the hardware carries all of it.',
             'is-quiet'));
+    } else if (subtracted === false) {
+        // Nothing was taken off, so saying it was would describe a different
+        // installation. Name the reason instead: the subtraction belongs to the
+        // relay, and the relay is not switched on.
+        rows.push(row(effective, 'The keep-alive heartbeat stops',
+            'The whole ' + formatRelayDuration(window_) + ' window, with nothing taken off it. ' +
+            'The printer\'s ' + hardwareText + ' is subtracted only while relay power control is ' +
+            'on, so leaving the relay off leaves this timing exactly as it has always been.'));
     } else {
         rows.push(row(effective, 'The keep-alive heartbeat stops',
-            'The ' + formatRelayDuration(window_) + ' window minus the printer\'s own ' +
-            (hardware === null ? 'interval' : hardware + ' min') + '.'));
+            'The ' + formatRelayDuration(window_) + ' window minus the printer\'s ' + hardwareText + '.'));
     }
 
-    rows.push(row(window_, 'The printer powers itself off',
-        'Its own timer, started when the heartbeat stopped — exactly the window configured.'));
+    if (subtracted === false && powerOff !== null) {
+        // Without the subtraction the device's timer starts after the window
+        // rather than inside it, so the printer sleeps that much later than the
+        // window closes. Two rows reading the same time is what made the chain
+        // contradict itself.
+        rows.push(row(powerOff, 'The printer powers itself off',
+            'Its ' + hardwareText + ' timer starts when the heartbeat stops, so the printer sleeps ' +
+            'that much after the window rather than at the end of it.'));
+    } else {
+        rows.push(row(powerOff === null ? window_ : powerOff, 'The printer powers itself off',
+            'Its own timer, started when the heartbeat stopped. That lands on exactly the window ' +
+            'configured.'));
+    }
 
     if (relaySettings.turn_off_enabled && delay !== null) {
         rows.push(row(window_ + delay, 'turn_off is sent',
             'After a ' + formatRelayDuration(delay) + ' safety margin, to a printer that should ' +
             'already be off.', 'is-cut'));
     } else {
+        // Why it is not sent, which is a setting and not a fact of the timing.
+        // The two reasons are different switches and are worth telling apart.
+        const why = !relaySettings.enabled
+            ? 'Relay power control is off in these settings, so the app never switches the mains. ' +
+              'Mains power stays on and the printer sleeps on its own.'
+            : 'Send turn_off is set to "Never" in these settings. Mains power stays on and the ' +
+              'printer sleeps on its own.';
         rows.push(
             '<li class="relay-chain-row is-quiet">' +
                 '<span class="relay-chain-time mono">—</span>' +
                 '<span class="relay-chain-body">' +
                     '<span class="relay-chain-what">turn_off is not sent</span>' +
-                    '<span class="relay-chain-why">Mains power stays on; the printer sleeps on its own.</span>' +
+                    '<span class="relay-chain-why">' + escapeHtml(why) + '</span>' +
                 '</span>' +
             '</li>'
         );
@@ -591,7 +774,7 @@ function renderRelayChain() {
 
     if (note) {
         note.textContent = 'Counted from the last print, as h:mm. These are the stored settings ' +
-            'as the server reads them — save to see an edit reflected here.';
+            'as the server reads them, so save an edit to see it here.';
     }
 }
 
@@ -624,101 +807,22 @@ function renderRelayWarning() {
 }
 
 /**
- * Paint everything the relay owns: the Settings summary, the dialog's fields
- * that mirror server state, the chain, the warning and the countdown timer.
+ * Paint everything the relay owns that is driven by state rather than by the
+ * fields: the state block, the chain, the warning, the constraint line, the
+ * test buttons and the countdown timer.
  */
 function renderRelayUI() {
     renderRelaySummary();
     renderRelayChain();
     renderRelayWarning();
-    renderRelayLive();
     renderRelayConstraint();
+    renderRelayFireButtons();
 
     if (relayRemainingMs() !== null) {
         startRelayCountdown();
     } else {
         stopRelayCountdown();
     }
-}
-
-/**
- * The dialog's live block: the countdown, the last webhook and the last error.
- * Deliberately separate from the form above it — one says what is configured,
- * the other says what has actually happened.
- */
-function renderRelayLive() {
-    const box = document.getElementById('relay-live');
-    if (!box) return;
-
-    if (!relaySettings.enabled) {
-        box.innerHTML = '';
-        box.hidden = true;
-        return;
-    }
-    box.hidden = false;
-
-    const rows = [];
-    const remaining = relayRemainingMs();
-
-    if (remaining !== null && remaining > 0) {
-        const at = new Date(Date.now() + remaining);
-        rows.push(
-            '<div class="relay-live-row">' +
-                '<span class="relay-live-key">Mains power off in</span>' +
-                '<span class="relay-live-value"><span class="relay-countdown mono" id="relay-countdown-live">' +
-                    escapeHtml(formatRelayCountdown(remaining / 1000)) + '</span>' +
-                    ' <span class="relay-live-at">(' + escapeHtml(formatRelayMoment(at.toISOString())) + ')</span></span>' +
-            '</div>'
-        );
-    } else if (relaySettings.turn_off_enabled) {
-        rows.push(
-            '<div class="relay-live-row">' +
-                '<span class="relay-live-key">Mains power off in</span>' +
-                '<span class="relay-live-value relay-live-value--idle">nothing scheduled</span>' +
-            '</div>'
-        );
-    }
-
-    const action = relayStatus && relayStatus.last_action;
-    rows.push(
-        '<div class="relay-live-row">' +
-            '<span class="relay-live-key">Last webhook</span>' +
-            '<span class="relay-live-value">' + (action
-                ? '<span class="mono">' + escapeHtml(String(action)) + '</span>' +
-                  (formatRelayMoment(relayStatus.last_action_at)
-                      ? ' <span class="relay-live-at">' + escapeHtml(formatRelayMoment(relayStatus.last_action_at)) + '</span>'
-                      : '')
-                : '<span class="relay-live-value--idle">none sent yet</span>') +
-            '</span>' +
-        '</div>'
-    );
-
-    const error = relayStatus && relayStatus.last_error;
-    if (error) {
-        rows.push(
-            '<div class="relay-live-row relay-live-row--error">' +
-                '<span class="relay-live-key">' +
-                    '<i class="bi bi-exclamation-circle-fill relay-icon-error" aria-hidden="true"></i> Last failure' +
-                '</span>' +
-                '<span class="relay-live-value">' + escapeHtml(String(error)) +
-                    (formatRelayMoment(relayStatus.last_error_at)
-                        ? ' <span class="relay-live-at">' + escapeHtml(formatRelayMoment(relayStatus.last_error_at)) + '</span>'
-                        : '') +
-                '</span>' +
-            '</div>'
-        );
-    }
-
-    if (relayStatus && relayStatus.authorization_configured) {
-        rows.push(
-            '<div class="relay-live-row">' +
-                '<span class="relay-live-key">Authorization</span>' +
-                '<span class="relay-live-value">sent from the environment</span>' +
-            '</div>'
-        );
-    }
-
-    box.innerHTML = rows.join('');
 }
 
 // ===================== The constraints the server enforces =====================
@@ -765,8 +869,8 @@ function relayConstraintMessage(relay, keepAlive) {
     if (!relay || !relay.enabled) return '';
 
     if (!String(relay.turn_on_url || '').trim()) {
-        return 'A turn-on webhook URL is required while relay power control is on — ' +
-            'there is nothing to call to switch the printer on.';
+        return 'A turn-on webhook URL is required while relay power control is on. Without ' +
+            'one there is nothing to call to switch the printer on.';
     }
 
     const hardwareSeconds = (relay.auto_power_off_minutes || 10) * 60;
@@ -787,37 +891,33 @@ function relayConstraintMessage(relay, keepAlive) {
             'to be safe.';
     }
 
+    // Not a server rule, and only the fields can be in this state: "its own
+    // URL" is chosen with the box still empty, which would store the shared
+    // answer without saying so.
+    if (relay.turn_off_url_mode === 'own' && !String(relay.turn_off_url || '').trim()) {
+        return 'Turn off is set to use its own URL, and there is none yet. Enter it, or switch ' +
+            'back to using the same URL as turn on.';
+    }
+
     return '';
 }
 
 /**
- * Whether the Settings form's keep-alive controls still say what is stored. The
- * dialog checks against the stored values, because those are the ones the
- * server will validate a relay write against — so a pending edit in the form
- * has to be named rather than silently used or silently ignored.
- * @returns {boolean}
- */
-function relayKeepAliveIsUnsaved() {
-    const form = relayFormKeepAlive();
-    return form.enabled !== relaySettings.keep_alive_enabled ||
-        form.mode !== relaySettings.keep_alive_mode ||
-        form.duration !== relaySettings.keep_alive_duration_seconds;
-}
-
-/**
- * Paint the constraint line in the Settings panel: what would stop the next
- * save of that form, before it is attempted.
+ * Paint the constraint line: what would stop the next save of the Settings
+ * form, before it is attempted.
  *
- * It exists because the two rules are enforced on the settings document as a
- * whole: switching Keep Alive to "Forever" while the relay is armed to cut
- * power is refused, and the refusal would otherwise arrive as a failed save of
- * everything else in the form as well.
+ * It reads the fields rather than the file, because the fields are what that
+ * save will send — and both rules are enforced on the settings document as a
+ * whole: an enabled relay with no turn-on URL, a window shorter than the
+ * printer's own interval, or turn_off armed without a timed window is refused.
+ * Saying so here keeps the refusal from arriving as a failed save of everything
+ * else in the form as well.
  */
 function renderRelayConstraint() {
     const box = document.getElementById('relay-constraint');
     if (!box) return;
 
-    const message = relayConstraintMessage(relaySettings, relayFormKeepAlive());
+    const message = relayConstraintMessage(relayFormValues(), relayFormKeepAlive());
     if (!message) {
         box.className = 'relay-check d-none';
         box.textContent = '';
@@ -845,21 +945,45 @@ function renderRelayConstraint() {
  * @returns {string} the reason, or '' when the form can be saved
  */
 function relayKeepAliveBlocker() {
-    const message = relayConstraintMessage(relaySettings, relayFormKeepAlive());
+    const message = relayConstraintMessage(relayFormValues(), relayFormKeepAlive());
     renderRelayConstraint();
     return message;
 }
 
-// ===================== The dialog =====================
+// ===================== Firing a webhook by hand =====================
 
 /**
- * Show a status line inside the dialog. Carries no colour of its own; the icon
- * says how severe it is, the same way the notifications do.
+ * Record whether the printer answered the last status check.
+ *
+ * Called by that check, which already runs on load, every 30 s and on the
+ * refresh button. The confirmation before cutting mains power hangs off this
+ * flag, and it must not depend on a request of its own: an extra call made at
+ * the moment of the decision is one more thing that can fail, and its answer
+ * would be no fresher than the one already on screen.
+ *
+ * @param {?boolean} reachable - true when the printer answered, false when it
+ *   did not, null when the check itself failed and nothing was learned
+ */
+function relayNotePrinterReachable(reachable) {
+    relayPrinterReachable = (reachable === null || reachable === undefined) ? null : !!reachable;
+}
+
+/**
+ * Show the outcome of a hand-fired webhook in the column of the action that
+ * fired it, in the same shape as every other status line here: no colour of its
+ * own, the icon carries the severity.
+ *
+ * The line itself is one glance's worth (see relayFireOutcome). Anything longer
+ * the server said about the same request is kept behind a toggle under it
+ * rather than thrown away.
+ *
+ * @param {string} action - 'turn_on' | 'turn_off'
  * @param {string} message - text to show (empty hides the line)
  * @param {string} [kind] - 'info' | 'success' | 'warning' | 'error'
+ * @param {string} [detail] - the server's own longer account, or '' for none
  */
-function setRelayCheck(message, kind = 'info') {
-    const el = document.getElementById('relay-check');
+function setRelayFireResult(action, message, kind = 'info', detail = '') {
+    const el = document.getElementById(action === 'turn_off' ? 'relay-fire-result-off' : 'relay-fire-result-on');
     if (!el) return;
 
     el.textContent = '';
@@ -873,16 +997,367 @@ function setRelayCheck(message, kind = 'info') {
     icon.setAttribute('aria-hidden', 'true');
     el.appendChild(icon);
 
+    const body = document.createElement('div');
+    body.className = 'relay-check-body';
+
     const text = document.createElement('span');
     text.textContent = message;
-    el.appendChild(text);
+    body.appendChild(text);
+
+    const extra = String(detail || '').trim();
+    if (extra && extra !== message) {
+        const panel = document.createElement('p');
+        panel.className = 'relay-check-detail';
+        panel.id = el.id + '-detail';
+        panel.textContent = extra;
+        panel.hidden = true;
+
+        const chevron = document.createElement('i');
+        chevron.className = 'bi bi-chevron-down relay-check-chevron';
+        chevron.setAttribute('aria-hidden', 'true');
+
+        const toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'relay-check-more';
+        toggle.setAttribute('aria-expanded', 'false');
+        toggle.setAttribute('aria-controls', panel.id);
+        toggle.appendChild(document.createTextNode('What the server said'));
+        toggle.appendChild(chevron);
+        toggle.addEventListener('click', () => {
+            const opening = panel.hidden;
+            panel.hidden = !opening;
+            toggle.setAttribute('aria-expanded', opening ? 'true' : 'false');
+            chevron.className = 'bi bi-chevron-' + (opening ? 'up' : 'down') + ' relay-check-chevron';
+        });
+
+        body.appendChild(toggle);
+        body.appendChild(panel);
+    }
+
+    el.appendChild(body);
 }
 
 /**
- * Read the dialog's fields into the same shape the settings document uses.
+ * Ask before cutting mains power, in the words of what is about to happen.
+ *
+ * Asked whenever the printer is answering, and also when nothing has been read
+ * from it yet: the question is only worth asking when there is something to
+ * lose, but "not known" is not the same as "nothing to lose".
+ *
+ * It is deliberately not asked when the last status check found the printer
+ * silent. Cutting power to a device that is already off interrupts nothing, and
+ * a dialog that appears every time, including the times it protects nothing,
+ * is one people learn to click through before reading.
+ *
+ * @returns {Promise<boolean>} whether to go ahead
+ */
+async function relayAskToCut() {
+    const message = relayPrinterReachable === true
+        ? 'Cut mains power to the printer now? It is answering, so it is awake. A print or a ' +
+          'feed in progress stops where it is, and the printer stays dead until a job wakes it ' +
+          'or you send turn_on from here.'
+        : 'Cut mains power to the printer now? Nothing has been read from the printer yet, so it ' +
+          'may well be awake. A print or a feed in progress would stop where it is, and the ' +
+          'printer stays dead until a job wakes it or you send turn_on from here.';
+
+    if (typeof confirmDialog === 'function') {
+        // The most destructive thing this app can do, and the only one that
+        // reaches the hardware, so it is asked as a warning rather than in the
+        // shape of every other question.
+        return confirmDialog(message, {
+            title: 'Cut mains power',
+            confirmLabel: 'Cut mains power',
+            destructive: true
+        });
+    }
+    return window.confirm(message);
+}
+
+/**
+ * The first sentence of a server message, which is where its reason lives: the
+ * ones this reads open with what happened and go on to say what to do about it.
+ *
+ * A full stop only ends a sentence here when whitespace follows it, so the dots
+ * in a host name or an address are not mistaken for one.
+ *
+ * @param {string} text
+ * @returns {string} '' when there is nothing to take
+ */
+function relayFirstSentence(text) {
+    const said = String(text || '').trim();
+    if (!said) return '';
+    const stop = said.search(/\.\s/);
+    return stop === -1 ? said : said.slice(0, stop + 1);
+}
+
+/**
+ * A server-supplied reason, but only when it can be read on its own line.
+ *
+ * The webhook URL is in the field directly above this line, so a reason that
+ * names it again says nothing new and costs a wrapped line to read. Those are
+ * left to the detail under the line, which carries the full text anyway. Any
+ * URL disqualifies a reason, not only the one this request went to: a report
+ * that could not name its destination (a 400, where nothing was sent) still
+ * quotes the offending address in a few of its messages.
+ *
+ * @param {string} text - the reason as the server worded it
+ * @param {string} url - the URL this request went to, as reported
+ * @returns {string} '' when the reason carries a URL, or when there is none
+ */
+function relayReasonForLine(text, url) {
+    const said = String(text || '').trim();
+    if (!said) return '';
+    if (url && said.indexOf(url) !== -1) return '';
+    if (/https?:\/\//i.test(said)) return '';
+    return said;
+}
+
+/**
+ * Shorten a delivery failure to the clause that says what went wrong.
+ * @param {string} error - the report's `error`
+ * @returns {string}
+ */
+function relayShortReason(error) {
+    return String(error || '').trim()
+        .replace(/^Relay webhook /, '')
+        .replace(/\.$/, '');
+}
+
+/**
+ * What the mains supply was left in, as a clause. Only the three states the API
+ * documents are reported; a build that says nothing gets no clause rather than
+ * a guessed one.
+ * @param {*} value - the report's `mains_power`
+ * @returns {string} '' when there is nothing to say
+ */
+function relayMainsPhrase(value) {
+    const state = String(value === undefined || value === null ? '' : value).trim().toLowerCase();
+    if (state === 'on' || state === 'off' || state === 'unknown') return 'mains power ' + state;
+    return '';
+}
+
+/**
+ * Capitalise the first letter, so a clause can open a sentence.
+ * @param {string} text
+ * @returns {string}
+ */
+function relayCapitalize(text) {
+    return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+}
+
+/**
+ * Keep the server's account whole: its message, plus the raw error when that is
+ * not already quoted inside it.
+ * @param {string} message
+ * @param {*} error
+ * @returns {string}
+ */
+function relayFireDetail(message, error) {
+    const said = String(message || '').trim();
+    const why = String(error || '').trim();
+    if (!why) return said;
+    if (!said) return why;
+    return said.indexOf(why.replace(/\.$/, '')) === -1 ? said + ' ' + why : said;
+}
+
+/**
+ * Put the outcome of a fired webhook into a line that a glance can take in, and
+ * hand back the server's own longer account to sit behind it.
+ *
+ * The line is composed here from the report's structured fields rather than
+ * taken from its `message`. That sentence opens by naming the webhook URL,
+ * which is already in the field directly above the line, and runs to four
+ * wrapped lines to carry three facts: whether it went out, what the relay
+ * answered, and what the mains supply was left in. Those three are what the
+ * payload reports, so they are what is shown.
+ *
+ * Nothing is discarded — the prose is returned as `detail`, because its caveat
+ * (the printer is not probed here, so allow it a minute to boot) is worth
+ * having. This is the opposite case to the hazard warning, which has one
+ * authoritative wording and is shown verbatim: see renderRelayWarning().
+ *
+ * A failure has to stay legible, so the reason survives into the line: the HTTP
+ * status the relay answered, or the transport error when nothing answered at
+ * all, or — for a request the app refused to make — the sentence saying which
+ * rule stopped it.
+ *
+ * @param {string} action - 'turn_on' | 'turn_off'
+ * @param {{ok: boolean, status: number}} response
+ * @param {*} data - the parsed body, or null
+ * @returns {{line: string, detail: string, kind: string}}
+ */
+function relayFireOutcome(action, response, data) {
+    const report = (data && typeof data === 'object') ? data : {};
+    const said = String(report.message || report.detail || '').trim();
+    const url = String(report.url || '').trim();
+    const status = relayNumber(
+        report.response_status !== undefined ? report.response_status :
+        (report.status_code !== undefined ? report.status_code : report.http_status));
+
+    // Refused before anything left the app: relay power control is off, no URL
+    // is configured, the action is not one of the two. There is no status and
+    // no mains state to report then, only which rule stopped it.
+    if (!response.ok) {
+        const why = relayReasonForLine(relayFirstSentence(said), url);
+        return {
+            line: action + ' was not sent. ' + (why || 'The app answered HTTP ' + response.status + '.'),
+            detail: said,
+            kind: 'error'
+        };
+    }
+
+    // Delivered by us, refused by the relay: reported, never counted as a
+    // webhook that worked.
+    const delivered = report.success !== false;
+
+    const facts = [];
+    if (status !== null) {
+        facts.push('HTTP ' + status);
+    } else if (!delivered) {
+        facts.push(relayReasonForLine(relayShortReason(report.error), url) || 'nothing came back');
+    }
+    const mains = relayMainsPhrase(report.mains_power);
+    if (mains) facts.push(mains);
+
+    return {
+        line: action + (delivered ? ' delivered.' : ' not confirmed.') +
+            (facts.length ? ' ' + relayCapitalize(facts.join(', ')) + '.' : ''),
+        detail: relayFireDetail(said, report.error),
+        kind: delivered ? 'success' : 'warning'
+    };
+}
+
+/**
+ * Fire one webhook now.
+ *
+ * The server sends it from the stored settings, so this makes no attempt to
+ * push an unsaved edit along with it: what is being tested is the
+ * configuration that the automatic webhooks will use.
+ *
+ * @param {string} action - 'turn_on' | 'turn_off'
+ * @returns {Promise<boolean>} whether the webhook went out
+ */
+async function fireRelay(action) {
+    if (relayFireInFlight || !relayFireSupported) return false;
+
+    if (action === 'turn_off' && relayPrinterReachable !== false) {
+        const go = await relayAskToCut();
+        if (!go) {
+            setRelayFireResult(action, 'Nothing was sent.', 'info');
+            return false;
+        }
+    }
+
+    const button = document.getElementById(action === 'turn_off' ? 'relay-fire-off' : 'relay-fire-on');
+    const originalHtml = button ? button.innerHTML : '';
+    relayFireInFlight = true;
+    setRelayFireResult(action, '');
+    if (button) {
+        button.disabled = true;
+        button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Sending...';
+    }
+
+    try {
+        const response = await fetch(RELAY_FIRE_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: action })
+        });
+
+        // The endpoint is newer than the rest of the feature, so a build without
+        // it says so by not answering. That is not a failure to report: the
+        // buttons simply withdraw, and everything else here still works.
+        if (response.status === 404 || response.status === 405 || response.status === 501) {
+            relayFireSupported = false;
+            return false;
+        }
+
+        let data = null;
+        try {
+            data = await response.json();
+        } catch (error) {
+            // Non-JSON body; the status code still says how it went.
+        }
+
+        const outcome = relayFireOutcome(action, response, data);
+        setRelayFireResult(action, outcome.line, outcome.kind, outcome.detail);
+
+        // What the server reports about the relay has just moved: the last
+        // action, or the last error.
+        await refreshRelayStatus();
+        return response.ok;
+    } catch (error) {
+        console.error('Error firing the relay webhook:', error);
+        const why = String((error && error.message) || 'the request failed').replace(/\.$/, '');
+        setRelayFireResult(action, action + ' was not sent. The app could not be reached: ' + why + '.', 'error');
+        return false;
+    } finally {
+        relayFireInFlight = false;
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalHtml;
+        }
+        renderRelayFireButtons();
+    }
+}
+
+/**
+ * Reflect what the two test buttons can do, which depends on the STORED
+ * settings rather than on the fields: the server fires what is in the file, so
+ * a URL that has only been typed cannot be tested yet.
+ */
+function renderRelayFireButtons() {
+    const on = document.getElementById('relay-fire-on');
+    const off = document.getElementById('relay-fire-off');
+    const note = document.getElementById('relay-fire-note');
+
+    if (!relayFireSupported) {
+        if (on) on.hidden = true;
+        if (off) off.hidden = true;
+        setRelayFireResult('turn_on', '');
+        setRelayFireResult('turn_off', '');
+        if (note) {
+            note.textContent = 'This server build cannot fire a webhook on request, so there are ' +
+                'no test buttons. The webhooks it sends by itself are unaffected.';
+        }
+        return;
+    }
+
+    const turnOn = String(relaySettings.turn_on_url || '').trim();
+    const turnOff = String(relaySettings.turn_off_url || '').trim() || turnOn;
+    const ready = !!relaySettings.enabled;
+
+    const apply = (button, url) => {
+        if (!button) return;
+        button.hidden = false;
+        button.disabled = relayFireInFlight || !ready || !url;
+        button.title = button.disabled
+            ? 'Save Settings with relay power control on and a turn-on URL first. The test sends the stored settings.'
+            : '';
+    };
+    apply(on, turnOn);
+    apply(off, turnOff);
+}
+
+/**
+ * Which of the two answers the "Where it posts" choice is currently giving.
+ * @returns {string} 'shared' | 'own'
+ */
+function relayTurnOffUrlMode() {
+    const own = document.getElementById('relay-turn-off-url-own');
+    return own && own.checked ? 'own' : 'shared';
+}
+
+/**
+ * Read the relay fields into the same shape the settings document uses.
+ *
+ * An empty turn-off URL is how the settings document says "use the turn-on
+ * one", so the shared answer is written that way and the field's contents are
+ * simply not sent. Nothing new is stored for the choice itself.
+ *
  * @returns {Object}
  */
-function relayDialogValues() {
+function relayFormValues() {
     const enabledEl = document.getElementById('relay-enabled');
     const turnOnEl = document.getElementById('relay-turn-on-url');
     const turnOffEl = document.getElementById('relay-turn-off-url');
@@ -892,11 +1367,13 @@ function relayDialogValues() {
 
     const delay = parseInt(delayEl && delayEl.value, 10);
     const hardware = parseInt(hardwareEl && hardwareEl.value, 10);
+    const mode = relayTurnOffUrlMode();
 
     return {
         enabled: !!enabledEl && enabledEl.value === 'true',
         turn_on_url: turnOnEl ? turnOnEl.value.trim() : '',
-        turn_off_url: turnOffEl ? turnOffEl.value.trim() : '',
+        turn_off_url_mode: mode,
+        turn_off_url: (mode === 'own' && turnOffEl) ? turnOffEl.value.trim() : '',
         turn_off_enabled: !!turnOffEnabledEl && turnOffEnabledEl.value === 'true',
         turn_off_delay_minutes: Number.isFinite(delay) ? Math.min(60, Math.max(0, delay)) : 5,
         auto_power_off_minutes: RELAY_AUTO_POWER_OFF_CHOICES.indexOf(hardware) !== -1 ? hardware : 10
@@ -904,9 +1381,10 @@ function relayDialogValues() {
 }
 
 /**
- * Push the stored settings into the dialog's fields.
+ * Push the stored settings into the fields. Called from applyRelaySettings(),
+ * so the block is filled by the same load that fills the rest of Settings.
  */
-function fillRelayDialog() {
+function fillRelayFields() {
     const set = (id, value) => {
         const el = document.getElementById(id);
         if (el) el.value = value;
@@ -917,16 +1395,27 @@ function fillRelayDialog() {
     set('relay-turn-off-enabled', relaySettings.turn_off_enabled ? 'true' : 'false');
     set('relay-turn-off-delay', String(relaySettings.turn_off_delay_minutes));
     set('relay-auto-power-off', String(relaySettings.auto_power_off_minutes));
-    updateRelayDialogUI();
+
+    // A stored turn-off URL is the only thing that means "its own"; no URL is
+    // the shared answer, which is also the default for a fresh configuration.
+    const own = !!String(relaySettings.turn_off_url || '').trim();
+    const ownRadio = document.getElementById('relay-turn-off-url-own');
+    const sharedRadio = document.getElementById('relay-turn-off-url-shared');
+    if (ownRadio) ownRadio.checked = own;
+    if (sharedRadio) sharedRadio.checked = !own;
+
+    updateRelayFields();
 }
 
 /**
- * Reflect the dialog's own state: the fields below the master switch are inert
- * while it is off, exactly as the settings are, and the turn-off fields follow
- * the turn-off switch the same way.
+ * Reflect what the fields say: the configuration appears with the master switch
+ * and is not there at all while it is off, and the turn-off fields follow the
+ * turn-off switch the same way. Everything that describes state rather than
+ * configuration is repainted with it, because both the state block and the
+ * constraint line read these fields.
  */
-function updateRelayDialogUI() {
-    const values = relayDialogValues();
+function updateRelayFields() {
+    const values = relayFormValues();
 
     const details = document.getElementById('relay-details');
     if (details) details.hidden = !values.enabled;
@@ -934,186 +1423,47 @@ function updateRelayDialogUI() {
     const turnOffFields = document.getElementById('relay-turn-off-fields');
     if (turnOffFields) turnOffFields.classList.toggle('relay-inert', !values.turn_off_enabled);
 
-    const banner = document.getElementById('relay-state-flag');
-    const detail = document.getElementById('relay-state-detail');
-    const state = relayStateLine();
-    if (banner) {
-        banner.textContent = state.flag;
-        banner.className = 'relay-state-flag relay-state--' + state.tone;
-    }
-    if (detail) detail.textContent = state.detail;
+    // The second URL box exists only for the answer that asks for it.
+    const turnOffUrl = document.getElementById('relay-turn-off-url');
+    if (turnOffUrl) turnOffUrl.hidden = values.turn_off_url_mode !== 'own';
 
-    // The pre-check runs on every edit, so the two rules are answered while the
-    // combination is being made rather than by a refused save.
-    const message = relayConstraintMessage(values, {
-        enabled: relaySettings.keep_alive_enabled,
-        mode: relaySettings.keep_alive_mode,
-        duration: relaySettings.keep_alive_duration_seconds
-    });
-
-    if (message) {
-        setRelayCheck(message, 'warning');
-    } else if (values.enabled && relayKeepAliveIsUnsaved()) {
-        setRelayCheck('Keep Alive has unsaved changes in Settings. The check here uses the stored ' +
-            'values, which are the ones the server checks a relay change against.', 'info');
-    } else {
-        setRelayCheck('');
-    }
-
-    const save = document.getElementById('relay-save');
-    if (save) save.disabled = !!message;
-}
-
-/**
- * Open the relay dialog, on the stored settings and the freshest status.
- */
-function openRelayDialog() {
-    const modalEl = document.getElementById('relayModal');
-    if (!modalEl) return;
-
-    fillRelayDialog();
     renderRelayUI();
-    // The dialog is the one place the countdown and the last error are read
-    // closely, so it is worth one request on opening rather than showing
-    // whatever the 30 s poll last left behind.
-    refreshRelayStatus();
-
-    if (!relayModal && window.bootstrap && bootstrap.Modal) {
-        relayModal = new bootstrap.Modal(modalEl);
-    }
-    if (relayModal) relayModal.show();
-}
-
-/**
- * Write the relay settings.
- *
- * Only the relay keys are sent, on top of a freshly read settings document, so
- * an unsaved edit elsewhere in the Settings form is never committed as a side
- * effect — the same shape the media and calibration writes use.
- */
-async function saveRelaySettings() {
-    const button = document.getElementById('relay-save');
-    const values = relayDialogValues();
-
-    const message = relayConstraintMessage(values, {
-        enabled: relaySettings.keep_alive_enabled,
-        mode: relaySettings.keep_alive_mode,
-        duration: relaySettings.keep_alive_duration_seconds
-    });
-    if (message) {
-        setRelayCheck(message, 'warning');
-        return false;
-    }
-
-    const originalHtml = button ? button.innerHTML : '';
-    if (button) {
-        button.disabled = true;
-        button.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Saving...';
-    }
-
-    // Whether the half that can cut mains power is being switched on here. The
-    // server only issues its warning once that is stored, so this is the moment
-    // to make sure it is read.
-    const armingTurnOff = values.turn_off_enabled && !relaySettings.turn_off_enabled;
-
-    try {
-        let base = null;
-        try {
-            const read = await fetch('/api/v1/settings');
-            if (read.ok) base = await read.json();
-        } catch (error) {
-            console.error('Error reading settings for the relay:', error);
-        }
-
-        const uriEl = document.getElementById('printer-uri');
-        const modelEl = document.getElementById('printer-model');
-        const labelEl = document.getElementById('label-size');
-
-        const body = {
-            printer_uri: (base && base.printer_uri) || (uriEl ? uriEl.value : ''),
-            printer_model: (base && base.printer_model) || (modelEl ? modelEl.value : ''),
-            label_size: (base && base.label_size) || (labelEl ? labelEl.value : ''),
-            relay_webhook_enabled: values.enabled,
-            relay_webhook_turn_on_url: values.turn_on_url,
-            relay_webhook_turn_off_url: values.turn_off_url,
-            relay_webhook_turn_off_enabled: values.turn_off_enabled,
-            relay_webhook_turn_off_delay_minutes: values.turn_off_delay_minutes,
-            printer_auto_power_off_minutes: values.auto_power_off_minutes
-        };
-
-        const response = await fetch('/api/v1/settings', {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body)
-        });
-
-        if (!response.ok) {
-            let reason = 'Error: ' + response.status;
-            try {
-                const data = await response.json();
-                reason = data.message || data.details || reason;
-            } catch (error) {
-                // Non-JSON body: keep the generic message.
-            }
-            throw new Error(reason);
-        }
-
-        // Take the server's view of what is now stored, rather than the form's.
-        applyRelaySettings(Object.assign({}, base || {}, body));
-        await refreshRelayStatus();
-        setRelayCheck('Saved.', 'success');
-        if (typeof showNotification === 'function') {
-            showNotification(values.enabled
-                ? 'Relay power control saved.'
-                : 'Relay power control switched off and saved.', 'success');
-        }
-
-        if (armingTurnOff && relayWarningText && typeof showNotification === 'function') {
-            // Not a second copy of the wording: the same string, said once more
-            // at the moment the thing it warns about becomes possible.
-            showNotification(relayWarningText, 'warning', 15000);
-        }
-        return true;
-    } catch (error) {
-        console.error('Error saving the relay settings:', error);
-        setRelayCheck('Could not save: ' + error.message, 'error');
-        return false;
-    } finally {
-        if (button) {
-            button.disabled = false;
-            button.innerHTML = originalHtml;
-        }
-        updateRelayDialogUI();
-    }
 }
 
 // ===================== Wiring =====================
 
 /**
- * Wire up relay power control: the Settings summary, the dialog's fields and
- * its save. Called from setupEventListeners() in core.js.
+ * Wire up relay power control: the fields in Settings, the two test buttons and
+ * the keep-alive controls the rules are shared with. Called from
+ * setupEventListeners() in core.js.
+ *
+ * There is no save of its own. The fields are part of the Settings form, and
+ * that form's Save carries them (see relaySettingsPatch), so the two rules are
+ * checked once, against what is about to be sent.
  */
 function setupRelayPower() {
     loadRelayWarning();
 
-    const open = document.getElementById('relay-open');
-    if (open) open.addEventListener('click', openRelayDialog);
-
-    const save = document.getElementById('relay-save');
-    if (save) save.addEventListener('click', saveRelaySettings);
-
-    // Every field in the dialog re-runs the pre-check, so a combination the
-    // server would refuse is named while it is being made.
+    // Every field re-runs the pre-check, so a combination the server would
+    // refuse is named while it is being made rather than by a refused save.
     ['relay-enabled', 'relay-turn-on-url', 'relay-turn-off-url', 'relay-turn-off-enabled',
-     'relay-turn-off-delay', 'relay-auto-power-off'].forEach(id => {
+     'relay-turn-off-delay', 'relay-auto-power-off', 'relay-turn-off-url-shared',
+     'relay-turn-off-url-own'].forEach(id => {
         const el = document.getElementById(id);
         if (!el) return;
-        const event = el.tagName === 'SELECT' ? 'change' : 'input';
-        el.addEventListener(event, updateRelayDialogUI);
+        const event = (el.tagName === 'SELECT' || el.type === 'radio') ? 'change' : 'input';
+        el.addEventListener(event, updateRelayFields);
     });
 
-    // The keep-alive controls are the other half of both rules, so the Settings
-    // panel's own line follows them.
+    // The two test buttons, each in the column of the action it fires.
+    const fireOn = document.getElementById('relay-fire-on');
+    if (fireOn) fireOn.addEventListener('click', () => { fireRelay('turn_on'); });
+
+    const fireOff = document.getElementById('relay-fire-off');
+    if (fireOff) fireOff.addEventListener('click', () => { fireRelay('turn_off'); });
+
+    // The keep-alive controls are the other half of both rules, so the line
+    // between them follows those too.
     ['keep-alive-enabled', 'keep-alive-mode', 'keep-alive-duration-value',
      'keep-alive-duration-unit'].forEach(id => {
         const el = document.getElementById(id);
@@ -1134,5 +1484,5 @@ function setupRelayPower() {
         });
     }
 
-    renderRelayUI();
+    updateRelayFields();
 }

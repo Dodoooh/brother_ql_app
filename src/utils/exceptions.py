@@ -44,7 +44,7 @@ class RelayWebhookError(PrinterError):
     Deliberately a subclass of :class:`PrinterError`: a relay that will not
     answer means the printer cannot be powered, so every caller that already
     knows how to handle "the printer is not usable" handles this correctly
-    without being taught a new type -- while code that cares specifically about
+    without being taught a new type, while code that cares specifically about
     the relay can still tell the two apart.
     """
     pass

@@ -43,7 +43,7 @@ def check_printer_status(body: Dict[str, Any]) -> Dict[str, Any]:
         (``auto_switch``).
 
         The switch itself is the client's to make. ``label_size`` already has one
-        writer -- PUT /settings, on every change -- and a status check that wrote
+        writer — PUT /settings, on every change — and a status check that wrote
         it too would be racing that from a poll the UI repeats every 30 seconds,
         besides turning a read into an edit of the user's configuration.
     """
@@ -67,8 +67,8 @@ def check_printer_status(body: Dict[str, Any]) -> Dict[str, Any]:
         # status with HTTP 200 and let the client render it.
         #
         # The media/label comparison is done here rather than in the browser on
-        # purpose: the rules for it -- which identifiers are the same physical
-        # medium, which sizes cannot be told apart -- live with the label
+        # purpose: the rules for it — which identifiers are the same physical
+        # medium, which sizes cannot be told apart — live with the label
         # catalogue, and a second copy of them in JavaScript would be a second
         # thing to keep right.
         status = printer_service.check_printer_status(printer_uri, printer_model,
@@ -111,10 +111,22 @@ def get_relay_power_status() -> Dict[str, Any]:
     the printer.
 
     Returns:
-        Dict containing the relay power-control status. When the feature and its
-        turn_off half are both on, it carries a ``warning`` naming the one thing
-        the app cannot check for the user — that the configured
-        ``printer_auto_power_off_minutes`` matches the device.
+        Dict containing the relay power-control status. It always carries a
+        ``warning`` naming the one thing the app cannot check for the user, that
+        the configured ``printer_auto_power_off_minutes`` matches the device, and
+        a ``hardware_offset_applied`` flag saying whether that interval was
+        actually subtracted from the keep-alive window, so a client never has to
+        infer the subtraction from two numbers that can legitimately be equal.
+
+        The timing chain comes as clock times as well as offsets: every moment
+        is reported both absolutely (unix and ISO-8601) and as the seconds left
+        until it, and ``next_step`` names the one being waited on. ``origin_source``
+        distinguishes a real print from the process start time the window falls
+        back to before anything has printed, and from the current time the chain
+        is re-based to once a window has run out; ``last_print_at`` answers "when
+        did it last print" on its own, and is null when it has not. That is the
+        difference between a display saying "last print" truthfully and saying it
+        about a print that never happened.
     """
     try:
         logger.info("Getting relay power status")
@@ -122,6 +134,65 @@ def get_relay_power_status() -> Dict[str, Any]:
     except Exception as e:
         logger.error("Error getting relay power status", error=str(e), exc_info=True)
         raise PrinterError(f"Error getting relay power status: {str(e)}")
+
+def send_relay_power_webhook(body: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Send one relay power webhook immediately and report the outcome.
+
+    Unlike ``get_relay_power_status`` this really switches the relay: it is a
+    POST because it is an action, and the action is named in the body rather
+    than in the path so that ``turn_on`` and ``turn_off`` cannot be reached by
+    guessing at a URL. Sending ``turn_off`` cuts mains power to the printer.
+
+    It needs relay power control to be switched on and a URL for the action, and
+    nothing else. The schedule does not have to be armed, and it is not touched:
+    see ``RelayPowerService.send_now``.
+
+    Args:
+        body: Dict with an ``action`` of ``turn_on`` or ``turn_off``.
+
+    Returns:
+        Dict reporting what was sent, where, what came back and what that means
+        for the printer's power. A relay that refused the request is reported
+        with ``success: false`` and HTTP 200: the endpoint's job is to say what
+        happened, and a refusal is an outcome rather than an error in carrying
+        the request out. Only a request that could not be attempted at all is an
+        error status.
+
+    Raises:
+        ValidationError: When the action is missing or unknown, when relay power
+            control is switched off, or when no URL is configured for the action.
+            Nothing was sent in any of those cases.
+    """
+    try:
+        action = body.get("action")
+        if action is None:
+            raise ValidationError("action is required", "action")
+        if not isinstance(action, str):
+            raise ValidationError("action must be a string", "action")
+
+        logger.info("Relay webhook requested by hand", action=action)
+        report = relay_service.send_now(action)
+        if report["success"]:
+            logger.info("Relay webhook sent on request", action=action,
+                        response_status=report["response_status"],
+                        mains_power=report["mains_power"])
+        else:
+            logger.warning("Relay webhook requested by hand could not be confirmed",
+                           action=action, error=report["error"])
+        return report
+    except ValidationError as e:
+        logger.warning("Validation error", error=str(e))
+        raise
+    except ValueError as e:
+        # The service refuses a request it must not attempt (feature off, no URL,
+        # unknown action) with a plain ValueError, exactly as the settings
+        # validator does. Those are bad requests, not server faults.
+        logger.warning("Refusing to send a relay webhook", error=str(e))
+        raise ValidationError(str(e), "relay_power")
+    except Exception as e:
+        logger.error("Error sending relay webhook", error=str(e), exc_info=True)
+        raise PrinterError(f"Error sending relay webhook: {str(e)}")
 
 def update_keep_alive(body: Dict[str, Any]) -> Dict[str, Any]:
     """

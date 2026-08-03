@@ -647,8 +647,8 @@ function setMediaAutoSwitch(enabled) {
     syncAutoSwitchControl();
     refreshMediaUI();
     persistMediaSettings(mediaAutoSwitch
-        ? 'Automatic switching is on — the app will follow the printer.'
-        : 'Automatic switching is off — the app will ask first.');
+        ? 'Automatic switching is on. The app follows the printer from now on.'
+        : 'Automatic switching is off. The app asks first from now on.');
 
     // Turning it on with a roll already sitting there should act on that roll
     // rather than wait for the next one.
@@ -914,7 +914,7 @@ function announceMediaChange() {
         // Automatic mode is on and did not act. Saying so is the point: a mode
         // that silently does nothing is indistinguishable from one that is off.
         showNotification('The printer now has ' + name + ' loaded, and automatic switching cannot ' +
-            'tell which of these rolls it is. Pick one below — the app is still set to ' +
+            'tell which of these rolls it is. Pick one below. The app is still set to ' +
             configuredLabelName() + '.', 'warning');
     } else {
         showNotification('The printer now has ' + name + ' loaded; the app is set to ' +
@@ -990,7 +990,7 @@ function mediumPillView() {
             ? {
                 state: 'idle',
                 text: 'Changing roll…',
-                title: 'No roll loaded — ' + was + ' was in it a moment ago. The app prints for ' +
+                title: 'No roll loaded. ' + was + ' was in it a moment ago. The app prints for ' +
                     configured + '. Click to change the label type.'
             }
             : {
@@ -1144,11 +1144,11 @@ function updateMediaMismatch() {
  */
 function ownedMediaSaveMessage() {
     if (ownedMedia.length === 0) {
-        return 'Nothing listed — the label picker shows the whole catalogue.';
+        return 'Nothing listed, so the label picker shows the whole catalogue.';
     }
     return ownedMedia.length === 1
-        ? '1 medium listed as yours — it leads the label picker.'
-        : ownedMedia.length + ' media listed as yours — they lead the label picker.';
+        ? '1 medium listed as yours, and it leads the label picker.'
+        : ownedMedia.length + ' media listed as yours, and they lead the label picker.';
 }
 
 /**
@@ -1240,7 +1240,7 @@ function setLabelSaveState(state, name) {
     if (state === 'saving') {
         setMediaSaveState('saving', 'Saving ' + name + '…');
     } else if (state === 'saved') {
-        setMediaSaveState('saved', 'Saved — the app prints for ' + name + '.');
+        setMediaSaveState('saved', 'Saved. The app prints for ' + name + '.');
     } else {
         setMediaSaveState('failed', 'Set to ' + name + ' for this session only; it could not be saved. ' +
             'Use Save Settings to try again.');

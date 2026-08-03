@@ -96,7 +96,7 @@ class PrintQueueService:
 
         This is how relay power control hooks in: a job that arrives at a
         printer whose mains supply is switched off waits here, in the queue,
-        while the relay is closed and the printer boots -- rather than failing
+        while the relay is closed and the printer boots, rather than failing
         because the printer happened to be off. The queue keeps knowing nothing
         about relays or printers; it only knows that something may need to
         happen before a job may start.
@@ -457,7 +457,7 @@ class PrintQueueService:
 
                 # Run the pre-job gate while the job is still "queued", so a job
                 # waiting for its printer to be powered up shows as waiting
-                # rather than as printing -- and still counts as pending work,
+                # rather than as printing, and still counts as pending work,
                 # which is what stops the relay switching off underneath it.
                 gate = self._pre_job_gate
                 if gate is not None:

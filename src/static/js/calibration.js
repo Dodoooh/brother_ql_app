@@ -910,7 +910,7 @@ function loadCalibrationTargetPreview() {
         .catch(error => {
             if (error && error.name === 'AbortError') return;
             console.error('Error rendering calibration target:', error);
-            showEmpty('Target preview unavailable — the server could not be reached.');
+            showEmpty('Target preview unavailable. The server could not be reached.');
         })
         .finally(() => {
             if (calibrationPreviewController === controller) {
@@ -999,9 +999,9 @@ async function printCalibrationTarget(dryRun) {
                 : '';
             const reachable = result.data.printer_reachable
                 ? 'printer reachable'
-                : 'printer NOT reachable';
+                : 'printer not reachable';
             setCalibrationStatus(
-                `Dry run OK — nothing was printed. Target for ${calibrationLabelSize}${size}, ${reachable}.`,
+                `Dry run OK. Nothing was printed. Target for ${calibrationLabelSize}${size}, ${reachable}.`,
                 result.data.printer_reachable ? 'success' : 'warning'
             );
         } else {
@@ -1077,7 +1077,7 @@ async function removeCalibration(identifier) {
 
     try {
         await persistCalibration(identifier, null);
-        showNotification(`Calibration removed for ${identifier} — it prints as previewed again`, 'success');
+        showNotification(`Calibration removed for ${identifier}. It prints as previewed again.`, 'success');
 
         // Keep an open dialog in sync when it shows the same medium.
         if (identifier === calibrationLabelSize) {

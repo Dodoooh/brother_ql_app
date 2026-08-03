@@ -4,8 +4,8 @@ Relay power control for the printer's mains supply, driven by a webhook.
 What this is for
 ----------------
 A Brother QL sitting idle on a shelf still draws power. If its mains supply runs
-through a relay -- a Shelly, a Tasmota plug, an ESPHome switch, a Node-RED flow
-in front of any of them -- the app can switch the printer on when a job needs it
+through a relay — a Shelly, a Tasmota plug, an ESPHome switch, a Node-RED flow
+in front of any of them — the app can switch the printer on when a job needs it
 and off again once everything has wound down. Two events exist:
 
 ``turn_on``
@@ -16,6 +16,10 @@ and off again once everything has wound down. Two events exist:
 ``turn_off``
     Optional. Sent once the configured window has closed and nothing is left to
     print.
+
+Either event can also be sent by hand through :meth:`RelayPowerService.send_now`,
+which is how somebody proves the relay answers without waiting for a print job or
+for the window to run out.
 
 The timing chain
 ----------------
@@ -30,16 +34,57 @@ keep-alive window* so the total the user configured is the total they get::
 
 So the keep-alive heartbeat's effective window is
 ``keep_alive_duration_seconds - printer_auto_power_off_minutes * 60`` and the
-turn-off moment is ``keep_alive_duration_seconds + delay`` -- both measured from
-the same origin, the last print.
+turn-off moment is ``keep_alive_duration_seconds + delay``. Both are measured
+from the same origin, the last print.
+
+That subtraction is part of relay power control and applies only while the
+feature is on. With it off the heartbeat runs the configured window in full and
+the printer's own timer then adds its interval on top, so the device sleeps at
+``duration + hardware`` rather than at ``duration``. The status payload says
+which of the two is in force through ``hardware_offset_applied``, so nothing has
+to infer a subtraction from two numbers that happen to be equal.
+
+The chain as clock times
+------------------------
+The offsets above describe the chain; the status payload also places it on the
+clock, because the app knows the origin and a diagram that could have been a
+status display is a worse one. Every moment is reported twice — as a unix
+timestamp and as the seconds remaining until it — so a client can correct for
+clock skew per moment and then tick locally without drifting, rather than
+deriving three moments from one pair and inheriting the error of that pair.
+
+Two things keep those clock times honest:
+
+* **The origin is labelled.** It comes from
+  :meth:`PrinterService.last_print_origin`, the very timestamp the keep-alive
+  worker measures its window from, and it arrives with a flag saying whether it
+  is a real print or the process start time the app falls back to so that
+  enabling keep-alive gives one window immediately. ``origin_source`` passes
+  that on as ``"print"`` or ``"startup"``, so a display says "since the app
+  started" instead of inventing a print that never happened. A window that has
+  since run out re-bases to the current time and says ``"idle"`` — the same
+  "there is no window, so start one from now" rule the startup fallback is
+  built on, which is what stops the panel showing a dead chain from a print
+  three days ago. ``last_print_at`` still carries the real print moment, or
+  null when there has not been one, so the re-base hides nothing.
+* **The nulls are real answers.** The moments exist only while a timed
+  keep-alive window is actually running, since that is the window the app is
+  holding open and therefore the only one it can say the end of. No timed mode,
+  a zero duration, keep-alive switched off entirely: no moments. And the
+  turn-off moment is the *scheduled* one, so it is null until something arms it
+  — with nothing printed since startup, no ``turn_off`` will be sent, and a
+  time for it would be a time for something that is not going to happen. That
+  holds while the chain is being projected from an idle origin too: the one
+  step that can cut mains power is never given a time it has not been armed
+  for.
 
 Two consequences fall out of that arithmetic and are handled explicitly:
 
 * ``duration == hardware`` is valid and intended. The effective keep-alive
   window is zero, the heartbeat does nothing at all, and the printer's own timer
   carries the entire window. Nothing about that is a misconfiguration.
-* ``duration < hardware`` cannot be expressed -- the window would have to end
-  before it began -- and is rejected at settings-validation time with a message
+* ``duration < hardware`` cannot be expressed — the window would have to end
+  before it began — and is rejected at settings-validation time with a message
   saying so, rather than clamped to something that would quietly not be what was
   asked for.
 
@@ -53,9 +98,11 @@ Safety
 * Delivery failures are raised (``turn_on``) or recorded and logged at error
   level (``turn_off``). A webhook that did not arrive is never treated as one
   that did.
-* URLs go through :func:`validate_webhook_url`, which permits LAN addresses --
-  a relay is on the LAN -- while still refusing link-local and cloud metadata
+* URLs go through :func:`validate_webhook_url`, which permits LAN addresses —
+  a relay is on the LAN — while still refusing link-local and cloud metadata
   endpoints.
+* A hand-sent webhook is the one place a user can cut mains power deliberately,
+  so :meth:`RelayPowerService.send_now` reports in as many words that it did.
 
 No new dependency: the request is a plain ``urllib.request`` POST. The app does
 not ship ``requests``, and a webhook is one POST of a small JSON body.
@@ -68,7 +115,7 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import structlog
 
@@ -111,7 +158,7 @@ logger = structlog.get_logger()
 TURN_ON_FIRST_WAIT_SECONDS = 45.0
 
 # How long to wait after the SECOND turn_on webhook. Shorter, because the relay
-# has already been closed for the whole first window -- this attempt exists for
+# has already been closed for the whole first window. This attempt exists for
 # the case where the first request was accepted but not acted on (a relay that
 # dropped it, a flow that was mid-restart), not for a printer that is simply
 # slow. 30 s puts the worst case at 75 s total, which is a bounded wait a user
@@ -133,7 +180,7 @@ SCHEDULER_TICK_SECONDS = 15.0
 
 # Optional bearer/credential for the webhook, read from the environment rather
 # than from settings. It is a secret, and settings.json is world-readable in the
-# data volume and is returned verbatim by GET /settings -- so storing it there
+# data volume and is returned verbatim by GET /settings, so storing it there
 # would publish it to every client that can read the configuration. An env var
 # keeps the endpoint securable without the app ever holding the secret somewhere
 # it hands out. Sent verbatim as the Authorization header when set.
@@ -143,6 +190,35 @@ AUTHORIZATION_ENV_VAR = "RELAY_WEBHOOK_AUTHORIZATION"
 ACTION_TURN_ON = "turn_on"
 ACTION_TURN_OFF = "turn_off"
 
+# What the origin of the timing chain is.
+#
+# "print"    something really printed, and the chain is running from it.
+# "startup"  nothing has printed since the app came up, so the window runs from
+#            the process start time. That is the deliberate fallback which gives
+#            keep-alive one window immediately, and it is real: the heartbeat
+#            genuinely runs a window from there.
+# "idle"     that window has since run out. Nothing is running and nothing is
+#            scheduled, so the chain is shown from the current time instead of
+#            from a moment that is hours or days behind: the same "just take now"
+#            rule the startup fallback uses, applied again once the previous
+#            window expires. The moments that follow are then a projection of
+#            what a print landing now would start, not a schedule.
+#
+# Reported rather than smoothed over, because the difference is the difference
+# between a display saying "last print" truthfully and saying it about a print
+# that never was — and, for "idle", between a live chain and a claim that one is
+# running. ``last_print_at`` carries the real print moment regardless, so
+# re-basing the origin never hides when the printer last did anything.
+ORIGIN_SOURCE_PRINT = "print"
+ORIGIN_SOURCE_STARTUP = "startup"
+ORIGIN_SOURCE_IDLE = "idle"
+
+# The steps of the chain after the origin, in the order they occur. These are
+# the values ``next_step`` takes.
+STEP_KEEP_ALIVE_END = "keep_alive_end"
+STEP_PRINTER_POWER_OFF = "printer_power_off"
+STEP_TURN_OFF = "turn_off"
+
 # Name of the state file, written beside settings.json.
 STATE_FILENAME = "relay_power.json"
 
@@ -150,6 +226,22 @@ STATE_FILENAME = "relay_power.json"
 def _now_iso() -> str:
     """Return the current UTC time as an ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _iso(moment: Optional[float]) -> Optional[str]:
+    """Render a unix timestamp as ISO-8601 UTC, or None.
+
+    Best-effort by design: a moment that cannot be rendered (a timestamp beyond
+    what the platform's calendar can express, say) becomes None rather than
+    taking the whole status payload down with it. The unix value is reported
+    alongside regardless, so nothing is actually lost.
+    """
+    if moment is None:
+        return None
+    try:
+        return datetime.fromtimestamp(float(moment), timezone.utc).isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        return None
 
 
 def _as_int(value: Any, default: int = 0) -> int:
@@ -170,6 +262,7 @@ class RelayPowerService:
         reachability_probe: Optional[Callable[[Dict[str, Any]], bool]] = None,
         pending_work_probe: Optional[Callable[[], bool]] = None,
         sender: Optional[Callable[[str, Dict[str, Any], float], None]] = None,
+        origin_provider: Optional[Callable[[], Optional[Tuple[float, bool]]]] = None,
     ) -> None:
         """Initialise the service.
 
@@ -187,11 +280,15 @@ class RelayPowerService:
                 printing".
             sender: ``sender(url, payload, timeout) -> None``, performing the
                 POST and raising on any delivery failure.
+            origin_provider: ``provider() -> (timestamp, printed)``, the moment
+                the timing chain is measured from and whether it is a real print
+                rather than the startup fallback.
         """
         self._settings_provider = settings_provider or settings_service
         self._reachability_probe = reachability_probe or self._default_reachability_probe
         self._pending_work_probe = pending_work_probe or self._default_pending_work_probe
         self._sender = sender or self._default_sender
+        self._origin_provider = origin_provider or self._default_origin_provider
 
         if state_file is None:
             settings_file = getattr(self._settings_provider, "settings_file", "")
@@ -251,6 +348,12 @@ class RelayPowerService:
         explicit = str(settings.get("relay_webhook_turn_off_url") or "").strip()
         return explicit or cls.turn_on_url(settings)
 
+    @classmethod
+    def url_for(cls, action: str, settings: Dict[str, Any]) -> str:
+        """The URL an action is POSTed to, or "" when none is configured."""
+        return (cls.turn_on_url(settings) if action == ACTION_TURN_ON
+                else cls.turn_off_url(settings))
+
     @staticmethod
     def turn_off_enabled(settings: Dict[str, Any]) -> bool:
         """Whether the ``turn_off`` half of the feature is switched on."""
@@ -260,8 +363,8 @@ class RelayPowerService:
     def hardware_power_off_seconds(settings: Dict[str, Any]) -> int:
         """The printer's own auto-power-off interval, in seconds.
 
-        This is what the user says the device is set to. Nothing verifies it --
-        see ``AUTO_POWER_OFF_MISMATCH_WARNING``.
+        This is what the user says the device is set to. Nothing verifies it.
+        See ``AUTO_POWER_OFF_MISMATCH_WARNING``.
         """
         minutes = _as_int(
             settings.get("printer_auto_power_off_minutes",
@@ -284,8 +387,8 @@ class RelayPowerService:
     def timed_window_seconds(settings: Dict[str, Any]) -> Optional[int]:
         """The timed keep-alive window as configured, or None when there is none.
 
-        This is exactly the condition the keep-alive worker has always used --
-        ``mode == "timed"`` with a non-zero duration -- and deliberately does NOT
+        This is exactly the condition the keep-alive worker has always used —
+        ``mode == "timed"`` with a non-zero duration — and deliberately does NOT
         also test ``keep_alive_enabled``. The worker only runs while keep-alive
         is on, so the extra test would change nothing in practice; but were the
         flag ever out of step with the running thread, adding it here would flip
@@ -304,10 +407,10 @@ class RelayPowerService:
         Stricter than :meth:`timed_window_seconds` by one condition: keep-alive
         must actually be enabled. The turn-off moment is derived from the end of
         a window the keep-alive heartbeat is holding open, so if nothing is
-        holding it open there is no such moment -- and scheduling mains power to
-        be cut on the strength of a window that is not running is precisely the
-        case worth refusing. Settings validation rejects the combination too;
-        this is the same rule at the point of use.
+        holding it open there is no such moment. Scheduling mains power to be cut
+        on the strength of a window that is not running is precisely the case
+        worth refusing. Settings validation rejects the combination too; this is
+        the same rule at the point of use.
         """
         if not settings.get("keep_alive_enabled", False):
             return None
@@ -329,6 +432,9 @@ class RelayPowerService:
         With relay power control OFF this returns the configured duration
         unchanged. The subtraction is part of the relay feature, and an install
         that does not use it must keep the keep-alive timing it always had.
+        Whether it was applied is reported separately by
+        :meth:`hardware_offset_applied`, because the two cases can produce the
+        same number and a client has no way to tell them apart from the number.
         """
         window = cls.timed_window_seconds(settings)
         if window is None:
@@ -338,10 +444,86 @@ class RelayPowerService:
         return max(0, window - cls.hardware_power_off_seconds(settings))
 
     @classmethod
+    def hardware_offset_applied(cls, settings: Dict[str, Any]) -> bool:
+        """Whether the printer's own interval was subtracted from the window.
+
+        True only while relay power control is on and a timed window exists,
+        which is exactly the condition :meth:`effective_keep_alive_seconds`
+        subtracts under.
+
+        It exists because the subtraction cannot be read back out of the
+        numbers. With the feature off, the effective window equals the
+        configured one, and a client comparing the two sees a difference of zero
+        that is indistinguishable from a hardware interval of zero. Reporting
+        the answer rather than leaving it to be inferred is what stops a client
+        explaining a moment as "the window minus the device's ten minutes" when
+        no ten minutes were taken off it.
+        """
+        return cls.is_enabled(settings) and cls.timed_window_seconds(settings) is not None
+
+    @classmethod
+    def printer_power_off_seconds(cls, settings: Dict[str, Any]) -> Optional[int]:
+        """Seconds from the last print until the printer's own timer expires.
+
+        The device starts counting when the heartbeat stops, so this is the
+        effective keep-alive window plus the interval the device is said to be
+        set to. Which makes it the configured window exactly when the
+        subtraction was applied, and the configured window plus that interval
+        when it was not: ask for four hours with a ten-minute device timer and
+        the printer sleeps at 4:00 with relay control on, at 4:10 without it.
+
+        Returns None when no timed window applies, in which case the heartbeat
+        never stops on its own and there is no moment to name.
+
+        Like every other use of ``printer_auto_power_off_minutes``, this is only
+        as true as that value is: see ``AUTO_POWER_OFF_MISMATCH_WARNING``.
+        """
+        effective = cls.effective_keep_alive_seconds(settings)
+        if effective is None:
+            return None
+        return effective + cls.hardware_power_off_seconds(settings)
+
+    @classmethod
+    def keep_alive_end_offset_seconds(cls, settings: Dict[str, Any]) -> Optional[int]:
+        """Seconds from the origin until the heartbeat actually stops, or None.
+
+        The same number as :meth:`effective_keep_alive_seconds` under one extra
+        condition: keep-alive has to be switched on. That method describes the
+        *arithmetic* — how long a window would run — and answers it whenever a
+        timed window is configured, deliberately without consulting the enabled
+        flag, because the keep-alive worker's own rule must not change.
+
+        This one describes a *moment on the clock*, and there is no moment at
+        which a heartbeat that is not running stops. Naming one would put a time
+        on the display for an event that is not going to occur, which is the
+        same class of mistake as calling the startup fallback a print.
+        """
+        if cls.configured_window_seconds(settings) is None:
+            return None
+        return cls.effective_keep_alive_seconds(settings)
+
+    @classmethod
+    def printer_power_off_offset_seconds(cls, settings: Dict[str, Any]) -> Optional[int]:
+        """Seconds from the origin until the printer's own timer expires, or None.
+
+        :meth:`printer_power_off_seconds` under the same extra condition, and
+        for the same reason: the device starts counting when the heartbeat
+        stops, so with no heartbeat running there is nothing to count from.
+
+        Everything the relay feature's state does to that number it does here
+        too, because the number is that method's: with relay power control on
+        this lands at the configured window, with it off at the configured
+        window plus the device's own interval.
+        """
+        if cls.configured_window_seconds(settings) is None:
+            return None
+        return cls.printer_power_off_seconds(settings)
+
+    @classmethod
     def turn_off_offset_seconds(cls, settings: Dict[str, Any]) -> Optional[int]:
         """Seconds from the last print until ``turn_off`` should be sent.
 
-        This is the *configured* window plus the safety margin -- deliberately
+        This is the *configured* window plus the safety margin, deliberately
         not the effective (shortened) keep-alive window. Both are measured from
         the same origin: keep-alive stops early precisely so the hardware's own
         timer finishes at the configured moment, and the relay opens a margin
@@ -363,7 +545,7 @@ class RelayPowerService:
         """Read the persisted turn-off moment, or None.
 
         Best-effort: a missing, unreadable or malformed file simply means "no
-        schedule", which is the safe reading -- it can only delay a turn-off,
+        schedule", which is the safe reading: it can only delay a turn-off,
         never cause one.
         """
         try:
@@ -421,7 +603,7 @@ class RelayPowerService:
 
         The first call after construction loads the persisted value, which is
         what makes a schedule survive a restart: the process that armed it is
-        gone, but the moment it chose is still on disk and is honoured -- or, if
+        gone, but the moment it chose is still on disk and is honoured — or, if
         the app was down past it, acted on immediately.
         """
         with self._lock:
@@ -483,9 +665,13 @@ class RelayPowerService:
 
         ``action`` is the load-bearing field and the only one a relay flow needs
         to branch on; the rest is context, so a Node-RED flow shared between two
-        printers can tell which one asked. Kept flat and small on purpose -- the
+        printers can tell which one asked. Kept flat and small on purpose. The
         shape is documented in the OpenAPI spec and the UI, and every field
         added is a field somebody's flow may come to depend on.
+
+        A hand-sent webhook carries exactly this body too, deliberately: a test
+        that sent something the print path would not send would prove nothing
+        about the print path.
         """
         return {
             "action": action,
@@ -495,12 +681,20 @@ class RelayPowerService:
             "timestamp": _now_iso(),
         }
 
-    def _default_sender(self, url: str, payload: Dict[str, Any], timeout: float) -> None:
+    def _default_sender(self, url: str, payload: Dict[str, Any],
+                        timeout: float) -> Optional[int]:
         """POST ``payload`` as JSON to ``url``.
+
+        Returns:
+            The HTTP status the endpoint answered with, or None when the
+            response carried none. It is returned rather than merely accepted so
+            that a hand-sent webhook can report what came back: "the relay
+            answered 200" and "the relay answered something" are different
+            things to a user working out why a switch did not move.
 
         Raises:
             RelayWebhookError: On any transport error, timeout or non-2xx
-                response. Everything is surfaced -- a webhook whose delivery
+                response. Everything is surfaced: a webhook whose delivery
                 cannot be confirmed is treated as not delivered.
         """
         body = json.dumps(payload).encode("utf-8")
@@ -517,10 +711,13 @@ class RelayPowerService:
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 status = getattr(response, "status", None) or response.getcode()
-                if status is not None and not (200 <= int(status) < 300):
+                if status is None:
+                    return None
+                if not (200 <= int(status) < 300):
                     raise RelayWebhookError(
                         f"Relay webhook returned HTTP {status}", "RELAY_WEBHOOK_ERROR",
                         {"url": url, "status": int(status)})
+                return int(status)
         except urllib.error.HTTPError as e:
             raise RelayWebhookError(
                 f"Relay webhook returned HTTP {e.code}", "RELAY_WEBHOOK_ERROR",
@@ -536,20 +733,27 @@ class RelayPowerService:
                 f"Relay webhook failed: {e}", "RELAY_WEBHOOK_ERROR",
                 {"url": url}) from e
 
-    def send(self, action: str, settings: Optional[Dict[str, Any]] = None) -> None:
+    def send(self, action: str, settings: Optional[Dict[str, Any]] = None,
+             payload: Optional[Dict[str, Any]] = None) -> Optional[int]:
         """Send one webhook.
 
         Args:
             action: ``turn_on`` or ``turn_off``.
             settings: Settings to read the URL from; loaded when omitted.
+            payload: Body to send, built from ``action`` and ``settings`` when
+                omitted. A caller passes one in when it needs to report the
+                exact body that went out whether or not delivery succeeded.
+
+        Returns:
+            The HTTP status the relay answered with, or None when the sender
+            reported none.
 
         Raises:
             RelayWebhookError: When no URL is configured for the action, when
                 the URL fails validation, or when delivery fails.
         """
         settings = self._settings() if settings is None else settings
-        url = (self.turn_on_url(settings) if action == ACTION_TURN_ON
-               else self.turn_off_url(settings))
+        url = self.url_for(action, settings)
         if not url:
             raise RelayWebhookError(
                 f"No relay webhook URL is configured for '{action}'.",
@@ -565,9 +769,9 @@ class RelayPowerService:
                 f"Refusing to call the relay webhook: {e}", "RELAY_WEBHOOK_ERROR",
                 {"action": action}) from e
 
-        payload = self.build_payload(action, settings)
+        payload = self.build_payload(action, settings) if payload is None else payload
         try:
-            self._sender(url, payload, self.webhook_timeout)
+            status = self._sender(url, payload, self.webhook_timeout)
         except RelayWebhookError as e:
             self._record_error(str(e))
             logger.error("Relay webhook failed", action=action, error=str(e))
@@ -585,12 +789,151 @@ class RelayPowerService:
             self._last_error = None
             self._last_error_at = None
         logger.info("Relay webhook sent", action=action)
+        return status if isinstance(status, int) else None
 
     def _record_error(self, message: str) -> None:
         """Remember the most recent failure so the API can report it."""
         with self._lock:
             self._last_error = message
             self._last_error_at = _now_iso()
+
+    # ------------------------------------------------------------------ #
+    # Sending one by hand
+    # ------------------------------------------------------------------ #
+    def send_now(self, action: str) -> Dict[str, Any]:
+        """Send one webhook immediately, on request, and report what happened.
+
+        Everywhere else in this module the app decides when to switch the relay.
+        This is the one entry point where a person does, and it exists because
+        the alternative way to find out whether a relay answers is to configure
+        the whole timing chain and wait hours for it to come round.
+
+        What it requires, and what it does not
+        --------------------------------------
+        Relay power control has to be switched on, and the action has to have a
+        URL. Nothing else. In particular the schedule does not have to be armed:
+        ``turn_off`` can be sent by hand while its scheduled half is off and
+        while no timed keep-alive window exists at all, because "does this relay
+        actually switch off" is a question worth answering *before* arming
+        anything that will cut mains power unattended.
+
+        The schedule is left exactly as it was, in both directions.
+
+        * A hand-sent ``turn_off`` does not clear it. The scheduled moment says
+          when the automatic turn-off is due after the last print; power coming
+          back (someone presses the relay's own button, the next job sends
+          ``turn_on``) does not make that moment wrong, and silently cancelling
+          an armed safety schedule from a button labelled "send a webhook" would
+          be a second, hidden effect. The redundant later ``turn_off`` costs
+          nothing: it is already the ordinary case, since the documented chain
+          fires ``turn_off`` at a printer that has powered itself off already.
+        * A hand-sent ``turn_on`` does not arm it either, for the mirror reason.
+          Arming is measured from the last print, and a button press is not a
+          print, so arming here would schedule a mains cut from an origin that
+          never existed. The next print arms it properly, and pending work still
+          resets the clock unconditionally.
+
+        The outcome is reported rather than raised. A relay that answered 401 or
+        refused the connection is the *result* of the request, not a failure of
+        the app to carry it out, and the difference between those two is the
+        thing the user is trying to see.
+
+        Args:
+            action: ``turn_on`` or ``turn_off``.
+
+        Returns:
+            A report of the request and its outcome: ``success``, the ``action``,
+            the ``url`` it went to, the ``payload`` that was sent, whether an
+            ``Authorization`` header went with it, the ``response_status`` that
+            came back, the ``error`` when one did, a ``message`` in plain words,
+            and ``mains_power`` saying what the relay was told to do. A
+            successful ``turn_off`` reports ``mains_power: "off"`` and says in
+            the message that power has been cut, because this is the one place a
+            user can cut it deliberately and the response must not be coy about
+            it. An unconfirmed delivery reports ``"unknown"``: the request may
+            have been acted on before the error, and claiming otherwise would be
+            a guess.
+
+        Raises:
+            ValueError: When the action is not one of the two, when relay power
+                control is switched off, or when no URL is configured for the
+                action. Nothing is sent in any of those cases, and the message
+                says which one it was.
+        """
+        if action not in (ACTION_TURN_ON, ACTION_TURN_OFF):
+            raise ValueError(
+                f"Unknown relay action '{action}'. It must be "
+                f"'{ACTION_TURN_ON}' or '{ACTION_TURN_OFF}'.")
+
+        settings = self._settings()
+        if not self.is_enabled(settings):
+            raise ValueError(
+                "Relay power control is switched off, so nothing was sent. Switch "
+                "relay_webhook_enabled on before sending a webhook by hand.")
+
+        url = self.url_for(action, settings)
+        if not url:
+            raise ValueError(
+                f"No relay webhook URL is configured for '{action}', so nothing was "
+                "sent. Set relay_webhook_turn_on_url, which both actions fall back "
+                "to, or relay_webhook_turn_off_url for a relay that switches on the "
+                "address rather than on the body.")
+
+        # Built here rather than inside send() so the report can name the exact
+        # body that went out even when delivery then failed.
+        payload = self.build_payload(action, settings)
+
+        report: Dict[str, Any] = {
+            "success": False,
+            "action": action,
+            "url": url,
+            "payload": payload,
+            "authorization_sent": bool(os.environ.get(AUTHORIZATION_ENV_VAR)),
+            "response_status": None,
+            "sent_at": payload["timestamp"],
+            "mains_power": "unknown",
+            "message": "",
+            "error": None,
+            "schedule_changed": False,
+            "scheduled_turn_off_at": (
+                self.scheduled_turn_off_at() if self.turn_off_enabled(settings) else None
+            ),
+        }
+
+        logger.info("Sending a relay webhook on request", action=action)
+        try:
+            status = self.send(action, settings, payload=payload)
+        except RelayWebhookError as e:
+            details = getattr(e, "details", None) or {}
+            refused_with = details.get("status")
+            report["response_status"] = (
+                refused_with if isinstance(refused_with, int) else None)
+            report["error"] = str(e)
+            report["message"] = (
+                f"The {action} webhook to {url} was not confirmed. "
+                f"{str(e).rstrip('.')}. The relay may or may not have switched, so "
+                "check the printer before relying on either state."
+            )
+            return report
+
+        report["success"] = True
+        report["response_status"] = status
+        report["mains_power"] = "off" if action == ACTION_TURN_OFF else "on"
+        answered = f" The relay answered HTTP {status}." if status is not None else ""
+        if action == ACTION_TURN_OFF:
+            report["message"] = (
+                f"turn_off was delivered to {url}.{answered} Mains power to the "
+                "printer has been cut. It stays off until the relay is switched on "
+                "again, which the next print job does while relay power control is "
+                "enabled."
+            )
+        else:
+            report["message"] = (
+                f"turn_on was delivered to {url}.{answered} Mains power to the "
+                "printer is on. This reports the webhook and nothing more: the "
+                "printer is not probed here, so allow it a minute to finish booting."
+            )
+        return report
 
     # ------------------------------------------------------------------ #
     # Default collaborators
@@ -611,6 +954,23 @@ class RelayPowerService:
         except Exception as e:  # noqa: BLE001 - an error here means "not answering"
             logger.debug("Reachability probe failed", error=str(e))
             return False
+
+    def _default_origin_provider(self) -> Optional[Tuple[float, bool]]:
+        """Ask the printer service what the timing chain runs from.
+
+        Deliberately not tracked here. This service is told about prints through
+        :meth:`note_print_activity`, so it could keep its own copy — and it
+        would be wrong the moment the two diverged, which a restart guarantees:
+        the persisted schedule survives, an in-memory origin does not, and the
+        keep-alive window would then be measured from one instant and the
+        display drawn from another. One timestamp, held where the keep-alive
+        worker reads it, is the only version that cannot disagree with itself.
+        """
+        # Imported lazily: the printer service imports this module, so a
+        # top-level import here would be a cycle.
+        from src.services.printer_service import printer_service
+
+        return printer_service.last_print_origin()
 
     def _default_pending_work_probe(self) -> bool:
         """Whether the print queue holds anything queued or printing."""
@@ -813,13 +1173,114 @@ class RelayPowerService:
     # ------------------------------------------------------------------ #
     # Reporting
     # ------------------------------------------------------------------ #
+    def _origin(self) -> Tuple[Optional[float], Optional[str]]:
+        """The moment the chain is measured from, and what kind of moment it is.
+
+        Returns ``(None, None)`` when the origin cannot be read at all, which is
+        the honest answer and leaves every clock time in the payload null: a
+        chain drawn from a guessed origin would be wrong at every step. Never
+        raises — the status endpoint is a read, and a read must not fail because
+        one of its inputs was unavailable.
+        """
+        try:
+            origin = self._origin_provider()
+        except Exception as e:  # noqa: BLE001 - a status read must survive anything
+            logger.warning("Could not read the print origin for the relay status",
+                           error=str(e))
+            return None, None
+        if not origin:
+            return None, None
+        try:
+            moment, printed = origin
+            moment = float(moment)
+        except (TypeError, ValueError):
+            logger.warning("The print origin was not a usable timestamp",
+                           origin=repr(origin))
+            return None, None
+        return moment, (ORIGIN_SOURCE_PRINT if printed else ORIGIN_SOURCE_STARTUP)
+
+    @staticmethod
+    def _at(origin: Optional[float], offset: Optional[int]) -> Optional[float]:
+        """Place an offset from the origin on the clock, or None."""
+        if origin is None or offset is None:
+            return None
+        return origin + offset
+
+    @staticmethod
+    def _until(moment: Optional[float], now: float) -> Optional[float]:
+        """Seconds remaining until a moment, never negative, or None.
+
+        Clamped like ``seconds_until_turn_off`` has always been. Nothing is lost
+        by it: the absolute moment is reported beside every one of these, so how
+        long ago a step passed is ``server_time`` minus that moment.
+        """
+        if moment is None:
+            return None
+        return max(0.0, moment - now)
+
     def status(self) -> Dict[str, Any]:
         """Return a summary of the feature for the API and the UI."""
         settings = self._settings()
+        now = time.time()
         enabled = self.is_enabled(settings)
         turn_off_enabled = self.turn_off_enabled(settings)
         scheduled = self.scheduled_turn_off_at() if enabled and turn_off_enabled else None
         effective = self.effective_keep_alive_seconds(settings)
+
+        # The chain on the clock. The origin starts as whatever the keep-alive
+        # worker measures from, carrying the label that says whether it was a
+        # print; ``last_print_at`` keeps hold of the real print moment so that
+        # the re-base below can never hide it.
+        origin_at, origin_source = self._origin()
+        last_print_at = origin_at if origin_source == ORIGIN_SOURCE_PRINT else None
+
+        keep_alive_offset = self.keep_alive_end_offset_seconds(settings)
+        printer_power_off_offset = self.printer_power_off_offset_seconds(settings)
+
+        # If that origin's window has already run out, show the chain from now
+        # instead. It is the same rule the startup fallback is built on — no
+        # window running, so start one from the current time — applied a second
+        # time, and it is what stops the panel displaying a dead chain from a
+        # print three days ago. Nothing is claimed by it that is not said out
+        # loud: origin_source becomes "idle", which means the moments below are
+        # what a print landing now would start rather than what is scheduled.
+        #
+        # Guarded on a chain existing at all. With no timed window nothing ever
+        # expires, so there is nothing to re-base and the real origin stands.
+        if origin_at is not None and keep_alive_offset is not None:
+            elapsed = [origin_at + keep_alive_offset,
+                       origin_at + printer_power_off_offset]
+            if scheduled is not None:
+                elapsed.append(scheduled)
+            if max(elapsed) <= now:
+                origin_at, origin_source = now, ORIGIN_SOURCE_IDLE
+
+        keep_alive_ends_at = self._at(origin_at, keep_alive_offset)
+        printer_power_off_at = self._at(origin_at, printer_power_off_offset)
+
+        # Which step is next is decided here rather than left to the client. The
+        # question is not "which of these timestamps is smallest" — that part is
+        # arithmetic anyone can do — but "which of these steps exists at all",
+        # and that is settings logic: a window that is not running has no end, a
+        # turn-off that is not armed has no moment, and the hardware offset
+        # moves one of the moments without moving the other. Answering it once,
+        # on the side that already holds those rules, gives every client the
+        # same answer instead of one answer per client's reading of them.
+        #
+        # It does not go stale between polls either, because it is not a claim
+        # about the future: every moment is in the payload absolutely, so a
+        # client ticking locally past a boundary can advance the highlight
+        # itself, against the same server_time it corrects its clock with.
+        next_step, next_step_at = None, None
+        for step, moment in (
+            (STEP_KEEP_ALIVE_END, keep_alive_ends_at),
+            (STEP_PRINTER_POWER_OFF, printer_power_off_at),
+            (STEP_TURN_OFF, scheduled),
+        ):
+            if moment is None or moment <= now:
+                continue
+            if next_step_at is None or moment < next_step_at:
+                next_step, next_step_at = step, moment
 
         with self._lock:
             last_action = self._last_action
@@ -837,11 +1298,79 @@ class RelayPowerService:
                 self.hardware_power_off_seconds(settings) // 60,
             "configured_window_seconds": self.configured_window_seconds(settings),
             "effective_keep_alive_seconds": effective,
+            # Why the heartbeat stops when it does, not just when. With the
+            # feature off the effective window equals the configured one, and
+            # from the numbers alone that is indistinguishable from a
+            # subtraction of zero; a client rendering the timing chain would
+            # have to guess, and guessing produces a reason ("the window minus
+            # the device's ten minutes") for an arithmetic that never ran.
+            "hardware_offset_applied": self.hardware_offset_applied(settings),
+            # And when the device's own timer expires, which is the configured
+            # window while the subtraction applies and that window plus the
+            # device's interval while it does not. Reported rather than left to
+            # be derived, so the two moments are never both rendered from the
+            # same number.
+            "printer_power_off_seconds": self.printer_power_off_seconds(settings),
             "turn_off_delay_seconds": self.turn_off_delay_seconds(settings),
-            "scheduled_turn_off_at": scheduled,
-            "seconds_until_turn_off": (
-                max(0.0, scheduled - time.time()) if scheduled is not None else None
+
+            # ---- the same chain, on the clock ---------------------------- #
+            # The server's own now, so a client can measure its skew once and
+            # then read every absolute moment below in its own time. Each moment
+            # additionally carries its own seconds-until, so a countdown can be
+            # anchored per moment rather than on this one value.
+            "server_time": now,
+            # Where the chain starts, and what that instant actually is. Nothing
+            # else in the payload can tell the three apart, and rendering the
+            # startup fallback or an idle re-base as "last print" would name a
+            # print that never happened.
+            "origin_at": origin_at,
+            "origin_at_iso": _iso(origin_at),
+            "origin_source": origin_source,
+            "seconds_since_origin": (
+                None if origin_at is None else max(0.0, now - origin_at)
             ),
+            # When the printer last actually printed, independent of all that.
+            # Null when it has not printed since the app came up. It is reported
+            # separately precisely because the origin can be re-based away from
+            # it: "the chain runs from here" and "the printer last did something
+            # here" are different questions, and only one of them has an answer
+            # while the app is idle.
+            "last_print_at": last_print_at,
+            "last_print_at_iso": _iso(last_print_at),
+            "seconds_since_last_print": (
+                None if last_print_at is None else max(0.0, now - last_print_at)
+            ),
+            # When the heartbeat stops, and when the device's own timer then
+            # expires. Both null unless a timed keep-alive window is actually
+            # running: those are moments in a window the app is holding open,
+            # and it is not holding one open otherwise. The hardware offset is
+            # already inside these numbers, so with relay power control off the
+            # two are the configured window and that window plus the device's
+            # interval — the same rule hardware_offset_applied reports.
+            "keep_alive_ends_at": keep_alive_ends_at,
+            "keep_alive_ends_at_iso": _iso(keep_alive_ends_at),
+            "seconds_until_keep_alive_end": self._until(keep_alive_ends_at, now),
+            "printer_power_off_at": printer_power_off_at,
+            "printer_power_off_at_iso": _iso(printer_power_off_at),
+            "seconds_until_printer_power_off": self._until(printer_power_off_at, now),
+            # The last step is the *scheduled* moment, not an offset from the
+            # origin: it is armed by a print and reset by pending work, so it
+            # can legitimately sit further out than origin + window, and it is
+            # null while nothing is armed — which is exactly when no turn_off
+            # will be sent. It is never projected either, not even from an idle
+            # origin: the one step that can cut mains power only ever carries a
+            # time it has actually been armed for. An armed moment that is
+            # already overdue is reported as it stands, because it really is
+            # about to be sent.
+            "scheduled_turn_off_at": scheduled,
+            "scheduled_turn_off_at_iso": _iso(scheduled),
+            "seconds_until_turn_off": self._until(scheduled, now),
+            # Which step the chain is waiting on, as of server_time.
+            "next_step": next_step,
+            "next_step_at": next_step_at,
+            "next_step_at_iso": _iso(next_step_at),
+            "seconds_until_next_step": self._until(next_step_at, now),
+
             "last_action": last_action,
             "last_action_at": last_action_at,
             "last_error": last_error,

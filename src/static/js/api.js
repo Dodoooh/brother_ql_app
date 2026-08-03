@@ -261,7 +261,7 @@ function updateKeepAlivePill(status) {
     const running = !!(status && status.running);
     pill.classList.toggle('ka-active', running);
     pill.setAttribute('aria-pressed', running ? 'true' : 'false');
-    pill.title = running ? 'Keep alive is running — click to turn off' : 'Keep alive is off — click to turn on';
+    pill.title = running ? 'Keep alive is running. Click to turn off.' : 'Keep alive is off. Click to turn on.';
     label.textContent = running ? 'Keep Alive: On' : 'Keep Alive: Off';
 }
 
@@ -340,6 +340,14 @@ async function checkPrinterStatus() {
         
         const data = await response.json();
 
+        // Whether the printer answered, for the relay's confirmation before it
+        // cuts mains power. A printer that answered but cannot print (cover
+        // open, no roll) is awake, which is what that question is about, so
+        // reachability counts as much as availability here.
+        if (typeof relayNotePrinterReachable === 'function') {
+            relayNotePrinterReachable(data.available === true || data.reachable === true);
+        }
+
         // Hand the same response to the loaded-media UI (top bar pill, label
         // picker, mismatch warning). It reads its own fields and degrades to
         // "nothing detected" on a server that does not send them.
@@ -404,6 +412,11 @@ async function checkPrinterStatus() {
         }
     } catch (error) {
         console.error('Error checking printer status:', error);
+
+        // The check itself failed, so nothing was learned about the printer.
+        // "Not known" is not "not answering", and the relay asks before cutting
+        // power in both cases for exactly that reason.
+        if (typeof relayNotePrinterReachable === 'function') relayNotePrinterReachable(null);
 
         // An unreachable printer knows nothing about the roll either; clear the
         // detection rather than leaving a stale medium on display.
@@ -1285,31 +1298,39 @@ async function handleSaveSettings(event) {
         // with, which is the one way the two paths could disagree.
         const mediaPatch = (typeof mediaSettingsPatch === 'function') ? mediaSettingsPatch() : {};
 
+        // The Mains Power block is part of this form and has no save of its
+        // own, so its fields are written by this one. That is also why the
+        // check above reads those fields: the two rules are answered against
+        // exactly what is about to be sent.
+        const relayPatch = (typeof relaySettingsPatch === 'function') ? relaySettingsPatch() : {};
+
+        const body = Object.assign({
+            printer_uri: printerUri,
+            printer_model: printerModel,
+            label_size: labelSize,
+            font_size: parseInt(fontSize),
+            alignment: alignment,
+            vertical_alignment: verticalAlignment,
+            orientation: orientation,
+            rotate: parseInt(rotate),
+            threshold: parseFloat(threshold),
+            dither: dither,
+            red: red,
+            copies: copies,
+            cut_mode: cutMode,
+            dpi_600: dpi600,
+            keep_alive_enabled: keepAliveEnabled,
+            keep_alive_interval: keepAliveInterval,
+            keep_alive_mode: keepAliveMode,
+            keep_alive_duration_seconds: keepAliveDurationSeconds
+        }, mediaPatch, relayPatch);
+
         const response = await fetch('/api/v1/settings', {
             method: 'PUT',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify(Object.assign({
-                printer_uri: printerUri,
-                printer_model: printerModel,
-                label_size: labelSize,
-                font_size: parseInt(fontSize),
-                alignment: alignment,
-                vertical_alignment: verticalAlignment,
-                orientation: orientation,
-                rotate: parseInt(rotate),
-                threshold: parseFloat(threshold),
-                dither: dither,
-                red: red,
-                copies: copies,
-                cut_mode: cutMode,
-                dpi_600: dpi600,
-                keep_alive_enabled: keepAliveEnabled,
-                keep_alive_interval: keepAliveInterval,
-                keep_alive_mode: keepAliveMode,
-                keep_alive_duration_seconds: keepAliveDurationSeconds
-            }, mediaPatch))
+            body: JSON.stringify(body)
         });
         
         // Reset button state
@@ -1326,11 +1347,11 @@ async function handleSaveSettings(event) {
         showNotification('Settings saved successfully', 'success');
         console.log('Settings saved:', data);
 
-        // The keep-alive window is half of the relay's timing chain, so the
-        // relay panel is told what is now stored rather than left comparing
-        // against the values this save replaced.
-        if (typeof relayNoteKeepAliveSaved === 'function') {
-            relayNoteKeepAliveSaved(keepAliveEnabled, keepAliveMode, keepAliveDurationSeconds);
+        // The Mains Power block is told what is now stored rather than left
+        // comparing against the values this save replaced — its own fields, and
+        // the keep-alive window that is half of its timing chain.
+        if (typeof relayNoteSettingsSaved === 'function') {
+            relayNoteSettingsSaved(body);
         }
         
         // Update keep alive status based on new settings
@@ -1843,9 +1864,13 @@ async function toggleQueuePause() {
  * surfaces how many jobs were cancelled.
  */
 async function stopQueue() {
+    // Every waiting job is thrown away, so it is asked as a destructive
+    // question. The single-job delete below is not: one queued job is the
+    // routine action in this panel, and a red dialog on the routine action is
+    // how people learn to stop reading them.
     const confirmed = await confirmDialog(
         'Stop the queue and cancel all waiting jobs?',
-        { title: 'Stop queue', confirmLabel: 'Stop' }
+        { title: 'Stop queue', confirmLabel: 'Stop', destructive: true }
     );
     if (!confirmed) return;
 
@@ -1874,7 +1899,7 @@ async function stopQueue() {
 async function clearAllJobs() {
     const confirmed = await confirmDialog(
         'Delete ALL jobs, including waiting ones?',
-        { title: 'Clear all', confirmLabel: 'Delete all' }
+        { title: 'Clear all', confirmLabel: 'Delete all', destructive: true }
     );
     if (!confirmed) return;
 
@@ -1955,14 +1980,54 @@ async function cancelJob(jobId) {
     }
 }
 
+// Bootstrap gives every modal the same z-index and does not support stacking
+// them, so a modal opened while another one is already up is decided purely by
+// document order — and #confirmModal is written before the dialogs that raise
+// it, which put the question underneath them, visible but unreachable. The
+// confirmation is always the newest thing on screen and must always be the
+// topmost, so it is lifted above whatever is already open, by this much per
+// layer. Bootstrap's own modal z-index is 1055 and its backdrop 1050; the gap
+// between these two keeps that order inside the raised layer.
+const CONFIRM_STACK_STEP = 30;
+const CONFIRM_BACKDROP_OFFSET = 5;
+
+/**
+ * The highest z-index among the modals that are open right now, ignoring one.
+ * Falls back to Bootstrap's own value for a modal whose z-index cannot be read,
+ * which is what a stylesheet-less test environment reports.
+ * @param {Element} except - the modal that is about to be shown
+ * @returns {number}
+ */
+function topOpenModalZIndex(except) {
+    let top = 0;
+    document.querySelectorAll('.modal.show').forEach(el => {
+        if (el === except) return;
+        const raw = el.style.zIndex ||
+            (window.getComputedStyle ? window.getComputedStyle(el).zIndex : '');
+        const value = parseInt(raw, 10);
+        top = Math.max(top, Number.isFinite(value) ? value : 1055);
+    });
+    return top;
+}
+
 /**
  * Show a Bootstrap confirmation dialog and resolve to true/false based on the
  * user's choice. Falls back to a native confirm() if Bootstrap or the modal
  * markup is unavailable.
+ *
+ * A question raised from inside another modal is lifted above it (see
+ * CONFIRM_STACK_STEP), so a confirmation is reachable from wherever it is
+ * raised. Bootstrap also drops the body's scroll lock when the inner dialog
+ * closes, while the outer one is still open, so that is put back too.
+ *
  * @param {string} message - The question shown to the user.
  * @param {Object} [options]
  * @param {string} [options.title] - Modal title.
  * @param {string} [options.confirmLabel] - Confirm button label.
+ * @param {boolean} [options.destructive] - Ask as a warning: a hazard icon and
+ *   a confirm button in the danger colour, with the cancel button focused. For
+ *   questions about destroying something, and only those — a dialog that looks
+ *   alarming every time teaches people to ignore the colour.
  * @returns {Promise<boolean>}
  */
 function confirmDialog(message, options = {}) {
@@ -1974,28 +2039,72 @@ function confirmDialog(message, options = {}) {
     return new Promise(resolve => {
         const messageEl = document.getElementById('confirm-message');
         const okBtn = document.getElementById('confirm-ok');
+        const cancelBtn = document.getElementById('confirm-cancel');
+        const iconEl = document.getElementById('confirm-icon');
         const titleEl = document.getElementById('confirmModalLabel');
+        const destructive = !!options.destructive;
 
         if (messageEl) messageEl.textContent = message;
         if (titleEl) titleEl.textContent = options.title || 'Confirm';
-        if (okBtn) okBtn.textContent = options.confirmLabel || 'Confirm';
+        if (okBtn) {
+            okBtn.textContent = options.confirmLabel || 'Confirm';
+            okBtn.classList.toggle('btn-danger', destructive);
+            okBtn.classList.toggle('btn-primary', !destructive);
+        }
+        if (iconEl) iconEl.hidden = !destructive;
+        modalEl.classList.toggle('is-danger', destructive);
 
         const modal = bootstrap.Modal.getOrCreateInstance(modalEl);
         let confirmed = false;
+
+        // Above whatever is already open, or at Bootstrap's own level when this
+        // is the only modal on screen.
+        const below = topOpenModalZIndex(modalEl);
+        const raised = below > 0;
+        if (raised) {
+            modalEl.style.zIndex = String(below + CONFIRM_STACK_STEP);
+        } else {
+            modalEl.style.zIndex = '';
+        }
 
         const onOk = () => {
             confirmed = true;
             modal.hide();
         };
+        const onShown = () => {
+            // The way out of a destructive question is the one that should be
+            // one keystroke away, so it takes the focus rather than the button
+            // that does the damage.
+            if (destructive && cancelBtn) cancelBtn.focus();
+        };
         const onHidden = () => {
             if (okBtn) okBtn.removeEventListener('click', onOk);
+            modalEl.removeEventListener('shown.bs.modal', onShown);
             modalEl.removeEventListener('hidden.bs.modal', onHidden);
+            modalEl.style.zIndex = '';
+            // Bootstrap removes the scroll lock on this dialog's own hide, even
+            // though the dialog underneath is still open.
+            if (document.querySelector('.modal.show')) {
+                document.body.classList.add('modal-open');
+            }
             resolve(confirmed);
         };
 
         if (okBtn) okBtn.addEventListener('click', onOk);
+        modalEl.addEventListener('shown.bs.modal', onShown);
         modalEl.addEventListener('hidden.bs.modal', onHidden);
         modal.show();
+
+        // Bootstrap appends the backdrop synchronously inside show(), so the
+        // newest one is this dialog's: it goes between the modal underneath and
+        // this one, dimming what is behind the question.
+        if (raised) {
+            const backdrops = document.querySelectorAll('.modal-backdrop');
+            const backdrop = backdrops[backdrops.length - 1];
+            if (backdrop) {
+                backdrop.style.zIndex = String(below + CONFIRM_STACK_STEP - CONFIRM_BACKDROP_OFFSET);
+            }
+        }
     });
 }
 

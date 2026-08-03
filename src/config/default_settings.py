@@ -77,16 +77,16 @@ DEFAULT_TURN_OFF_DELAY_MINUTES = 5
 # The chain is: keep-alive stops at (duration - auto_power_off), the printer's
 # own timer then runs for its real length, and the relay opens at
 # (duration + delay). Those line up only while the number configured here
-# matches the number set on the device. If the device's real interval is LONGER
-# than the configured one, the printer is still awake when the relay opens.
+# matches the number set on the device. If the device's real interval is the
+# longer of the two, the printer is still awake when the relay opens.
 AUTO_POWER_OFF_MISMATCH_WARNING = (
     "This app cannot read or change the printer's built-in auto-power-off "
-    "time -- the value here is a statement about the device, not a setting on "
-    "it, and nothing verifies the two agree. Set it to exactly what the "
-    "printer's own menu shows. If the real interval on the device is LONGER "
-    "than the value configured here, the relay will cut mains power while the "
-    "printer is still running, which can interrupt a print mid-feed and can "
-    "damage the printer."
+    "time. The value configured here is a statement about the device rather "
+    "than a setting on it, and nothing verifies that the two agree. Set it to "
+    "exactly what the printer's own menu shows. If the interval on the device "
+    "is longer than the value configured here, the relay will cut mains power "
+    "while the printer is still running, which can interrupt a print mid-feed "
+    "and can damage the printer."
 )
 
 
