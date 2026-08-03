@@ -132,13 +132,16 @@ def preview_qrcode(body: Dict[str, Any]) -> Dict[str, Any]:
             text_content = text_settings.get("content")
             text_position = text_settings.get("position", "bottom")
 
+            # Only the caption itself is conditional; see qrcode_controller.
+            # An empty caption with a position means "label it with what it
+            # encodes", which the render path supplies from the QR data.
             if text_content:
                 combined_settings["text"] = text_content
-                combined_settings["show_text"] = text_position != "none"
-                combined_settings["text_position"] = text_position
-                combined_settings["text_font_size"] = text_settings.get("font_size", 30)
-                combined_settings["text_alignment"] = text_settings.get("alignment", "center")
-                combined_settings["text_wrap"] = text_settings.get("wrap", True)
+            combined_settings["show_text"] = text_position != "none"
+            combined_settings["text_position"] = text_position
+            combined_settings["text_font_size"] = text_settings.get("font_size", 30)
+            combined_settings["text_alignment"] = text_settings.get("alignment", "center")
+            combined_settings["text_wrap"] = text_settings.get("wrap", True)
 
         image = printer_service.render_qrcode_preview(combined_settings)
         return _preview_response(image)

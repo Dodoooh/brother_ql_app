@@ -569,6 +569,17 @@
                                     </button>
                                 </div>
                             </div>
+                            <!-- What the queue is doing right now. Attached to the
+                                 control bar above because that is where the queue
+                                 speaks about itself, and hidden entirely unless the
+                                 job in hand reports an activity: a job merely
+                                 waiting its turn must not look busy. -->
+                            <div id="queue-activity" class="queue-activity" hidden>
+                                <span class="queue-activity-icon" aria-hidden="true"><i class="bi bi-hourglass-split"></i></span>
+                                <p id="queue-activity-message" class="queue-activity-message" role="status" aria-live="polite"></p>
+                                <span id="queue-activity-elapsed" class="queue-activity-elapsed" aria-hidden="true" hidden></span>
+                                <span class="queue-activity-track" aria-hidden="true"><span class="queue-activity-sweep"></span></span>
+                            </div>
                             <div class="panel-body">
                                 <div id="queue-list" class="queue-list">
                                     <div class="queue-empty">

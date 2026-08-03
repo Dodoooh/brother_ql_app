@@ -1233,6 +1233,39 @@ components:
           type: boolean
           description: Whether a stored executor still exists so the job can be reprinted
           example: true
+        activity:
+          type: string
+          nullable: true
+          description: >-
+            What is happening to this job right now, alongside (not instead of)
+            `status`. A job held before printing while the printer's mains
+            supply is switched on and the device boots stays `queued` — which is
+            what it is — and names the phase here. Null when nothing in
+            particular is happening, which is the ordinary case for a job simply
+            waiting its turn, and always null once the job has finished. A
+            failure while waiting is described by `error`, not by a lingering
+            activity.
+          enum:
+            - "switching_on"
+            - "waiting_for_printer"
+            - "printer_settling"
+            - "printing"
+            - null
+          example: "waiting_for_printer"
+        activity_message:
+          type: string
+          nullable: true
+          description: >-
+            The activity in plain words, ready to display. May name concrete
+            durations and so is not stable enough to branch on — switch on
+            `activity` for that.
+          example: "Switched on at the relay. Leaving the printer alone for 20s while it boots."
+        activity_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: ISO-8601 timestamp when the current activity began (null when there is none)
+          example: "2026-06-14T12:00:01+00:00"
       required:
         - id
         - type
@@ -1256,6 +1289,32 @@ components:
           type: integer
           description: Number of jobs currently printing (0 or 1)
           example: 0
+        activity:
+          type: string
+          nullable: true
+          description: >-
+            What the job currently being processed is doing, if anything. The
+            same value that job reports under `GET /jobs`, read from the same
+            place. A job waiting for its printer to be switched on and boot is
+            counted under `queued`, so without this the queue looks idle while
+            it is busy waiting.
+          enum:
+            - "switching_on"
+            - "waiting_for_printer"
+            - "printer_settling"
+            - "printing"
+            - null
+          example: "waiting_for_printer"
+        activity_message:
+          type: string
+          nullable: true
+          description: The current activity in plain words, ready to display
+          example: "Waiting for the printer to come up."
+        activity_job_id:
+          type: string
+          nullable: true
+          description: Identifier of the job the activity belongs to (null when there is no activity)
+          example: "3f2a1b9c4d5e6f708192a3b4c5d6e7f8"
       required:
         - paused
         - queued

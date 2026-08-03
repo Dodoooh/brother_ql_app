@@ -527,3 +527,60 @@ def test_a_dry_run_survives_a_status_check_that_raises():
 
     assert response["printer_reachable"] is False
     assert "media" not in response
+
+
+# --------------------------------------------------------------------------- #
+# The clock readout must never take the status check down with it.
+#
+# printer-current-time comes back as a datetime on a well-behaved printer, but
+# a device may answer with a string, an out-of-band value, or a type this
+# client does not decode. It is a readout beside the status; anything unusable
+# belongs in a note.
+# --------------------------------------------------------------------------- #
+
+@pytest.mark.parametrize("reported", [
+    "2026-08-04T12:40:17+00:00",   # ISO string instead of a datetime
+    "2026-08-04T12:40:17",         # no timezone
+    "unknown",                     # out-of-band
+    "",                            # empty
+    12345,                         # not even a string
+    object(),                      # anything at all
+])
+def test_an_unusable_clock_never_raises(reported):
+    from src.services.printer_service import printer_service
+
+    info = printer_service._build_clock_info(reported)
+
+    # Always well-formed, whatever came in.
+    assert set(info) == {
+        "server_time", "printer_time", "drift_seconds", "in_sync", "note"}
+    assert isinstance(info["server_time"], str)
+
+
+def test_an_iso_string_clock_is_still_compared():
+    """A string that is a real timestamp is used, not discarded."""
+    from datetime import datetime, timezone
+    from src.services.printer_service import printer_service
+
+    now = datetime.now(timezone.utc)
+    info = printer_service._build_clock_info(now.isoformat())
+
+    assert info["note"] is None
+    assert info["in_sync"] is True
+    assert abs(info["drift_seconds"]) < 5
+
+
+def test_a_naive_clock_is_not_turned_into_a_drift():
+    """A reading without a timezone is the printer's local time.
+
+    Comparing it to UTC would invent a drift of the timezone offset and tell
+    the user their printer clock is hours out when it is not.
+    """
+    from datetime import datetime
+    from src.services.printer_service import printer_service
+
+    info = printer_service._build_clock_info(datetime.now().replace(microsecond=0))
+
+    assert info["drift_seconds"] is None
+    assert info["in_sync"] is None
+    assert "timezone" in info["note"]

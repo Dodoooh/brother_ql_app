@@ -996,8 +996,11 @@ async function handleQRCodePrint(event) {
             }
         };
 
-        // Add text settings if needed
-        if (qrShowText && qrTextContent) {
+        // The caption block goes with the checkbox, not with the field. Asking
+        // for a caption and typing nothing means "label it with what it
+        // encodes", and the server only reaches that fallback if it is told a
+        // caption was wanted at all.
+        if (qrShowText) {
             requestBody.text = {
                 content: qrTextContent,
                 position: qrTextPosition,
@@ -1472,7 +1475,9 @@ function buildPreviewRequest(mode) {
         };
         const showText = document.getElementById('qr-show-text').checked;
         const textContent = document.getElementById('qr-text-content').value;
-        if (showText && textContent) {
+        // Sent whenever the box is ticked, empty caption included, so the
+        // preview shows the same fallback the print will use.
+        if (showText) {
             body.text = {
                 content: textContent,
                 position: document.getElementById('qr-text-position').value,
@@ -1650,6 +1655,30 @@ const JOB_STATUS_META = {
     cancelled: { label: 'Cancelled', cls: 'cancelled' }
 };
 
+// What a job is doing right now, alongside (not instead of) its status: a job
+// held while the printer's mains supply is switched on and the device boots
+// stays "queued", and names the phase here. `activity` is the stable token to
+// switch on; the `activity_message` beside it is prose that quotes the real
+// number of seconds involved, so it is displayed verbatim and never rebuilt
+// from these labels.
+const JOB_ACTIVITY_META = {
+    switching_on:        { label: 'Switching on',        icon: 'bi-lightning-charge-fill' },
+    waiting_for_printer: { label: 'Waiting for printer', icon: 'bi-hourglass-split' },
+    printer_settling:    { label: 'Printer settling',    icon: 'bi-broadcast-pin' },
+    printing:            { label: 'Printing',            icon: 'bi-printer-fill' }
+};
+
+/**
+ * Look up the display metadata for an activity token. An unknown token still
+ * gets shown rather than swallowed, so a phase added on the server appears here
+ * without a frontend release.
+ * @param {string} activity - a token from the API's activity enum
+ * @returns {{label: string, icon: string}}
+ */
+function jobActivityMeta(activity) {
+    return JOB_ACTIVITY_META[activity] || { label: String(activity), icon: 'bi-hourglass-split' };
+}
+
 /**
  * Escape a string for safe insertion into innerHTML.
  */
@@ -1693,6 +1722,32 @@ function formatJobTime(value) {
         text = `${Math.floor(sec / 86400)}d ago`;
     }
     return { text, title: date.toLocaleString() };
+}
+
+/**
+ * Format how long ago `value` was as a stopwatch reading ("0:07", "3:41", and
+ * "1:02:30" once past the hour). Used for a wait that can run to several
+ * minutes, where "3m ago" is too coarse to show that anything is still moving.
+ * @param {string|number} value - ISO string or epoch seconds/ms
+ * @returns {string} the reading, or '' when there is no usable timestamp
+ */
+function formatElapsed(value) {
+    if (!value) return '';
+    let date;
+    if (typeof value === 'number') {
+        date = new Date(value < 1e12 ? value * 1000 : value);
+    } else {
+        date = new Date(value);
+    }
+    if (isNaN(date.getTime())) return '';
+    // Clamped, so a clock that disagrees with the server by a second shows 0:00
+    // rather than a negative count.
+    const total = Math.max(0, Math.round((Date.now() - date.getTime()) / 1000));
+    const sec = total % 60;
+    const min = Math.floor(total / 60) % 60;
+    const hrs = Math.floor(total / 3600);
+    const pad = n => String(n).padStart(2, '0');
+    return hrs > 0 ? `${hrs}:${pad(min)}:${pad(sec)}` : `${min}:${pad(sec)}`;
 }
 
 /**
@@ -1754,11 +1809,24 @@ function renderJobs(jobs) {
             ? `<button type="button" class="btn-ghost btn-sm queue-delete" data-action="delete" data-job-id="${escapeHtml(job.id)}" data-job-status="${escapeHtml(job.status || '')}" title="Delete job"><i class="bi bi-trash3"></i></button>`
             : '';
         const errorRow = (job.status === 'failed' && job.error)
-            ? `<div class="queue-error">${escapeHtml(job.error)}</div>`
+            ? `<div class="queue-error"><i class="bi bi-exclamation-octagon-fill" aria-hidden="true"></i>` +
+              `<span>${escapeHtml(job.error)}</span></div>`
+            : '';
+
+        // Which job the queue is busy with. Only the job something is actually
+        // happening to gets marked: the rows behind it are ordinary waiting
+        // jobs and must keep looking like it. The phase is named here and the
+        // sentence describing it lives once, in the strip above the list.
+        const activity = job.activity || null;
+        // An activity that only restates the status ("printing" on a printing
+        // job) is left to the status chip, which already spins.
+        const phaseRow = (activity && activity !== job.status)
+            ? `<div class="queue-phase"><span class="queue-phase-dot" aria-hidden="true"></span>` +
+              `${escapeHtml(jobActivityMeta(activity).label)}</div>`
             : '';
 
         return (
-            `<div class="queue-item">` +
+            `<div class="queue-item${activity ? ' is-active' : ''}">` +
                 `<div class="queue-item-main">` +
                     `<span class="queue-status ${meta.cls}">${spinner}${escapeHtml(meta.label)}</span>` +
                     `<span class="queue-type">${escapeHtml(job.type || '')}</span>` +
@@ -1766,6 +1834,7 @@ function renderJobs(jobs) {
                     `<span class="queue-time" title="${escapeHtml(time.title)}">${escapeHtml(time.text)}</span>` +
                     `<span class="queue-actions">${reprintBtns}${cancelBtn}${deleteBtn}</span>` +
                 `</div>` +
+                phaseRow +
                 errorRow +
             `</div>`
         );
@@ -1814,6 +1883,62 @@ function applyQueueState(state) {
 
     const badge = document.getElementById('queue-paused-badge');
     if (badge) badge.hidden = !paused;
+
+    applyQueueActivity(state);
+}
+
+/**
+ * Show what the queue is busy with in the strip under the control bar, or hide
+ * it when nothing in particular is happening.
+ *
+ * The strip carries the server's own sentence unchanged: it names the concrete
+ * durations involved ("leaving the printer alone for 20s while it boots"), and
+ * rewording it here would let the two drift apart. The icon is picked from the
+ * `activity` token, which is the part of the contract that is stable enough to
+ * branch on.
+ * @param {{activity?: ?string, activity_message?: ?string, activity_job_id?: ?string}} state
+ */
+function applyQueueActivity(state) {
+    const bar = document.getElementById('queue-activity');
+    if (!bar) return;
+
+    const activity = (state && state.activity) || null;
+    if (!activity) {
+        bar.hidden = true;
+        bar.removeAttribute('data-activity');
+        return;
+    }
+    const meta = jobActivityMeta(activity);
+
+    const icon = bar.querySelector('.queue-activity-icon i');
+    if (icon) icon.className = `bi ${meta.icon}`;
+
+    // The phase label is only a fallback, for a producer that reported a token
+    // without a message.
+    const message = state.activity_message || meta.label;
+    const messageEl = document.getElementById('queue-activity-message');
+    // Written only when it actually changed: this is a live region, and
+    // rewriting the same sentence on every poll would have a screen reader
+    // announce it every 1.5 seconds for the length of the wait.
+    if (messageEl && messageEl.textContent !== message) {
+        messageEl.textContent = message;
+    }
+
+    // How long the phase has been running. The queue endpoint names the job the
+    // activity belongs to and the jobs endpoint carries the moment it started,
+    // and the same poll fetches both, so this needs no request of its own. It
+    // re-reads on every poll instead of ticking on a timer of its own, so it
+    // moves at the cadence the rest of the panel already moves at.
+    const job = (state.activity_job_id && jobsById[state.activity_job_id]) || null;
+    const elapsedEl = document.getElementById('queue-activity-elapsed');
+    if (elapsedEl) {
+        const elapsed = job ? formatElapsed(job.activity_at) : '';
+        elapsedEl.textContent = elapsed;
+        elapsedEl.hidden = !elapsed;
+    }
+
+    bar.dataset.activity = activity;
+    bar.hidden = false;
 }
 
 /**

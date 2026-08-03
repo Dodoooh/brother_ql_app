@@ -13,6 +13,9 @@ and off again once everything has wound down. Two events exist:
     job *waits in the queue* while the printer boots, and then prints. A job is
     never failed for arriving at a printer that was merely switched off.
 
+    What "the printer is up" means is spelled out under *Waiting for the
+    printer* below; it is not "a socket accepted a connection".
+
 ``turn_off``
     Optional. Sent once the configured window has closed and nothing is left to
     print.
@@ -20,6 +23,37 @@ and off again once everything has wound down. Two events exist:
 Either event can also be sent by hand through :meth:`RelayPowerService.send_now`,
 which is how somebody proves the relay answers without waiting for a print job or
 for the window to run out.
+
+Waiting for the printer
+-----------------------
+A relay closing is not a printer printing. Between the two sit a boot, a Wi-Fi
+association and an IPP server starting, in that order, and the gate has to wait
+out all three without waiting forever. It does that in three phases, per
+``turn_on`` attempt:
+
+1. **It does not look at all** for ``TURN_ON_BLIND_WAIT_SECONDS``. Nothing can
+   answer that early, and asking costs 3.5 s a time when nothing is there.
+2. **It probes** for up to the attempt's window, at a short pause between
+   probes. A ceiling, not a fixed delay: a printer that appears early is used
+   early.
+3. **It settles.** The first answer is not the finish line. The printer has to
+   go on reporting itself ready over ``PRINTER_READY_SETTLE_SECONDS``, or -- if
+   it will not say, because IPP is not answering, or says something is in the
+   way -- to go on answering over the longer
+   ``PRINTER_ANSWERING_SETTLE_SECONDS``.
+
+Readiness is preferred over liveness wherever the app has it.
+``PrinterService.check_printer_status`` reports ``state`` over IPP, and the gate
+reads that rather than the ``reachable`` bit underneath it: a TCP connect
+succeeding on port 9100 says a socket is bound, which a booting device manages
+well before its print engine will take a raster.
+
+The whole thing is bounded, and the bound is named in the failure along with
+what was actually done -- how long it waited before looking, how many times it
+looked and over how long -- rather than an interval the code does not honour.
+And the job says which phase it is in the whole time, through
+:mod:`src.utils.job_activity`, so a queue holding a job for a minute is never
+silently doing so.
 
 The timing chain
 ----------------
@@ -115,12 +149,17 @@ import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import structlog
 
 from src.services.settings_service import settings_service
 from src.utils.exceptions import RelayWebhookError
+from src.utils.job_activity import (
+    ACTIVITY_PRINTER_SETTLING,
+    ACTIVITY_SWITCHING_ON,
+    ACTIVITY_WAITING_FOR_PRINTER,
+)
 from src.utils.uri_validation import validate_webhook_url
 
 try:
@@ -146,28 +185,99 @@ logger = structlog.get_logger()
 # preferences. A user who could set them would have to guess at numbers whose
 # only correct value is "long enough for this class of device to boot", and a
 # wrong guess turns into print jobs that fail for no visible reason.
+#
+# What one status check costs, because every number below was chosen against it:
+#
+#     printer answering  ~0.09 s
+#     nothing there       3.50 s   = 2.0 s IPP timeout (ipp_client) +
+#                                    1.5 s TCP connect timeout (_tcp_reachable)
+#
+# both measured against the live printer and against an unused address on the
+# same subnet. A probe into an empty window is not free, and 3.5 s of it is a
+# meaningful slice of any budget below.
 # --------------------------------------------------------------------------- #
 
-# How long to wait for the printer to answer after the FIRST turn_on webhook.
+# How long to wait after a turn_on webhook before looking at the printer AT ALL.
 #
-# Mains-on to network-reachable on a QL-810W/820NWB is dominated by Wi-Fi
-# association after the boot itself, and 25-35 s is the range actually observed;
-# wired models are quicker. 45 s clears that with margin. It is not expensive to
-# be generous here: by this point the HTTP request that queued the job has long
-# since returned, so the only thing waiting is the queue worker.
-TURN_ON_FIRST_WAIT_SECONDS = 45.0
+# Mains-on to Wi-Fi-associated is about 20 s on the QL-820NWB this was built
+# against -- measured by watching the device, not guessed -- and nothing can
+# answer before that. Probing into that window is not merely useless: at 3.5 s
+# per unanswered probe it spends the budget answering a question already known.
+# So the gate does not look at all until the printer has had time to boot.
+#
+# 20 s is the floor of what is normal rather than the whole story: it is the
+# moment the radio associates, and the IPP server starts listening some time
+# after that. That is why the settle below is measured from the printer's first
+# answer and not from here.
+TURN_ON_BLIND_WAIT_SECONDS = 20.0
 
-# How long to wait after the SECOND turn_on webhook. Shorter, because the relay
-# has already been closed for the whole first window. This attempt exists for
-# the case where the first request was accepted but not acted on (a relay that
-# dropped it, a flow that was mid-restart), not for a printer that is simply
-# slow. 30 s puts the worst case at 75 s total, which is a bounded wait a user
-# can be told about rather than an open-ended one.
-TURN_ON_SECOND_WAIT_SECONDS = 30.0
+# How long to keep probing after the blind wait, per turn_on attempt.
+#
+# The previous 45 s + 30 s was demonstrably too small: a printer that had mains
+# power for the whole attempt never answered inside it. Mains-on to
+# IPP-answering is the boot, plus the association, plus the IPP server starting,
+# and only the first of those has ever been measured. 120 s is six times the
+# measured association time and leaves room for the two unmeasured parts.
+TURN_ON_FIRST_WAIT_SECONDS = 120.0
 
-# How often the printer is re-probed while waiting. The waits above are ceilings,
-# not fixed delays: a printer that comes up in 12 s starts printing at ~12 s.
-TURN_ON_POLL_INTERVAL_SECONDS = 3.0
+# How long to keep probing after the SECOND turn_on webhook. Shorter, because
+# the relay has already been closed for the whole first window. This attempt
+# exists for the case where the first request was accepted but not acted on (a
+# relay that dropped it, a flow that was mid-restart), not for a printer that is
+# simply slow.
+#
+# Worst case end to end is then (20 + 120) + (20 + 60) = 220 s plus the settle:
+# about four minutes for a printer that is never coming. That is a long time to
+# wait, and it is the right way round -- giving up at 75 s while the printer is
+# still on its way leaves somebody unable to tell whether to wait or to
+# intervene, which is exactly what happened. It is bounded, it is named in the
+# failure, and the queue says what it is doing throughout.
+TURN_ON_SECOND_WAIT_SECONDS = 60.0
+
+# The pause between two probes once probing has started.
+#
+# The probe itself costs 3.5 s while nothing answers and about 0.1 s once
+# something does, so the real cadence is roughly 5.5 s through the empty part of
+# the wait and roughly 2 s from the moment the printer starts answering. That is
+# the way round that matters: a tight cadence buys nothing while the device is
+# absent and buys promptness exactly when it appears.
+#
+# Nothing quotes this number as "the interval", and the failure message does not
+# either. It reports the probes actually made over the time they actually took,
+# because a stated interval that the probe cost silently doubles is worse than
+# no interval at all.
+PRINTER_PROBE_PAUSE_SECONDS = 2.0
+
+# How long the printer has to keep reporting itself READY before a job is handed
+# over.
+#
+# The gate used to hand the job over on the first successful probe. "It answered
+# once" and "it is up" are different claims about a device that is in the middle
+# of booting, and the difference is what a user sees as a job that fails while a
+# reprint moments later works. So readiness has to hold: at a 2 s pause this is
+# four or five consecutive readings agreeing, not one.
+#
+# 8 s is paid once per cold start, on top of a wait that is already tens of
+# seconds, so it is cheap where it is spent. A printer that was already up when
+# the job arrived pays none of it -- the settle guards the boot window, and
+# there is no boot window in that case.
+PRINTER_READY_SETTLE_SECONDS = 8.0
+
+# The same, for a printer that answers but will not say whether it is ready.
+#
+# Not every printer serves IPP: with it disabled, or not yet listening, the app
+# has only a TCP connect on port 9100, and a socket accepting a connection is a
+# claim about the network stack rather than about the print engine. Time is then
+# the only evidence available, so more of it is required -- 20 s of continuous
+# answering, against 8 s for a device that states its own readiness.
+#
+# This rule also catches a printer that comes up reporting a blocking condition
+# (media-empty is the common one, and Brother firmware reports it transiently
+# during boot). Such a job is handed over once it has answered steadily for this
+# long, deliberately: the gate's job is to wait for the printer to come up, not
+# to adjudicate whether it can print. Letting the printer give the real error
+# beats the gate inventing a plausible one.
+PRINTER_ANSWERING_SETTLE_SECONDS = 20.0
 
 # Socket timeout for a single webhook POST. A relay bridge on the LAN answers in
 # milliseconds; ten seconds is the point past which it is not going to answer.
@@ -189,6 +299,22 @@ AUTHORIZATION_ENV_VAR = "RELAY_WEBHOOK_AUTHORIZATION"
 # Actions carried in the webhook body.
 ACTION_TURN_ON = "turn_on"
 ACTION_TURN_OFF = "turn_off"
+
+# What a readiness probe can find. Deliberately the same four words
+# ``PrinterService.check_printer_status`` already reports in its ``state``
+# field, because they are the same four answers and a second vocabulary for
+# them would only have to be kept in step with the first.
+#
+# ready        the printer states, over IPP, that nothing is stopping it.
+# unknown      it accepted a TCP connection and said nothing more. Liveness,
+#              not readiness: a bound socket is not a print engine.
+# blocked      it answered and named something in the way (cover-open,
+#              media-empty).
+# unreachable  nothing answered.
+PRINTER_STATE_READY = "ready"
+PRINTER_STATE_UNKNOWN = "unknown"
+PRINTER_STATE_BLOCKED = "blocked"
+PRINTER_STATE_UNREACHABLE = "unreachable"
 
 # What the origin of the timing chain is.
 #
@@ -244,6 +370,40 @@ def _iso(moment: Optional[float]) -> Optional[str]:
         return None
 
 
+def _normalise_probe_result(result: Any) -> Tuple[str, List[str]]:
+    """Reduce whatever a readiness probe returned to a state and its reasons.
+
+    Accepts the three shapes a probe can sensibly answer in:
+
+    * the full status dict from ``check_printer_status``, which is what the
+      shipped probe returns;
+    * a bare ``PRINTER_STATE_*`` string;
+    * a bool, from a probe that can only answer "is it there". Taken at its
+      word -- True means ready -- because a caller who supplies a liveness-only
+      probe has told us that is all the readiness it has.
+
+    Anything unrecognised is read as no answer, which is the safe direction: it
+    delays a job rather than pushing one at a printer that may not be there.
+    """
+    if isinstance(result, bool):
+        return (PRINTER_STATE_READY if result else PRINTER_STATE_UNREACHABLE), []
+    if isinstance(result, str):
+        state = result.strip().lower()
+        return (state or PRINTER_STATE_UNREACHABLE), []
+    if isinstance(result, dict):
+        state = str(result.get("state") or "").strip().lower()
+        if not state:
+            # No state at all: fall back to the reachability bit, which every
+            # older status payload carried.
+            state = (PRINTER_STATE_READY if result.get("reachable")
+                     else PRINTER_STATE_UNREACHABLE)
+        reasons = result.get("blocking_reasons") or []
+        if isinstance(reasons, str):
+            reasons = [reasons]
+        return state, [str(reason) for reason in reasons]
+    return PRINTER_STATE_UNREACHABLE, []
+
+
 def _as_int(value: Any, default: int = 0) -> int:
     """Best-effort int conversion that never raises."""
     try:
@@ -259,10 +419,11 @@ class RelayPowerService:
         self,
         state_file: Optional[str] = None,
         settings_provider: Any = None,
-        reachability_probe: Optional[Callable[[Dict[str, Any]], bool]] = None,
+        readiness_probe: Optional[Callable[[Dict[str, Any]], Any]] = None,
         pending_work_probe: Optional[Callable[[], bool]] = None,
         sender: Optional[Callable[[str, Dict[str, Any], float], None]] = None,
         origin_provider: Optional[Callable[[], Optional[Tuple[float, bool]]]] = None,
+        activity_reporter: Optional[Callable[[Optional[str], Optional[str]], Any]] = None,
     ) -> None:
         """Initialise the service.
 
@@ -274,8 +435,12 @@ class RelayPowerService:
             state_file: Where the scheduled turn-off moment is persisted.
                 Defaults to ``relay_power.json`` beside the settings file.
             settings_provider: Object exposing ``get_settings()``.
-            reachability_probe: ``probe(settings) -> bool``, "is the printer
-                answering right now".
+            readiness_probe: ``probe(settings)`` answering "what is the printer
+                doing right now", as one of the ``PRINTER_STATE_*`` values. It
+                may return the bare string, or a dict carrying ``state`` and
+                ``blocking_reasons`` -- which is what
+                ``check_printer_status`` already returns. See
+                :func:`_normalise_probe_result`.
             pending_work_probe: ``probe() -> bool``, "is anything queued or
                 printing".
             sender: ``sender(url, payload, timeout) -> None``, performing the
@@ -283,12 +448,16 @@ class RelayPowerService:
             origin_provider: ``provider() -> (timestamp, printed)``, the moment
                 the timing chain is measured from and whether it is a real print
                 rather than the startup fallback.
+            activity_reporter: ``report(activity, message)``, saying what the
+                job being held by the gate is currently doing. Defaults to the
+                print queue's, which writes it onto the job it has in hand.
         """
         self._settings_provider = settings_provider or settings_service
-        self._reachability_probe = reachability_probe or self._default_reachability_probe
+        self._readiness_probe = readiness_probe or self._default_readiness_probe
         self._pending_work_probe = pending_work_probe or self._default_pending_work_probe
         self._sender = sender or self._default_sender
         self._origin_provider = origin_provider or self._default_origin_provider
+        self._activity_reporter = activity_reporter or self._default_activity_reporter
 
         if state_file is None:
             settings_file = getattr(self._settings_provider, "settings_file", "")
@@ -299,7 +468,10 @@ class RelayPowerService:
         # Waits are instance attributes rather than direct constant reads so a
         # test can shrink them without patching module state.
         self.turn_on_waits = (TURN_ON_FIRST_WAIT_SECONDS, TURN_ON_SECOND_WAIT_SECONDS)
-        self.poll_interval = TURN_ON_POLL_INTERVAL_SECONDS
+        self.blind_wait = TURN_ON_BLIND_WAIT_SECONDS
+        self.probe_pause = PRINTER_PROBE_PAUSE_SECONDS
+        self.ready_settle = PRINTER_READY_SETTLE_SECONDS
+        self.answering_settle = PRINTER_ANSWERING_SETTLE_SECONDS
         self.webhook_timeout = WEBHOOK_TIMEOUT_SECONDS
         self.tick_interval = SCHEDULER_TICK_SECONDS
 
@@ -938,22 +1110,44 @@ class RelayPowerService:
     # ------------------------------------------------------------------ #
     # Default collaborators
     # ------------------------------------------------------------------ #
-    def _default_reachability_probe(self, settings: Dict[str, Any]) -> bool:
-        """Ask the printer service whether the printer is answering."""
+    def _default_readiness_probe(self, settings: Dict[str, Any]) -> Dict[str, Any]:
+        """Ask the printer service what the printer is doing.
+
+        Reports the whole answer rather than reducing it to a boolean. The
+        status check already distinguishes "the device answered" from "the
+        device says it can print", and the gate needs both: it accepts a stated
+        readiness quickly and an unexplained answer only after a longer settle,
+        which it cannot do from one bit.
+        """
         # Imported lazily: the printer service imports this module, so a
         # top-level import here would be a cycle.
         from src.services.printer_service import printer_service
 
         printer_uri = settings.get("printer_uri", "")
         if not printer_uri:
-            return False
+            return {"state": PRINTER_STATE_UNREACHABLE, "blocking_reasons": []}
         try:
-            status = printer_service.check_printer_status(
+            return printer_service.check_printer_status(
                 printer_uri, settings.get("printer_model", ""))
-            return bool(status.get("reachable"))
         except Exception as e:  # noqa: BLE001 - an error here means "not answering"
-            logger.debug("Reachability probe failed", error=str(e))
-            return False
+            logger.debug("Readiness probe failed", error=str(e))
+            return {"state": PRINTER_STATE_UNREACHABLE, "blocking_reasons": []}
+
+    @staticmethod
+    def _default_activity_reporter(activity: Optional[str],
+                                   message: Optional[str] = None) -> None:
+        """Tell the print queue what the job it is holding is doing.
+
+        Best-effort in every direction: there may be no job (the gate can be
+        called by hand), and a failure to describe a job must never be a reason
+        to fail it.
+        """
+        from src.services.queue_service import print_queue
+
+        try:
+            print_queue.report_activity(activity, message)
+        except Exception as e:  # noqa: BLE001 - reporting must not break a print
+            logger.debug("Could not report job activity", error=str(e))
 
     def _default_origin_provider(self) -> Optional[Tuple[float, bool]]:
         """Ask the printer service what the timing chain runs from.
@@ -987,40 +1181,196 @@ class RelayPowerService:
     # ------------------------------------------------------------------ #
     # turn_on
     # ------------------------------------------------------------------ #
-    def _wait_for_printer(self, settings: Dict[str, Any], seconds: float) -> bool:
-        """Poll for reachability for up to ``seconds``.
+    def _report(self, activity: Optional[str], message: Optional[str] = None) -> None:
+        """Say what the job the gate is holding is doing. Never raises."""
+        try:
+            self._activity_reporter(activity, message)
+        except Exception as e:  # noqa: BLE001 - describing a job must not fail it
+            logger.debug("Could not report job activity", error=str(e))
 
-        Returns as soon as the printer answers, so the wait constants above are
-        ceilings rather than fixed delays.
+    def _probe(self, settings: Dict[str, Any]) -> Tuple[str, List[str]]:
+        """Ask the printer what it is doing, as (state, blocking_reasons)."""
+        try:
+            result = self._readiness_probe(settings)
+        except Exception as e:  # noqa: BLE001 - an error here means "no answer"
+            logger.debug("Readiness probe raised; reading it as no answer",
+                         error=str(e))
+            return PRINTER_STATE_UNREACHABLE, []
+        return _normalise_probe_result(result)
+
+    def _sleep(self, seconds: float) -> bool:
+        """Wait, returning True when the app is shutting down."""
+        return self._stop_event.wait(max(0.0, seconds))
+
+    def _wait_until_ready(self, settings: Dict[str, Any], seconds: float,
+                          blind_wait: float = 0.0,
+                          report: bool = False) -> Dict[str, Any]:
+        """Wait for the printer to come up and stay up.
+
+        Three things happen here, in order:
+
+        1. **Nothing, for ``blind_wait`` seconds.** A printer whose mains have
+           just been switched on cannot answer, and asking costs 3.5 s a time.
+        2. **Probing, for up to ``seconds``.** A ceiling and not a fixed delay:
+           a printer that appears after 12 s is not made to wait out the window.
+        3. **A settle.** Answering once is not being up. Readiness has to hold
+           for :attr:`ready_settle` when the printer states it, or the answering
+           itself has to hold for :attr:`answering_settle` when it will not say
+           (no IPP) or says something is in the way. The second case is longer
+           because time is then the only evidence there is.
+
+        A settle that starts near the deadline is allowed to finish -- failing a
+        printer for answering one probe before the end would be perverse -- but
+        only by the length of the longest settle, so a device that flickers in
+        and out cannot stretch the wait indefinitely.
+
+        Args:
+            settings: Settings the probe reads the printer address from.
+            seconds: Ceiling on the probing phase, after the blind wait.
+            blind_wait: How long not to look at all before probing starts.
+            report: Whether to describe each phase to the queue.
+
+        Returns:
+            A record of what happened: ``ready`` (did it come up), ``probes``
+            (how many times it was asked), ``probing_seconds`` (over how long),
+            ``blind_wait``, the last ``state`` and ``blocking_reasons`` seen,
+            and ``stated_ready`` -- whether the printer said so itself or was
+            accepted on the strength of answering steadily.
+
+            ``answered_state`` is the last state that was not "nothing there",
+            or None if nothing ever was. It is kept apart from ``state``
+            because the two differ in exactly the case worth describing: a
+            printer that flickers in and out is very likely to be absent on the
+            probe that happens to be last, and "it never answered" would then be
+            the wrong thing to tell somebody.
         """
-        deadline = time.monotonic() + max(0.0, seconds)
+        outcome: Dict[str, Any] = {
+            "ready": False,
+            "stated_ready": False,
+            "probes": 0,
+            "probing_seconds": 0.0,
+            "blind_wait": max(0.0, blind_wait),
+            "state": PRINTER_STATE_UNREACHABLE,
+            "blocking_reasons": [],
+            "answered_state": None,
+            "answered_blocking": [],
+        }
+
+        if blind_wait > 0:
+            if report:
+                self._report(
+                    ACTIVITY_WAITING_FOR_PRINTER,
+                    f"Switched on at the relay. Leaving the printer alone for "
+                    f"{blind_wait:.0f}s while it boots.")
+            if self._sleep(blind_wait):
+                return outcome
+        if report:
+            self._report(ACTIVITY_WAITING_FOR_PRINTER,
+                         "Waiting for the printer to come up.")
+
+        started = time.monotonic()
+        deadline = started + max(0.0, seconds)
+        hard_deadline = deadline + max(self.ready_settle, self.answering_settle)
+
+        ready_since: Optional[float] = None      # stating it can print, since
+        answering_since: Optional[float] = None  # answering at all, since
+        reported_settle: Optional[str] = None
+
         while True:
-            if self._stop_event.wait(min(self.poll_interval, max(0.0, deadline - time.monotonic()))):
-                # Shutting down; report the last known truth rather than looping.
-                return self._reachability_probe(settings)
-            if self._reachability_probe(settings):
-                return True
-            if time.monotonic() >= deadline:
-                return False
+            state, blocking = self._probe(settings)
+            now = time.monotonic()
+            outcome["probes"] += 1
+            outcome["probing_seconds"] = now - started
+            outcome["state"] = state
+            outcome["blocking_reasons"] = blocking
+            if state != PRINTER_STATE_UNREACHABLE:
+                outcome["answered_state"] = state
+                outcome["answered_blocking"] = blocking
+
+            if state == PRINTER_STATE_READY:
+                if ready_since is None:
+                    ready_since = now
+                if answering_since is None:
+                    answering_since = now
+            elif state in (PRINTER_STATE_UNKNOWN, PRINTER_STATE_BLOCKED):
+                # It is there but is not stating that it can print. The stated
+                # readiness clock restarts; the answering clock does not, since
+                # what it is measuring did not stop.
+                ready_since = None
+                if answering_since is None:
+                    answering_since = now
+            else:
+                ready_since = None
+                answering_since = None
+
+            stated = (ready_since is not None
+                      and now - ready_since >= self.ready_settle)
+            steady = (answering_since is not None
+                      and now - answering_since >= self.answering_settle)
+            if stated or steady:
+                outcome["ready"] = True
+                outcome["stated_ready"] = stated
+                logger.info("Printer settled and is being printed to",
+                            state=state, stated_ready=stated,
+                            probes=outcome["probes"],
+                            probing_seconds=round(outcome["probing_seconds"], 1))
+                return outcome
+
+            settle = None
+            if answering_since is not None:
+                settle = "ready" if ready_since is not None else "answering"
+            if report and settle != reported_settle:
+                reported_settle = settle
+                if settle == "ready":
+                    self._report(
+                        ACTIVITY_PRINTER_SETTLING,
+                        f"The printer reports itself ready. Letting it settle "
+                        f"for {self.ready_settle:.0f}s before printing.")
+                elif settle == "answering":
+                    self._report(
+                        ACTIVITY_PRINTER_SETTLING,
+                        f"The printer is answering but has not reported itself "
+                        f"ready. Giving it {self.answering_settle:.0f}s before "
+                        f"printing anyway.")
+                else:
+                    self._report(ACTIVITY_WAITING_FOR_PRINTER,
+                                 "The printer stopped answering. Still waiting "
+                                 "for it to come up.")
+
+            if now >= hard_deadline:
+                return outcome
+            if now >= deadline and answering_since is None:
+                return outcome
+            if self._sleep(self.probe_pause):
+                return outcome
 
     def ensure_printer_powered(self) -> None:
-        """Make sure the printer is powered before a job is started.
+        """Make sure the printer is up before a job is started.
 
         This is the queue's pre-job gate. It returns quietly in the overwhelming
         majority of cases: the feature off, no URL configured, or a printer that
-        is already answering. Only an unreachable printer at an enabled,
-        configured relay causes a webhook.
+        already answers. Only a printer that does not answer at all, at an
+        enabled and configured relay, causes a webhook.
 
-        The sequence is send, wait, send again, wait a shorter time, then fail
-        naming what happened. A *delivery* failure is raised straight away
-        instead of being retried past: retrying a URL that refused the
-        connection mostly buys a slower, vaguer error, and the requirement is
-        that a webhook which did not arrive is reported rather than swallowed.
+        A printer that answers is left alone entirely -- no webhook, no wait, no
+        settle. The settle exists to guard the window after *this app* switched
+        a printer on, and there is no such window when the device was already
+        there. That also keeps the gate out of a judgement it should not be
+        making: a printer answering with its cover open is a job that should
+        fail at the printer, with the printer's reason, rather than in something
+        named after power.
+
+        The sequence for a printer that is not there is: send, wait, send again,
+        wait less, then fail naming what was actually done. A *delivery* failure
+        is raised straight away instead of being retried past: retrying a URL
+        that refused the connection mostly buys a slower, vaguer error, and the
+        requirement is that a webhook which did not arrive is reported rather
+        than swallowed.
 
         Raises:
             RelayWebhookError: When the webhook cannot be delivered, or when the
-                printer never answers. The job then fails carrying that message,
-                which is the only place a user would look for it.
+                printer never comes up. The job then fails carrying that
+                message, which is the only place a user would look for it.
         """
         settings = self._settings()
 
@@ -1035,35 +1385,71 @@ class RelayPowerService:
                            "configured; not switching the printer on")
             return
 
-        if self._reachability_probe(settings):
-            logger.debug("Printer already reachable; no relay turn_on needed")
+        state, blocking = self._probe(settings)
+        if state != PRINTER_STATE_UNREACHABLE:
+            logger.debug("Printer already answering; no relay turn_on needed",
+                         state=state, blocking_reasons=blocking)
             return
 
         logger.info("Printer not reachable; switching it on via the relay")
         waits = tuple(self.turn_on_waits)
+        started = time.monotonic()
+        probes = 0
+        probing_seconds = 0.0
+        answered_state: Optional[str] = None
+        answered_blocking: List[str] = []
+
         for attempt, wait_seconds in enumerate(waits, start=1):
+            self._report(
+                ACTIVITY_SWITCHING_ON,
+                "Switching the printer on at the relay."
+                if attempt == 1 else
+                f"The printer has not come up yet. Switching it on at the relay "
+                f"again (attempt {attempt} of {len(waits)}).")
             self.send(ACTION_TURN_ON, settings)
             logger.info("Relay turn_on sent, waiting for the printer",
-                        attempt=attempt, wait_seconds=wait_seconds)
-            if self._wait_for_printer(settings, wait_seconds):
-                logger.info("Printer answered after relay turn_on", attempt=attempt)
+                        attempt=attempt, blind_wait_seconds=self.blind_wait,
+                        wait_seconds=wait_seconds)
+
+            outcome = self._wait_until_ready(settings, wait_seconds,
+                                             blind_wait=self.blind_wait,
+                                             report=True)
+            probes += outcome["probes"]
+            probing_seconds += outcome["probing_seconds"]
+            if outcome["answered_state"]:
+                answered_state = outcome["answered_state"]
+                answered_blocking = outcome["answered_blocking"]
+            if outcome["ready"]:
+                logger.info("Printer came up after relay turn_on", attempt=attempt,
+                            stated_ready=outcome["stated_ready"])
                 # Arm from here rather than waiting for the print to land: if
                 # the job goes on to fail, the relay must still be scheduled to
                 # switch off instead of being left on indefinitely.
                 self.arm()
                 return
 
-        total = sum(waits)
+        elapsed = time.monotonic() - started
+        # Say what it saw, when it saw anything. "Never answered" and "answered
+        # but never steadily" are different faults with different fixes, and the
+        # message is the only place either of them surfaces.
+        seen = ""
+        if answered_state:
+            named = f" ({', '.join(answered_blocking)})" if answered_blocking else ""
+            seen = (f" It did answer at some point, last reporting "
+                    f"'{answered_state}'{named}, but never steadily enough to "
+                    f"print to.")
         message = (
-            f"Printer did not answer within {total:.0f}s of the relay being switched on "
-            f"({len(waits)} turn_on webhook(s) delivered to {url}, "
-            f"re-checked every {self.poll_interval:.0f}s). The webhook was accepted, so "
-            "either the relay did not close, the printer is not on that outlet, or it "
-            "takes longer than this to come up."
+            f"Printer did not come up within {elapsed:.0f}s of the relay being "
+            f"switched on ({len(waits)} turn_on webhook(s) delivered to {url}; after "
+            f"each one it was left alone for {self.blind_wait:.0f}s to boot, then "
+            f"checked {probes} times over {probing_seconds:.0f}s)."
+            f"{seen} The webhook was accepted, so either the relay did not close, the "
+            "printer is not on that outlet, or it takes longer than this to come up."
         )
         self._record_error(message)
         logger.error("Printer did not come up after relay turn_on",
-                     attempts=len(waits), total_wait_seconds=total)
+                     attempts=len(waits), elapsed_seconds=round(elapsed, 1),
+                     probes=probes, answered_state=answered_state)
         raise RelayWebhookError(message, "RELAY_WEBHOOK_ERROR",
                                 {"action": ACTION_TURN_ON, "attempts": len(waits)})
 

@@ -10,6 +10,21 @@ The design assumes a single process (gunicorn ``--workers 1``): there is exactly
 one queue and one worker thread per process. A ``threading.Lock`` guards every
 access to the job registry, and all returned job dicts are copies so callers can
 never mutate the internal state.
+
+Saying what a job is doing
+--------------------------
+A job is not always merely waiting its turn. The pre-job gate (see
+:meth:`PrintQueueService.set_pre_job_gate`) can hold a job for minutes while the
+printer's mains supply is switched on and the device boots, and all of that used
+to look exactly like an idle queue. Every job therefore carries an ``activity``
+alongside its ``status``: a token from :mod:`src.utils.job_activity` naming the
+phase, plus a human-readable ``activity_message`` and the ``activity_at`` moment
+it was set.
+
+The status enum is untouched -- a job in the gate is still ``queued``, which is
+what it is -- so no client that switches on ``status`` has to change. The queue
+sets the activity for the phases it owns (printing, and clearing it when the job
+finishes); the gate reports its own through :meth:`report_activity`.
 """
 
 import copy
@@ -22,6 +37,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 import structlog
+
+from src.utils.job_activity import ACTIVITY_PRINTING, activity_message
 
 logger = structlog.get_logger()
 
@@ -86,6 +103,11 @@ class PrintQueueService:
         # Optional callable run once per job, immediately before the job is
         # marked "printing". See set_pre_job_gate.
         self._pre_job_gate: Optional[Callable[[], Any]] = None
+        # The job the worker currently has in hand, from the moment it is
+        # dequeued until its outcome is recorded. This is what report_activity
+        # writes to, so a gate that knows nothing about job ids can still say
+        # what it is doing. Guarded by _lock like everything else here.
+        self._current_job_id: Optional[str] = None
 
     def set_pre_job_gate(self, gate: Optional[Callable[[], Any]]) -> None:
         """Install a callable run just before each job starts.
@@ -101,10 +123,79 @@ class PrintQueueService:
         about relays or printers; it only knows that something may need to
         happen before a job may start.
 
+        The gate takes no arguments and is not told which job it is holding. If
+        it wants to say what it is doing it calls :meth:`report_activity`, which
+        finds the job for it -- so the gate stays a plain ``gate() -> None`` and
+        the queue stays the only thing that knows the job registry exists.
+
         Args:
             gate: ``gate() -> None``, or None to remove the current one.
         """
         self._pre_job_gate = gate
+
+    # ------------------------------------------------------------------ #
+    # Activity reporting
+    # ------------------------------------------------------------------ #
+    def _set_activity_locked(self, job_id: Optional[str], activity: Optional[str],
+                             message: Optional[str] = None) -> bool:
+        """Write an activity onto a job. Caller must hold ``self._lock``.
+
+        Clearing (``activity=None``) drops the message and the timestamp with
+        it, so a job that is not doing anything never carries the description of
+        something it was doing a minute ago.
+        """
+        if job_id is None:
+            return False
+        job = self._jobs.get(job_id)
+        if job is None:
+            return False
+        job["activity"] = activity
+        job["activity_message"] = activity_message(activity, message)
+        job["activity_at"] = _now_iso() if activity else None
+        return True
+
+    def report_activity(self, activity: Optional[str],
+                        message: Optional[str] = None) -> bool:
+        """Record what the job currently being processed is doing.
+
+        Called by the pre-job gate, which does not know (and should not need to
+        know) which job it is holding: the worker has already recorded that.
+
+        The value is plain state, not an event. It stays on the job until
+        something replaces or clears it, so polling it twice returns it twice --
+        which is what stops a UI that polls every second from flickering between
+        "waiting for the printer" and nothing at all.
+
+        Args:
+            activity: A token from :mod:`src.utils.job_activity`, or None to
+                clear.
+            message: Human-readable wording; the token's default is used when
+                omitted.
+
+        Returns:
+            True when it was recorded, False when no job is being processed (a
+            gate called by hand, say). Never raises: a job must not fail because
+            the app could not describe it.
+        """
+        with self._lock:
+            return self._set_activity_locked(self._current_job_id, activity, message)
+
+    def current_activity(self) -> Dict[str, Any]:
+        """Return the activity of the job being processed, as a small dict."""
+        with self._lock:
+            return self._current_activity_locked()
+
+    def _current_activity_locked(self) -> Dict[str, Any]:
+        """The current job's activity. Caller must hold ``self._lock``."""
+        job = self._jobs.get(self._current_job_id) if self._current_job_id else None
+        activity = job.get("activity") if job else None
+        return {
+            "activity": activity,
+            "activity_message": job.get("activity_message") if job else None,
+            # Named only while there is an activity to attribute: the id of a
+            # job that is doing nothing describable is not information.
+            "activity_job_id": self._current_job_id if activity else None,
+        }
 
     # ------------------------------------------------------------------ #
     # Persisted job-file helpers
@@ -193,6 +284,11 @@ class PrintQueueService:
             "error": None,
             "params": copy.deepcopy(params) if params else {},
             "can_reprint": True,
+            # Nothing is happening to it yet; it is waiting its turn, which the
+            # status already says.
+            "activity": None,
+            "activity_message": None,
+            "activity_at": None,
         }
         with self._lock:
             self._jobs[job_id] = job
@@ -236,6 +332,9 @@ class PrintQueueService:
                 "error": None,
                 "params": params,
                 "can_reprint": True,
+                "activity": None,
+                "activity_message": None,
+                "activity_at": None,
             }
             self._jobs[new_id] = new_job
             self._executors[new_id] = fn
@@ -273,6 +372,10 @@ class PrintQueueService:
                 return False
             job["status"] = "cancelled"
             job["finished_at"] = _now_iso()
+            # A job cancelled while the gate is holding it stops doing whatever
+            # the gate said it was doing, even though the gate itself carries on
+            # until its wait is over.
+            self._set_activity_locked(job_id, None)
         logger.info("Print job cancelled", job_id=job_id)
         return True
 
@@ -343,6 +446,7 @@ class PrintQueueService:
                 if job is not None and job["status"] == "queued":
                     job["status"] = "cancelled"
                     job["finished_at"] = _now_iso()
+                    self._set_activity_locked(jid, None)
                     cancelled += 1
         if cancelled:
             logger.info("Cancelled all queued print jobs", count=cancelled)
@@ -404,15 +508,26 @@ class PrintQueueService:
         return len(removable)
 
     def queue_status(self) -> Dict[str, Any]:
-        """Return a small status summary for the queue control UI."""
+        """Return a small status summary for the queue control UI.
+
+        Carries the current job's activity as well as the counts, because this
+        is the endpoint the UI polls: a job held by the gate is counted under
+        ``queued`` (it has not started printing, and it really is still in the
+        queue), and without the activity that is indistinguishable from a queue
+        sitting idle. It is the same value ``GET /jobs`` reports on the job
+        itself, read from the same place, so the two cannot disagree.
+        """
         with self._lock:
             queued = sum(1 for j in self._jobs.values() if j["status"] == "queued")
             printing = sum(1 for j in self._jobs.values() if j["status"] == "printing")
-        return {
+            activity = self._current_activity_locked()
+        status = {
             "paused": self.is_paused(),
             "queued": queued,
             "printing": printing,
         }
+        status.update(activity)
+        return status
 
     # ------------------------------------------------------------------ #
     # Internal helpers
@@ -454,6 +569,9 @@ class PrintQueueService:
                     # Skip vanished or already-cancelled jobs.
                     if job is None or job["status"] == "cancelled":
                         continue
+                    # From here on this is the job in hand, and report_activity
+                    # writes to it.
+                    self._current_job_id = job_id
 
                 # Run the pre-job gate while the job is still "queued", so a job
                 # waiting for its printer to be powered up shows as waiting
@@ -473,6 +591,13 @@ class PrintQueueService:
                                 job["status"] = "failed"
                                 job["error"] = error
                                 job["finished_at"] = _now_iso()
+                            # A gate failure is described by the error, not by a
+                            # lingering activity: the message the gate raises
+                            # says what it was doing and for how long, and that
+                            # is where a user looks. The activity field is for
+                            # what a job is doing now, and a failed job is not
+                            # doing anything.
+                            self._set_activity_locked(job_id, None)
                         continue
 
                 with self._lock:
@@ -483,6 +608,7 @@ class PrintQueueService:
                         continue
                     job["status"] = "printing"
                     job["started_at"] = _now_iso()
+                    self._set_activity_locked(job_id, ACTIVITY_PRINTING)
                 logger.info("Print job started", job_id=job_id)
                 try:
                     fn()
@@ -503,6 +629,12 @@ class PrintQueueService:
                 if final_status == "done":
                     logger.info("Print job done", job_id=job_id)
             finally:
+                # Whatever happened -- printed, failed, cancelled under us,
+                # skipped -- the job is no longer doing anything, and nothing is
+                # in hand until the next one is dequeued.
+                with self._lock:
+                    self._set_activity_locked(job_id, None)
+                    self._current_job_id = None
                 self._queue.task_done()
 
 

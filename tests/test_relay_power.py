@@ -129,16 +129,22 @@ def _make_service(tmp_path, settings=None, reachable=False, pending=False,
     service = RelayPowerService(
         state_file=str(tmp_path / name),
         settings_provider=_Settings(settings if settings is not None else _settings()),
-        reachability_probe=(reachable if callable(reachable) else (lambda _s: reachable)),
+        readiness_probe=(reachable if callable(reachable) else (lambda _s: reachable)),
         pending_work_probe=(pending if callable(pending) else (lambda: pending)),
         sender=sender if sender is not None else _Sender(),
         **extra,
     )
-    # Keep the waits short so the retry sequence runs in milliseconds. The values
-    # under test are the *sequence and its outcome*, not the constants, which are
-    # asserted separately in test_turn_on_wait_constants_are_a_bounded_sequence.
+    # Keep every wait short so the whole sequence runs in milliseconds. The
+    # values under test are the *sequence and its outcome*, not the constants,
+    # which are asserted separately in test_turn_on_waiting_constants_hang_together.
+    # The blind wait is zeroed by default because most tests are about what
+    # happens once probing starts; the tests that are about the blind wait set
+    # it themselves.
     service.turn_on_waits = (0.05, 0.02)
-    service.poll_interval = 0.01
+    service.blind_wait = 0.0
+    service.probe_pause = 0.001
+    service.ready_settle = 0.002
+    service.answering_settle = 0.006
     return service
 
 
@@ -245,14 +251,33 @@ def test_subtraction_only_applies_while_the_feature_is_on():
     assert RelayPowerService.effective_keep_alive_seconds(settings) == 4 * HOUR
 
 
-def test_turn_on_wait_constants_are_a_bounded_sequence():
-    """The shipped waits: decreasing, bounded, and polled finely."""
+def test_turn_on_waiting_constants_hang_together():
+    """The shipped waits: decreasing, bounded, and finer-grained than the window.
+
+    The numbers themselves are judgement calls documented where they are
+    defined. What is asserted here is the shape they have to keep: a second
+    attempt shorter than the first, a probe pause well inside the window so a
+    printer that comes up early is used early, and a total that stays a bounded
+    number somebody can be told.
+    """
     service = RelayPowerService(state_file="/dev/null",
                                 settings_provider=_Settings(_settings()))
     first, second = service.turn_on_waits
     assert first > second, "the second wait is the shorter one"
-    assert first + second <= 120, "the total wait stays a bounded, explainable number"
-    assert service.poll_interval < second, "a quick printer must not wait out the window"
+
+    # The worst case: both attempts, each preceded by the blind wait, plus one
+    # settle that started just before the last deadline.
+    worst_case = (first + second + 2 * service.blind_wait
+                  + max(service.ready_settle, service.answering_settle))
+    assert worst_case <= 300, "the total wait stays a bounded, explainable number"
+
+    assert service.probe_pause < second, "a quick printer must not wait out the window"
+    assert service.blind_wait >= 20, (
+        "the printer is left alone long enough to associate with Wi-Fi")
+    assert service.ready_settle < service.answering_settle, (
+        "a printer that will not state its readiness has to prove it with time")
+    assert service.probe_pause < service.ready_settle, (
+        "the settle has to span more than one probe or it settles nothing")
 
 
 # --------------------------------------------------------------------------- #
@@ -517,15 +542,30 @@ def test_turn_on_retries_once_and_then_fails_naming_what_happened(tmp_path):
     """Send, wait, send again, wait less, then fail."""
     sender = _Sender()
     service = _make_service(tmp_path, reachable=False, sender=sender)
+    service.blind_wait = 0.002
 
     with pytest.raises(RelayWebhookError) as exc:
         service.ensure_printer_powered()
 
     assert sender.actions == [ACTION_TURN_ON, ACTION_TURN_ON], "exactly two attempts"
     message = str(exc.value)
-    assert "did not answer" in message
+    assert "did not come up" in message
     assert "http://192.168.1.42/relay/0?turn=on" in message, "names the endpoint called"
     assert "2 turn_on webhook(s) delivered" in message, "names what was attempted"
+    # The three causes worth checking, kept because they point straight at the
+    # right one: a relay that did not close was in fact the first real failure.
+    assert "the relay did not close" in message
+    assert "not on that outlet" in message
+    assert "takes longer than this" in message
+    # And what was actually done, rather than an interval the code does not
+    # honour. The probe itself costs seconds when nothing answers, so "every 3s"
+    # described a cadence that never happened.
+    assert "left alone for" in message, "says how long it waited before looking"
+    assert "checked" in message and "times over" in message, (
+        "says how many times it looked, and over how long")
+    assert "every" not in message, "no fabricated polling interval"
+    # It never answered, so there is nothing to report about what it said.
+    assert "It did answer" not in message
     # The failure is recorded for the UI, not only raised.
     assert service.status()["last_error"] == message
 
@@ -788,7 +828,7 @@ def test_a_printing_job_also_holds_the_relay_open(tmp_path):
     service = RelayPowerService(
         state_file=str(tmp_path / "s.json"),
         settings_provider=_Settings(_settings()),
-        reachability_probe=lambda _s: True,
+        readiness_probe=lambda _s: True,
         pending_work_probe=None,     # exercise the real queue-backed probe
         sender=sender,
     )
@@ -873,7 +913,7 @@ def test_disabling_turn_off_clears_a_schedule_made_under_the_old_settings(tmp_pa
     provider = _Settings(_settings())
     service = RelayPowerService(
         state_file=str(tmp_path / "s.json"), settings_provider=provider,
-        reachability_probe=lambda _s: True, pending_work_probe=lambda: False,
+        readiness_probe=lambda _s: True, pending_work_probe=lambda: False,
         sender=sender)
     service.note_print_activity(time.time() - (4 * HOUR + 400))
     assert service.scheduled_turn_off_at() is not None
@@ -1024,7 +1064,7 @@ def test_disabled_means_no_webhook_no_probe_and_no_state_file(tmp_path):
     service = RelayPowerService(
         state_file=str(state_file),
         settings_provider=_Settings(disabled),
-        reachability_probe=_forbidden_probe,
+        readiness_probe=_forbidden_probe,
         pending_work_probe=_forbidden_probe,
         sender=_forbidden_sender,
     )
@@ -2138,7 +2178,7 @@ def test_status_is_still_a_read(tmp_path):
     service = RelayPowerService(
         state_file=str(state_file),
         settings_provider=_Settings(_settings()),
-        reachability_probe=_forbidden_probe,
+        readiness_probe=_forbidden_probe,
         pending_work_probe=_forbidden_probe,
         sender=_forbidden_sender,
         origin_provider=lambda: (time.time(), True),

@@ -66,14 +66,19 @@ def print_qr_code(body: Dict[str, Any]) -> Dict[str, Any]:
         if text_settings:
             text_content = text_settings.get("content")
             text_position = text_settings.get("position", "bottom")
-            
+
+            # Only the caption itself is conditional. Asking for a caption and
+            # leaving the text empty means "label it with what it encodes", and
+            # the render path already falls back to the QR data; gating the
+            # whole block on text_content meant that request printed no caption
+            # at all.
             if text_content:
                 combined_settings["text"] = text_content
-                combined_settings["show_text"] = text_position != "none"
-                combined_settings["text_position"] = text_position
-                combined_settings["text_font_size"] = text_settings.get("font_size", 30)
-                combined_settings["text_alignment"] = text_settings.get("alignment", "center")
-                combined_settings["text_wrap"] = text_settings.get("wrap", True)
+            combined_settings["show_text"] = text_position != "none"
+            combined_settings["text_position"] = text_position
+            combined_settings["text_font_size"] = text_settings.get("font_size", 30)
+            combined_settings["text_alignment"] = text_settings.get("alignment", "center")
+            combined_settings["text_wrap"] = text_settings.get("wrap", True)
         
         # Dry run: render + reachability check, but do not print or enqueue.
         if is_dry_run(body.get("dry_run")):

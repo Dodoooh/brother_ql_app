@@ -863,6 +863,107 @@ body.dark-mode .queue-badge { color: #06222B; }
 }
 .queue-paused-badge i { font-size: 12px; }
 
+/* ====== Queue: what the job in hand is doing ======
+   A job can sit in the queue for minutes with nothing wrong: relay power
+   control switches the printer's mains on and then waits for it to boot and
+   join the network. The status stays "queued" throughout -- which is what it
+   is -- so this strip carries the reason, attached to the control bar above it
+   and present only while there is something to say. */
+.queue-activity {
+    position: relative;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 11px 18px 13px;
+    border-bottom: 1px solid var(--border-soft);
+    background: var(--accent-soft);
+    overflow: hidden;
+}
+.queue-activity[hidden] { display: none; }
+.queue-activity-icon {
+    flex: none;
+    color: var(--accent-strong);
+    font-size: 14px;
+    line-height: 1.45;
+}
+/* The server's own sentence, shown as written. It runs to a line and a half, so
+   it is prose in the sans face rather than a mono one-liner, and the measure is
+   capped so it stays readable on a wide screen. */
+.queue-activity-message {
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 78ch;
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--ink);
+}
+.queue-activity-elapsed {
+    flex: none;
+    padding-top: 1px;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+}
+.queue-activity-elapsed[hidden] { display: none; }
+/* Indeterminate on purpose: nothing here knows how long the wait will be, and a
+   bar that filled at a guessed rate would be inventing a promise. It only says
+   that something is still running -- which over four minutes is the thing a
+   static line fails to say. */
+.queue-activity-track {
+    position: absolute;
+    left: 0; right: 0; bottom: 0;
+    height: 2px;
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.queue-activity-sweep {
+    position: absolute;
+    top: 0; bottom: 0; left: 0;
+    width: 32%;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    animation: queue-sweep 2.2s ease-in-out infinite;
+}
+@keyframes queue-sweep {
+    from { transform: translateX(-120%); }
+    to   { transform: translateX(420%); }
+}
+
+/* The row the strip is talking about. Marked so the sentence above has an
+   owner; the rows behind it are ordinary waiting jobs and keep looking like it. */
+.queue-item.is-active {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent) 5%, var(--panel-2));
+}
+.queue-phase {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    margin-top: 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    color: var(--accent-strong);
+}
+.queue-phase-dot {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: queue-pulse 1.9s ease-out infinite;
+}
+@keyframes queue-pulse {
+    0%   { box-shadow: 0 0 0 0 var(--accent-glow); }
+    70%  { box-shadow: 0 0 0 6px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .queue-activity-sweep { animation: none; width: 100%; opacity: .45; }
+    .queue-phase-dot { animation: none; }
+}
+
 .queue-list { display: flex; flex-direction: column; gap: 8px; }
 
 .queue-empty {
@@ -968,12 +1069,36 @@ body.dark-mode .queue-badge { color: #06222B; }
     box-shadow: none;
 }
 
+/* A failed job's reason. The gate's failure is a paragraph -- it names how long
+   it waited, how many times it checked and over what period, and what the three
+   possible causes are -- so it is set as prose and shown whole: 11px mono red
+   turned that into a wall, and clamping it would throw away the half that says
+   what to do about it. */
 .queue-error {
-    margin-top: 8px;
-    font-family: var(--mono);
-    font-size: 11px;
+    display: flex;
+    gap: 8px;
+    margin-top: 10px;
+    padding: 9px 11px;
+    border: 1px solid color-mix(in srgb, var(--red) 30%, var(--border));
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--red) 8%, var(--panel));
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--ink);
+}
+.queue-error i {
+    flex: none;
+    font-size: 13px;
+    line-height: 1.5;
     color: var(--red);
-    word-break: break-word;
+}
+/* Capped measure so a long reason does not run the full width of a desktop
+   panel, and break-word so the webhook URL inside it wraps instead of pushing
+   the row sideways. */
+.queue-error span {
+    min-width: 0;
+    max-width: 78ch;
+    overflow-wrap: break-word;
 }
 
 /* ====== Scrollbar ====== */
@@ -1042,6 +1167,12 @@ body.dark-mode .queue-badge { color: #06222B; }
     .queue-cancel,
     .queue-reprint,
     .queue-open { padding: 9px 16px; font-size: 13px; }
+
+    /* Tighter gutters on a phone. The icon and the elapsed time stay pinned to
+       the ends and the message wraps between them, which is the only part long
+       enough to need the room. */
+    .queue-activity { padding: 10px 14px 12px; gap: 8px; }
+    .queue-activity-message { font-size: 12.5px; }
 }
 
 /* Phones: the top bar is too narrow for the title subtitle + full-text status

@@ -5605,8 +5605,22 @@ class PrinterService:
         except Exception:  # noqa: BLE001 - an unreadable setting must not stop a status check
             return 631
 
-    def _build_clock_info(self, printer_time: Optional[datetime]) -> Dict[str, Any]:
-        """Compare the printer's reported clock against the server clock (UTC)."""
+    def _build_clock_info(self, printer_time: Any) -> Dict[str, Any]:
+        """Compare the printer's reported clock against the server clock (UTC).
+
+        ``printer_time`` is whatever the IPP response carried for
+        printer-current-time. That is normally a datetime, but a printer may
+        answer with a string, an out-of-band "unknown", or a type this client
+        does not decode. The clock is a readout beside the status, so anything
+        unusable becomes a note rather than an exception: a device that reports
+        its time oddly must not make the whole status check fail.
+
+        Args:
+            printer_time: The reported clock, as a datetime, a string, or None.
+
+        Returns:
+            The clock block for the status payload, always well-formed.
+        """
         now = datetime.now(timezone.utc)
         info: Dict[str, Any] = {
             "server_time": now.isoformat(timespec="seconds"),
@@ -5617,6 +5631,22 @@ class PrinterService:
         }
         if printer_time is None:
             info["note"] = "Printer did not report a clock"
+            return info
+        if not isinstance(printer_time, datetime):
+            text = str(printer_time).strip()
+            try:
+                printer_time = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                logger.debug("Printer reported an unreadable clock",
+                             reported=text[:64])
+                info["printer_time"] = text[:64] or None
+                info["note"] = "Printer reported a clock this app could not read"
+                return info
+        if printer_time.tzinfo is None:
+            # A naive reading is the printer's local time; comparing it to UTC
+            # would invent a drift of the timezone offset.
+            info["printer_time"] = printer_time.isoformat(timespec="seconds")
+            info["note"] = "Printer reported a clock without a timezone"
             return info
         info["printer_time"] = printer_time.isoformat(timespec="seconds")
         drift = (printer_time.astimezone(timezone.utc) - now).total_seconds()
