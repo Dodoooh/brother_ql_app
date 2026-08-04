@@ -17,6 +17,7 @@ from src.services.printer_service import printer_service
 from src.services.queue_service import print_queue
 from src.services.settings_service import settings_service
 from src.utils.exceptions import ValidationError, PrinterError, ImageProcessingError, ResourceNotFoundError, ConfirmationRequiredError
+from src.utils.print_settings_schema import parse_and_validate_settings
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 from src.utils.dry_run import is_dry_run, build_dry_run_response
 
@@ -45,11 +46,11 @@ def print_image() -> Dict[str, Any]:
             raise ValidationError("No image file selected", "image")
         
         # Parse settings
-        settings_json = request.form.get('settings', '{}')
-        try:
-            settings = settings_service.resolve_print_settings(json.loads(settings_json))
-        except json.JSONDecodeError:
-            raise ValidationError("Invalid settings JSON", "settings")
+        # Validated against the same PrintSettings schema the JSON endpoints
+        # are held to. A file upload carries settings as a string, so the spec
+        # cannot check inside it and this route used to accept anything.
+        settings = settings_service.resolve_print_settings(
+            parse_and_validate_settings(request.form.get('settings')))
         
         # Validate required settings
         required_settings = ["printer_uri", "printer_model", "label_size"]

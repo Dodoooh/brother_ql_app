@@ -25,6 +25,7 @@ from PIL import Image, UnidentifiedImageError
 from src.services.printer_service import printer_service
 from src.services.settings_service import settings_service
 from src.utils.exceptions import ValidationError, PrinterError
+from src.utils.print_settings_schema import parse_and_validate_settings
 
 logger = structlog.get_logger()
 
@@ -246,11 +247,11 @@ def preview_image() -> Dict[str, Any]:
             raise ValidationError("No image file selected", "image")
 
         # Parse settings JSON.
-        settings_json = request.form.get('settings', '{}')
-        try:
-            settings = settings_service.resolve_print_settings(json.loads(settings_json))
-        except json.JSONDecodeError:
-            raise ValidationError("Invalid settings JSON", "settings")
+        # Validated against the same PrintSettings schema the JSON endpoints
+        # are held to. A file upload carries settings as a string, so the spec
+        # cannot check inside it and this route used to accept anything.
+        settings = settings_service.resolve_print_settings(
+            parse_and_validate_settings(request.form.get('settings')))
 
         # Save uploaded image temporarily.
         image_path = _save_uploaded_file(image_file)

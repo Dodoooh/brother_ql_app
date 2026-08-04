@@ -127,7 +127,7 @@
             created_at: isoAgo(140),
             started_at: isoAgo(138),
             finished_at: isoAgo(136),
-            error: 'Printer offline (demo) — connection refused',
+            error: 'Printer offline (demo): connection refused',
             params: { type: 'image', filename: 'logo.png', settings: { image_mode: 'bw-dither' } },
             can_reprint: true
         },
@@ -689,10 +689,17 @@
         const banner = document.createElement('div');
         banner.id = 'demo-banner';
         banner.className = 'demo-banner';
+        // Two things worth saying, and the second one is the one people
+        // otherwise discover by being surprised: the previews here are drawn in
+        // the browser, because the true-to-print ones are rendered by the
+        // backend this demo does not have. They are close, not identical.
         banner.innerHTML =
             '<span class="demo-banner-text">' +
             '<i class="bi bi-info-circle-fill"></i> ' +
-            'Demo mode — no printer connected. All actions are simulated.' +
+            'Demo mode: no printer is connected and every action is simulated. ' +
+            'Previews are drawn in the browser, so some labels render slightly ' +
+            'differently here than in the real app, where the backend renders ' +
+            'them exactly as they print.' +
             '</span>' +
             '<button type="button" class="demo-banner-close" aria-label="Dismiss demo notice">' +
             '<i class="bi bi-x-lg"></i></button>';

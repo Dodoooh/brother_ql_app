@@ -241,6 +241,13 @@ def register_routes(app):
     def serve_js(filename):
         return app.send_static_file(f'js/{filename}')
 
+    # Third-party assets the interface used to fetch from a CDN. They are part
+    # of the app now (see static/vendor/README.md), and they need a route of
+    # their own because only the directories named here are served at all.
+    @app.route('/vendor/<path:filename>')
+    def serve_vendor(filename):
+        return app.send_static_file(f'vendor/{filename}')
+
     @app.route('/health')
     def health():
         """Liveness probe: the web app process is up.

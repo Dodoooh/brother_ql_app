@@ -11,11 +11,14 @@
     <meta name="theme-color" content="#F4F6F9" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#0B0E14" media="(prefers-color-scheme: dark)">
     <title>Brother QL Label Printer</title>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <!-- Everything is served from this app. A label printer sits on a network
+         that may have no way out, and the previous CDN links failed silently
+         when it did not: the stylesheet degraded, but the Bootstrap bundle
+         taking the tabs, dialogs and dropdowns with it left an interface that
+         looked fine and did nothing. Versions and licences: vendor/README.md. -->
+    <link rel="stylesheet" href="vendor/bootstrap.min.css">
+    <link rel="stylesheet" href="vendor/bootstrap-icons.css">
+    <link rel="stylesheet" href="vendor/fonts.css">
     <link rel="stylesheet" href="css/styles.css">
 </head>
 <body>
@@ -1394,7 +1397,7 @@
     <div id="notifications" class="notifications"></div>
 
     <!-- Scripts -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="vendor/bootstrap.bundle.min.js"></script>
     <script src="js/demo.js"></script>
     <script src="js/utils.js"></script>
     <script src="js/labels.js"></script>

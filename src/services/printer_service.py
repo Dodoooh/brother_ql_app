@@ -2160,6 +2160,19 @@ class PrinterService:
         # heartbeat never collides with an in-progress print job (the printer
         # accepts only one 9100 connection at a time).
         self._io_lock = threading.Lock()
+        # How many times this process has begun writing a raster to a printer.
+        #
+        # It exists so a caller that wants to retry a failed print can tell the
+        # two cases apart: a job that never reached the wire (the printer
+        # refused the connection, or was not there) can be tried again for
+        # nothing, while a job that did reach it may have printed part of what
+        # was asked -- a page, a copy, a label -- and repeating it prints that
+        # part twice. Counted at the *start* of the write, deliberately: a write
+        # that raised halfway through has still put bytes on the wire.
+        #
+        # Incremented under ``_io_lock`` next to the write itself, so it counts
+        # exactly what went to the printer and not what merely got rendered.
+        self._write_attempts = 0
         # Timestamp of the last print attempt. The "timed" keep-alive mode keeps
         # the printer awake for a configurable window after this moment, then
         # pauses until the next print. Initialised to now so enabling keep-alive
@@ -5062,8 +5075,18 @@ class PrinterService:
             # Send to printer (serialized against the keep-alive heartbeat).
             with self._io_lock:
                 backend = backend_factory(guess_backend(printer_uri))["backend_class"](printer_uri)
-                backend.write(instructions)
-                backend.dispose()
+                try:
+                    # Counted before the write, not after: from here on bytes may
+                    # have reached the printer, and a caller retrying this job
+                    # would print them a second time. See ``_write_attempts``.
+                    self._write_attempts += 1
+                    backend.write(instructions)
+                finally:
+                    # In a finally because a failed write must still hand the
+                    # socket back. The printer accepts one connection on 9100 at
+                    # a time, so a socket left hanging off a traceback is the
+                    # next attempt's "printer busy".
+                    backend.dispose()
 
             # Record print activity so the "timed" keep-alive mode extends its
             # awake window from this moment. From here on the timestamp really is
@@ -5092,6 +5115,17 @@ class PrinterService:
         except Exception as e:
             logger.error("Error sending to printer", error=str(e), exc_info=True)
             raise PrinterError(f"Error sending to printer: {str(e)}") from e
+
+    def writes_begun(self) -> int:
+        """How many raster writes this process has started, ever.
+
+        Only the *change* across an operation means anything: read it before a
+        print and again after it failed, and an unchanged number says nothing
+        reached the printer, so repeating the job cannot print anything twice.
+        See :attr:`_write_attempts` for why it counts attempts rather than
+        successes.
+        """
+        return self._write_attempts
 
     def last_print_origin(self) -> Tuple[float, bool]:
         """Return the moment every timed window is measured from, and its nature.

@@ -84,6 +84,26 @@ def _attempt_delays(value: Any) -> tuple:
     return tuple(delays)
 
 
+def _writes_begun() -> int:
+    """How many raster writes the printer service has begun, ever.
+
+    Only the change across one print attempt is used, and only to decide
+    whether repeating that attempt could print something twice. Imported
+    lazily, like every other reach into the printer service from here, because
+    the two modules would otherwise import each other at load time.
+
+    Returns 0 when the service cannot be asked at all. That reads as "nothing
+    went to the printer", which is the same answer this whole mechanism gave
+    before it existed: the schedule runs, and a job that did print part of
+    itself is the case a caller was already living with.
+    """
+    try:
+        from src.services.printer_service import printer_service
+        return printer_service.writes_begun()
+    except Exception:  # noqa: BLE001 - a counter must not be able to fail a print
+        return 0
+
+
 def _short(text: Optional[str], limit: int = 120) -> str:
     """A one-line, length-capped rendering of an error, for prose about it."""
     collapsed = " ".join(str(text or "").split())
@@ -613,14 +633,40 @@ class PrintQueueService:
         are reported as an activity while the job waits, and the job stays
         ``queued`` between attempts: it is not on the wire, and it can still be
         cancelled, which is the difference a user acts on.
+
+        Two things end the schedule early, both because repeating the job would
+        be worse than failing it:
+
+        *The printer was written to.* A failure that happened after bytes went
+        out may mean part of the job printed -- a page of a PDF, one of several
+        copies -- and trying again prints that part twice. Only a failure that
+        never reached the wire is safe to repeat, and
+        :meth:`PrinterService.writes_begun` is what tells the two apart.
+
+        *Somebody said stop.* Pausing the queue stops the next job from
+        starting, but a job already printing is allowed to finish -- which used
+        to mean its remaining attempts ran too, long after the queue had been
+        stopped. The schedule is abandoned instead, and the job fails carrying
+        the printer's own last words.
         """
         attempts = max(1, len(delays))
         error: Optional[str] = None
         for attempt in range(1, attempts + 1):
             pause = delays[attempt - 1] if attempt <= len(delays) else 0.0
-            if pause > 0 and not self._hold_before_attempt(
-                    job_id, pause, attempt, attempts, error):
-                return  # cancelled while waiting; the worker's finally cleans up
+            if pause > 0:
+                held = self._hold_before_attempt(job_id, pause, attempt,
+                                                 attempts, error)
+                if held == "gone":
+                    return  # cancelled meanwhile; the worker's finally cleans up
+                if held == "stopped":
+                    # The queue was stopped while this job waited for its next
+                    # try. It keeps the failure it already has, rather than
+                    # being left queued for a worker that has moved on.
+                    logger.info("Attempt schedule abandoned: the queue was stopped",
+                                job_id=job_id, attempt=attempt)
+                    self._finish(job_id, "failed",
+                                 error or "The queue was stopped before this job printed.")
+                    return
 
             with self._lock:
                 job = self._jobs.get(job_id)
@@ -639,14 +685,24 @@ class PrintQueueService:
             logger.info("Print job started", job_id=job_id,
                         attempt=attempt, attempts=attempts)
 
+            writes_before = _writes_begun()
             try:
                 fn()
             except Exception as e:  # noqa: BLE001 - record any print failure
                 error = str(e)
+                reached_printer = _writes_begun() != writes_before
+                last = attempt >= attempts
                 logger.error("Print job failed", job_id=job_id, attempt=attempt,
                              attempts=attempts, error=error,
-                             exc_info=attempt == attempts)
-                if attempt < attempts:
+                             reached_printer=reached_printer,
+                             exc_info=last)
+                if not last and reached_printer:
+                    logger.info("Not retrying: the printer was already written to",
+                                job_id=job_id, attempt=attempt)
+                elif not last and self.is_paused():
+                    logger.info("Not retrying: the queue was stopped",
+                                job_id=job_id, attempt=attempt)
+                elif not last:
                     continue
                 self._finish(job_id, "failed", error)
                 return
@@ -656,16 +712,20 @@ class PrintQueueService:
             return
 
     def _hold_before_attempt(self, job_id: str, seconds: float, attempt: int,
-                             attempts: int, error: Optional[str]) -> bool:
-        """Wait before a print attempt, saying why, and stop if cancelled.
+                             attempts: int, error: Optional[str]) -> str:
+        """Wait before a print attempt, saying why, and stop if told to.
 
-        Returns True when the wait ran to the end and the attempt should be
-        made, False when the job went away or was cancelled meanwhile.
+        Returns:
+            ``"go"`` when the wait ran to the end and the attempt should be
+            made, ``"gone"`` when the job was cancelled or removed meanwhile
+            (it is already in a terminal state, and nothing more is owed to
+            it), or ``"stopped"`` when the queue was paused during the wait --
+            the job is still the caller's to finish.
         """
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None or job["status"] == "cancelled":
-                return False
+                return "gone"
             # Back to "queued": the job is waiting, not printing, and a waiting
             # job is one a user can still cancel.
             job["status"] = "queued"
@@ -685,15 +745,17 @@ class PrintQueueService:
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                return True
-            # Slices rather than one sleep, so a cancel takes effect while the
-            # job is waiting instead of a retry landing at a printer nobody is
-            # waiting for any more.
+                return "go"
+            # Slices rather than one sleep, so a cancel or a stop takes effect
+            # while the job is waiting, instead of a retry landing at a printer
+            # nobody is waiting for any more.
             time.sleep(min(0.25, remaining))
+            if self.is_paused():
+                return "stopped"
             with self._lock:
                 job = self._jobs.get(job_id)
                 if job is None or job["status"] == "cancelled":
-                    return False
+                    return "gone"
 
     def _finish(self, job_id: str, status: str, error: Optional[str]) -> None:
         """Record a job's outcome."""

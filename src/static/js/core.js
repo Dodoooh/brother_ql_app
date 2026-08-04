@@ -910,7 +910,10 @@ function initQRCode() {
         
         // Then load the library
         const script = document.createElement('script');
-        script.src = 'https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.min.js';
+        // Served from this app, like everything else: a printer network may
+        // have no way out, and a QR tab that silently never draws is worse
+        // than one that is not there. See static/vendor/README.md.
+        script.src = 'vendor/qrcode.min.js';
         script.onload = () => {
             console.log('QR code library loaded');
             // Update previews after library is loaded if there's data

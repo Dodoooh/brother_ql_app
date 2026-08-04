@@ -25,6 +25,7 @@ import time
 
 import pytest
 
+from src.services import queue_service
 from src.services.queue_service import PrintQueueService
 from src.services.relay_service import (
     ACTION_TURN_ON,
@@ -765,6 +766,81 @@ def test_only_the_last_attempt_decides_the_job(tmp_path):
 
     assert calls["n"] == 3, "gave up before the schedule was spent"
     assert queue.get(job_id)["error"] == "Printer is not ready (attempt 3)"
+
+
+def test_a_failure_that_reached_the_printer_is_not_tried_again(tmp_path, monkeypatch):
+    """Half a PDF is not a reason to print the first half again.
+
+    A refusal before anything went out costs nothing to repeat. A failure
+    *after* bytes reached the printer may mean part of the job printed -- a
+    page, one of several copies -- and repeating it prints that part twice. The
+    write counter is what tells the two apart.
+    """
+    queue = _queue()
+    calls = {"n": 0}
+    writes = {"n": 0}
+    monkeypatch.setattr(queue_service, "_writes_begun", lambda: writes["n"])
+
+    def printing():
+        calls["n"] += 1
+        writes["n"] += 1        # bytes went out...
+        raise RuntimeError("Printer went away mid-page")   # ...and then it broke
+
+    queue.set_pre_job_gate(lambda: (0.0, 0.01, 0.01))
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "failed",
+                what="the job to fail")
+
+    assert calls["n"] == 1, "reprinted a job that had already reached the printer"
+    assert queue.get(job_id)["error"] == "Printer went away mid-page"
+
+
+def test_a_failure_that_never_reached_the_printer_is_tried_again(tmp_path, monkeypatch):
+    """The other half of the same rule, so it cannot pass by refusing always."""
+    queue = _queue()
+    calls = {"n": 0}
+    monkeypatch.setattr(queue_service, "_writes_begun", lambda: 7)  # never moves
+
+    def printing():
+        calls["n"] += 1
+        if calls["n"] < 2:
+            raise RuntimeError("Connection refused")
+
+    queue.set_pre_job_gate(lambda: (0.0, 0.01, 0.01))
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "done",
+                what="the job to print")
+
+    assert calls["n"] == 2
+
+
+def test_stopping_the_queue_ends_the_attempt_schedule(tmp_path):
+    """Stop means stop, including the attempts a failed job still had coming.
+
+    A job whose print is in flight cannot be cancelled -- it is not queued -- so
+    stopping the queue used to leave its remaining attempts to run, minutes
+    after everything else had halted.
+    """
+    queue = _queue()
+    calls = {"n": 0}
+    failed_once = threading.Event()
+
+    def printing():
+        calls["n"] += 1
+        failed_once.set()
+        raise RuntimeError("Printer is not ready")
+
+    queue.set_pre_job_gate(lambda: (0.0, 2.0, 2.0))
+    job_id = queue.submit("text", "Hello", printing)
+    assert failed_once.wait(3.0)
+
+    queue.pause()
+    _eventually(lambda: queue.get(job_id)["status"] == "failed",
+                what="the job to give up")
+
+    assert calls["n"] == 1, "kept printing after the queue was stopped"
+    assert queue.get(job_id)["error"] == "Printer is not ready", (
+        "the printer's own words are what the job failed with")
 
 
 def test_a_printer_that_was_already_up_is_not_retried(tmp_path):

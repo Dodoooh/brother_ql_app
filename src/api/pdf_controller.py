@@ -17,6 +17,7 @@ from src.services.queue_service import print_queue
 from src.services.settings_service import settings_service
 from src.services.pdf_renderer import render_pdf_thumbnails
 from src.utils.exceptions import ValidationError, PrinterError, ConfirmationRequiredError
+from src.utils.print_settings_schema import parse_and_validate_settings
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 from src.utils.dry_run import is_dry_run, build_dry_run_response
 
@@ -53,11 +54,11 @@ def print_pdf() -> Dict[str, Any]:
             raise ValidationError("Uploaded file is not a PDF", "file")
 
         # Parse settings JSON
-        settings_json = request.form.get('settings', '{}')
-        try:
-            settings = settings_service.resolve_print_settings(json.loads(settings_json))
-        except json.JSONDecodeError:
-            raise ValidationError("Invalid settings JSON", "settings")
+        # Validated against the same PrintSettings schema the JSON endpoints
+        # are held to. A file upload carries settings as a string, so the spec
+        # cannot check inside it and this route used to accept anything.
+        settings = settings_service.resolve_print_settings(
+            parse_and_validate_settings(request.form.get('settings')))
 
         if not isinstance(settings, dict):
             raise ValidationError("settings must be a JSON object", "settings")

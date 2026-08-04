@@ -19,6 +19,7 @@ from src.utils.exceptions import (
     ImageProcessingError,
     ConfirmationRequiredError,
 )
+from src.utils.print_settings_schema import parse_and_validate_settings
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 from src.utils.dry_run import is_dry_run, build_dry_run_response
 
@@ -85,11 +86,11 @@ def print_text_image() -> Dict[str, Any]:
             raise ValidationError("position must be one of: left, right", "position")
 
         # Parse settings.
-        settings_json = request.form.get('settings', '{}')
-        try:
-            settings = settings_service.resolve_print_settings(json.loads(settings_json))
-        except json.JSONDecodeError:
-            raise ValidationError("Invalid settings JSON", "settings")
+        # Validated against the same PrintSettings schema the JSON endpoints
+        # are held to. A file upload carries settings as a string, so the spec
+        # cannot check inside it and this route used to accept anything.
+        settings = settings_service.resolve_print_settings(
+            parse_and_validate_settings(request.form.get('settings')))
 
         if not isinstance(settings, dict):
             raise ValidationError("settings must be a JSON object", "settings")

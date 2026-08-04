@@ -41,6 +41,71 @@ jobs:
       - name: Configure Pages
         uses: actions/configure-pages@v5
 
+      # Web analytics for the published demo, added to the artifact and never to
+      # the repository.
+      #
+      # It is deliberately not in src/static: that directory ships inside the
+      # Docker image and is served by everybody who runs this app on their own
+      # network, and none of those installations should report anything to
+      # anyone. Keeping the snippet out of the tree also keeps the endpoint and
+      # the site id out of every clone and fork.
+      #
+      # Both values come from repository variables (Settings > Secrets and
+      # variables > Actions > Variables):
+      #
+      #     MATOMO_TRACKER_URL   e.g. //stats.example.net/
+      #     MATOMO_SITE_ID       e.g. 16
+      #
+      # With either one unset -- which is every fork -- the step says so and the
+      # demo deploys untouched. The injected page is the only copy that has it.
+      - name: Add analytics to the demo artifact
+        env:
+          MATOMO_TRACKER_URL: ${{ vars.MATOMO_TRACKER_URL }}
+          MATOMO_SITE_ID: ${{ vars.MATOMO_SITE_ID }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+
+          url = (os.environ.get("MATOMO_TRACKER_URL") or "").strip()
+          site = (os.environ.get("MATOMO_SITE_ID") or "").strip()
+          if not url or not site:
+              print("No MATOMO_TRACKER_URL/MATOMO_SITE_ID set; deploying the demo without analytics.")
+              sys.exit(0)
+          if not url.endswith("/"):
+              url += "/"
+          if not site.isdigit():
+              sys.exit(f"MATOMO_SITE_ID must be a number, got {site!r}")
+
+          page = "src/static/index.html"
+          with open(page, encoding="utf-8") as handle:
+              html = handle.read()
+          if "matomo.js" in html:
+              sys.exit("index.html already carries a tracker; refusing to add a second one")
+          if "</head>" not in html:
+              sys.exit("no </head> in index.html; not injecting blind")
+
+          snippet = "\n".join([
+              "    <script>",
+              "        var _paq = window._paq = window._paq || [];",
+              "        _paq.push(['trackPageView']);",
+              "        _paq.push(['enableLinkTracking']);",
+              "        (function() {",
+              f"            var u = \"{url}\";",
+              "            _paq.push(['setTrackerUrl', u + 'matomo.php']);",
+              f"            _paq.push(['setSiteId', '{site}']);",
+              "            var d = document, g = d.createElement('script'), s = d.getElementsByTagName('script')[0];",
+              "            g.async = true; g.src = u + 'matomo.js'; s.parentNode.insertBefore(g, s);",
+              "        })();",
+              "    </script>",
+              "",
+          ])
+          html = html.replace("</head>", snippet + "</head>", 1)
+          with open(page, "w", encoding="utf-8") as handle:
+              handle.write(html)
+          print(f"Analytics added to the artifact: site {site} at {url}")
+          PY
+
       - name: Upload static UI artifact
         uses: actions/upload-pages-artifact@v3
         with:
