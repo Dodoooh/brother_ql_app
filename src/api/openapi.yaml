@@ -2468,6 +2468,18 @@ components:
             instead, it means shrinking until no single word has to be broken
             mid-word. Only applies while text_wrap is on.
           default: true
+        text_markup:
+          type: boolean
+          description: >
+            Honour `**bold**` and `*italic*` in the text instead of printing the
+            asterisks. Off by default, and the default matters: labels are
+            normally set in DejaVu Sans Bold, which is the more legible weight
+            on a thermal printer but leaves nothing heavier for bold to be. With
+            this on the base drops to the regular weight, so every label set
+            this way looks lighter than the same label set without it. Applies
+            to the text label endpoints; other layouts print the markers as
+            typed.
+          default: false
         font_size:
           type: integer
           description: >
@@ -2702,6 +2714,14 @@ components:
           description: Default high quality setting
           example: true
           default: true
+        text_markup:
+          type: boolean
+          description: >
+            Honour `**bold**` and `*italic*` in text labels instead of printing
+            the asterisks. Off by default: with it on the base weight drops from
+            bold to regular so that bold has something to be heavier than, which
+            makes every label set this way look lighter.
+          example: false
         keep_alive_enabled:
           type: boolean
           description: Whether keep alive is enabled

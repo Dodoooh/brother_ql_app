@@ -52,6 +52,17 @@ from src.services.relay_service import relay_service
 from src.services.ipp_client import EMPTY_MEDIA, get_media_ready, get_printer_attributes
 from src.services.pdf_renderer import render_pdf, parse_page_range
 from src.utils.exceptions import PrinterError, ImageProcessingError, ValidationError
+from src.utils.text_markup import (
+    FontSet,
+    Run,
+    draw_runs,
+    markup_enabled,
+    measure_runs,
+    parse_runs,
+    runs_text,
+    widest_word,
+    wrap_runs,
+)
 from src.utils.uri_validation import validate_printer_uri
 
 logger = structlog.get_logger()
@@ -3690,22 +3701,62 @@ class PrinterService:
 
             wrap = settings.get("text_wrap", True)
             auto_fit = settings.get("auto_fit", True)
-            font = ImageFont.truetype(self.font_path, font_size)
 
-            def wrap_all(current_font):
+            # Emphasis, when it is asked for. Off by default and then invisible:
+            # every line becomes one plain run in the face this app has always
+            # drawn in, and the measurements below are the ones it has always
+            # made. On, the base drops to the regular weight so **bold** has
+            # something to be heavier than -- see src/utils/text_markup.py.
+            markup = markup_enabled(settings)
+            fonts = FontSet(self.font_path, font_size, markup)
+            font = fonts.regular
+            # A newline inside a line is a line break too. Pillow's draw.text()
+            # quietly renders one, but it refuses to *measure* multiline text --
+            # and measuring is what everything here does first. Split only on
+            # the markup path: the plain path measures with textbbox, which
+            # tolerates it, and has laid such text out this way all along.
+            line_runs = [
+                parse_runs(part, markup)
+                for line in lines
+                for part in (line.split("\n") if markup else [line])
+            ]
+
+            # Wrapping and auto-fit both measure before anything is drawn, so
+            # they need a canvas of their own.
+            measure_draw = ImageDraw.Draw(Image.new("RGB", (width, 10), "white"))
+
+            def wrap_all(current_fonts):
                 # Auto-wrap long lines to the label width (default on) so text is
                 # never silently truncated. Disable with settings.text_wrap = false.
                 # Lengthwise there is no width to wrap against -- the tape grows
                 # with the message -- so lines break only where the input said.
                 if not wrap or lengthwise:
-                    return list(lines)
+                    return list(line_runs)
+                if markup:
+                    return [
+                        piece
+                        for runs in line_runs
+                        for piece in wrap_runs(measure_draw, runs, current_fonts, text_area)
+                    ]
+                # Unmarked text keeps the wrapper it has always used, so no
+                # existing label re-flows because this feature arrived.
                 return [
-                    wrapped
+                    [Run(piece)]
                     for line in lines
-                    for wrapped in self._wrap_text_to_width(line, current_font, text_area)
+                    for piece in self._wrap_text_to_width(line, current_fonts.regular, text_area)
                 ]
 
-            wrapped = wrap_all(font)
+            def widest(current_fonts):
+                # Markup measures per run, because a bold word is wider than the
+                # same word plain. Without it the original measurement stands,
+                # down to the function that made it: this decides the font size,
+                # and a different answer re-flows labels that have nothing to do
+                # with emphasis.
+                if markup:
+                    return widest_word(measure_draw, line_runs, current_fonts)
+                return self._widest_word(lines, current_fonts.regular)
+
+            wrapped = wrap_all(fonts)
 
             # auto_fit shrinks the font until the text fits the medium. What
             # "fits" means depends on the medium, so the cases differ.
@@ -3717,7 +3768,8 @@ class PrinterService:
                     if 20 + len(wrapped) * (ascent + descent) <= width:
                         break
                     font_size -= 2
-                    font = ImageFont.truetype(self.font_path, font_size)
+                    fonts = fonts.at_size(font_size)
+                    font = fonts.regular
             elif auto_fit and wrap:
                 if is_die_cut and label_height:
                     # Fixed physical height: shrink until the wrapped text fits
@@ -3730,11 +3782,12 @@ class PrinterService:
                     while font_size > MIN_AUTO_FIT_FONT_SIZE:
                         ascent, descent = font.getmetrics()
                         if (20 + len(wrapped) * (ascent + descent) <= label_height
-                                and self._widest_word(lines, font) <= text_area):
+                                and widest(fonts) <= text_area):
                             break
                         font_size -= 2
-                        font = ImageFont.truetype(self.font_path, font_size)
-                        wrapped = wrap_all(font)
+                        fonts = fonts.at_size(font_size)
+                        font = fonts.regular
+                        wrapped = wrap_all(fonts)
                 else:
                     # Continuous tape grows downwards, so height is never the
                     # constraint -- width is. On a narrow roll a single word can
@@ -3742,12 +3795,13 @@ class PrinterService:
                     # sentence into a column of letters metres long. Shrink until
                     # every word fits a line of its own instead.
                     while (font_size > MIN_AUTO_FIT_FONT_SIZE
-                           and self._widest_word(lines, font) > text_area):
+                           and widest(fonts) > text_area):
                         font_size -= 2
-                        font = ImageFont.truetype(self.font_path, font_size)
-                    wrapped = wrap_all(font)
+                        fonts = fonts.at_size(font_size)
+                        font = fonts.regular
+                    wrapped = wrap_all(fonts)
 
-            lines = wrapped
+            line_runs = wrapped
 
             # Create a dummy image to calculate text dimensions
             dummy_image = Image.new("RGB", (width, 10), "white")
@@ -3765,10 +3819,19 @@ class PrinterService:
 
             total_height = 10
             line_metrics = []
-            for line in lines:
-                bbox = dummy_draw.textbbox((0, 0), line, font=font)
+            for runs in line_runs:
+                if markup:
+                    # Advance widths, summed per run: two faces set the same
+                    # string to different widths, and that difference is what
+                    # alignment would otherwise get wrong. Rounded to whole
+                    # pixels like the bounding box below, because a lengthwise
+                    # canvas is sized from this and Image.new takes integers.
+                    line_width = int(round(measure_runs(dummy_draw, runs, fonts)))
+                else:
+                    bbox = dummy_draw.textbbox((0, 0), runs_text(runs), font=font)
+                    line_width = bbox[2] - bbox[0]
                 total_height += line_height
-                line_metrics.append((line, bbox[2] - bbox[0]))
+                line_metrics.append((runs, line_width))
 
             total_height += 10
 
@@ -3823,14 +3886,17 @@ class PrinterService:
             draw = ImageDraw.Draw(image)
 
             # Draw text
-            for line_text, line_width in line_metrics:
+            for runs, line_width in line_metrics:
                 if alignment == "center":
                     x = (line_area - line_width) // 2
                 elif alignment == "right":
                     x = line_area - line_width - 10
                 else:
                     x = 10
-                draw.text((x, y), line_text, font=font, fill="black")
+                if markup:
+                    draw_runs(draw, (x, y), runs, fonts)
+                else:
+                    draw.text((x, y), runs_text(runs), font=font, fill="black")
                 y += line_height
 
             if lengthwise:

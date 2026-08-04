@@ -163,7 +163,7 @@
                                     <div class="field">
                                         <label class="lbl" for="text-input">Text Content</label>
                                         <textarea id="text-input" rows="4" placeholder="Enter text to print..." spellcheck="false"></textarea>
-                                        <div class="hint">Use **bold** or *italic* for formatting</div>
+                                        <div class="hint">Line breaks print as typed. For **bold** and *italic*, switch on Text markup in Settings</div>
                                     </div>
                                     <div class="grid-3">
                                         <div class="field">
@@ -877,6 +877,19 @@
                                                 <option value="false">Disabled</option>
                                                 <option value="true">Enabled</option>
                                             </select>
+                                        </div>
+                                        <!-- Off by default, and the note says why:
+                                             labels are set in a bold face, which
+                                             leaves nothing heavier for **bold** to
+                                             be, so honouring the markers means
+                                             setting everything else lighter. -->
+                                        <div class="field">
+                                            <label class="lbl" for="text-markup">Text markup</label>
+                                            <select id="text-markup">
+                                                <option value="false">Disabled</option>
+                                                <option value="true">Enabled</option>
+                                            </select>
+                                            <div class="hint">**bold** and *italic*; sets the base text lighter</div>
                                         </div>
                                     </div>
 

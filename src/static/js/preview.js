@@ -124,10 +124,18 @@ function updateTextPreview() {
         // Show or hide elements based on content
         if (text) {
             // Format text with HTML
-            const formattedText = text
-                .replace(/\n/g, '<br>')
-                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\*(.*?)\*/g, '<em>$1</em>');
+            // Emphasis only when the printer would honour it. Rendering it
+            // here regardless is what made this preview a promise the label
+            // did not keep: the browser showed bold, the print showed
+            // asterisks. See src/utils/text_markup.py.
+            const markup = typeof textMarkupEnabled === 'function' && textMarkupEnabled();
+            let formattedText = escapeHtml(text).replace(/\n/g, '<br>');
+            if (markup) {
+                formattedText = formattedText
+                    .replace(/\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*/g, '<strong><em>$1</em></strong>')
+                    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '<strong>$1</strong>')
+                    .replace(/(?<!\*)\*(?=\S)([^*]+?)(?<=\S)\*(?!\*)/g, '<em>$1</em>');
+            }
             
             // Update preview
             previewText.innerHTML = formattedText;
@@ -284,10 +292,16 @@ function updateLabelPreview() {
             textDiv.style.fontSize = `${textFontSize}px`;
             textDiv.style.textAlign = textAlignment;
             // Format text with HTML to handle line breaks
-            const formattedText = textContent
-                .replace(/\n/g, '<br>')
-                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\*(.*?)\*/g, '<em>$1</em>');
+            // Same rule as the text preview above: emphasis only where the
+            // printer honours it, and the text escaped either way.
+            const markup = typeof textMarkupEnabled === 'function' && textMarkupEnabled();
+            let formattedText = escapeHtml(textContent).replace(/\n/g, '<br>');
+            if (markup) {
+                formattedText = formattedText
+                    .replace(/\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*/g, '<strong><em>$1</em></strong>')
+                    .replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '<strong>$1</strong>')
+                    .replace(/(?<!\*)\*(?=\S)([^*]+?)(?<=\S)\*(?!\*)/g, '<em>$1</em>');
+            }
             
             textDiv.innerHTML = formattedText;
             

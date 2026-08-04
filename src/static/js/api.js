@@ -109,6 +109,8 @@ async function loadSettings() {
         document.getElementById('threshold').value = settings.threshold || '70';
         document.getElementById('dither').value = settings.dither ? 'true' : 'false';
         document.getElementById('red').value = settings.red ? 'true' : 'false';
+        const markupField = document.getElementById('text-markup');
+        if (markupField) markupField.value = settings.text_markup ? 'true' : 'false';
         // Apply the saved copies/cut defaults to every compose panel.
         const defaultCopies = settings.copies || 1;
         const defaultCutMode = settings.cut_mode || 'each';
@@ -559,7 +561,8 @@ async function handleTextPrint(event) {
                 red: red,
                 copies: copies,
                 cut_mode: document.getElementById('cut-mode').value,
-                dpi_600: document.getElementById('dpi-600').value === 'true'
+                dpi_600: document.getElementById('dpi-600').value === 'true',
+                text_markup: textMarkupEnabled()
             }
         };
         if (copies >= LARGE_BATCH_THRESHOLD) {
@@ -992,7 +995,8 @@ async function handleQRCodePrint(event) {
                 red: red,
                 copies: copies,
                 cut_mode: document.getElementById('cut-mode-qrcode').value,
-                dpi_600: document.getElementById('dpi-600').value === 'true'
+                dpi_600: document.getElementById('dpi-600').value === 'true',
+                text_markup: textMarkupEnabled()
             }
         };
 
@@ -1110,7 +1114,8 @@ async function handleLabelPrint(event) {
                 red: red,
                 copies: copies,
                 cut_mode: document.getElementById('cut-mode-label').value,
-                dpi_600: document.getElementById('dpi-600').value === 'true'
+                dpi_600: document.getElementById('dpi-600').value === 'true',
+                text_markup: textMarkupEnabled()
             }
         };
         if (copies >= LARGE_BATCH_THRESHOLD) {
@@ -1322,6 +1327,7 @@ async function handleSaveSettings(event) {
             copies: copies,
             cut_mode: cutMode,
             dpi_600: dpi600,
+            text_markup: textMarkupEnabled(),
             keep_alive_enabled: keepAliveEnabled,
             keep_alive_interval: keepAliveInterval,
             keep_alive_mode: keepAliveMode,
@@ -1393,7 +1399,11 @@ function collectPreviewSettings() {
         red: document.getElementById('red').value === 'true',
         copies: parseInt(document.getElementById('copies').value) || 1,
         cut_mode: document.getElementById('cut-mode').value,
-        dpi_600: document.getElementById('dpi-600').value === 'true'
+        dpi_600: document.getElementById('dpi-600').value === 'true',
+        // Without this the server preview renders the markers as typed while
+        // the client preview beside it shows emphasis -- the exact mismatch
+        // this feature exists to end.
+        text_markup: textMarkupEnabled()
     };
 }
 
@@ -1680,6 +1690,19 @@ const JOB_ACTIVITY_META = {
  */
 function jobActivityMeta(activity) {
     return JOB_ACTIVITY_META[activity] || { label: String(activity), icon: 'bi-hourglass-split' };
+}
+
+/**
+ * Whether emphasis markers in the text are honoured.
+ *
+ * Read from the settings panel rather than remembered, so the live preview and
+ * the print agree with what is configured. Off whenever the control is absent,
+ * which is what the server assumes too.
+ * @returns {boolean}
+ */
+function textMarkupEnabled() {
+    const field = document.getElementById('text-markup');
+    return !!field && field.value === 'true';
 }
 
 /**

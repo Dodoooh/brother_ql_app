@@ -212,6 +212,13 @@ DEFAULT_SETTINGS = {
     "cut_mode": "each",  # each | end | none
     "dpi_600": False,
     "hq": True,
+    # Whether **bold** and *italic* in the text are honoured or printed as
+    # typed. Off, and deliberately: a label is normally set in DejaVu Sans
+    # Bold, which reads better on a thermal printer but leaves nothing heavier
+    # for bold to be, so honouring the markers means dropping the base to the
+    # regular weight and every label set that way comes out lighter. That is a
+    # choice to make, not one to inherit by surprise.
+    "text_markup": False,
     "keep_alive_enabled": False,
     "keep_alive_interval": 60,  # seconds
     "keep_alive_mode": "forever",  # forever | timed

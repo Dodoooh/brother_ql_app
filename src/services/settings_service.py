@@ -846,7 +846,7 @@ class SettingsService:
         "printer_uri", "printer_model", "label_size", "font_size", "alignment",
         "orientation", "vertical_alignment", "rotate", "threshold", "dither",
         "compress", "red",
-        "copies", "cut_mode", "dpi_600", "hq",
+        "copies", "cut_mode", "dpi_600", "hq", "text_markup",
         # The print path reads the calibration offsets straight off the resolved
         # settings, so they have to be inherited like any other render option --
         # otherwise a request that omits "settings" would print uncalibrated.

@@ -544,7 +544,8 @@ function setupEventListeners() {
 
     // Settings fields that change the rendered output should refresh the
     // server preview of whichever compose tab is currently active.
-    ['rotate', 'threshold', 'dither', 'label-size', 'printer-model'].forEach(id => {
+    ['rotate', 'threshold', 'dither', 'label-size', 'printer-model',
+     'text-markup'].forEach(id => {
         const el = document.getElementById(id);
         if (!el) return;
         const evt = el.tagName === 'SELECT' ? 'change' : 'input';
@@ -553,6 +554,19 @@ function setupEventListeners() {
             if (mode) requestServerPreview(mode);
         });
     });
+
+    // Text markup also changes the *client* preview -- it is the one setting
+    // that decides whether the browser draws emphasis at all -- so it refreshes
+    // that too. Without this, switching it produced no visible change until the
+    // text was touched again, which reads exactly like a feature that does not
+    // work.
+    const markupField = document.getElementById('text-markup');
+    if (markupField && typeof updateTextPreview === 'function') {
+        markupField.addEventListener('change', () => {
+            updateTextPreview();
+            if (typeof updateLabelPreview === 'function') updateLabelPreview();
+        });
+    }
 
     // ---- Print alignment calibration (Settings summary + dialog) ----
     if (typeof setupCalibration === 'function') {
