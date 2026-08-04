@@ -12,16 +12,10 @@ from src.utils.exceptions import (AppError, ValidationError, PrinterError, Confi
                                   internal_error)
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 from src.utils.dry_run import is_dry_run, build_dry_run_response
+from src.utils.formatting import short_label
 
 logger = structlog.get_logger()
 
-
-def _short_label(text: str, limit: int = 40) -> str:
-    """Build a short, single-line human label for a queued job."""
-    flattened = " ".join((text or "").split())
-    if len(flattened) > limit:
-        return flattened[:limit].rstrip() + "..."
-    return flattened
 
 def print_qr_code(body: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -92,7 +86,7 @@ def print_qr_code(body: Dict[str, Any]) -> Dict[str, Any]:
 
         # Parameters that allow the UI to restore the form for a reprint.
         params = {"type": "qrcode", "data": data, "settings": combined_settings}
-        job_id = print_queue.submit("qrcode", "QR: " + _short_label(data), job, params=params)
+        job_id = print_queue.submit("qrcode", "QR: " + short_label(data), job, params=params)
         logger.info("QR code print job queued", job_id=job_id)
 
         return {"success": True, "job_id": job_id, "message": "Print job queued"}

@@ -41,11 +41,11 @@ import queue
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 import structlog
 
+from src.utils.formatting import now_iso
 from src.utils.job_activity import (
     ACTIVITY_PRINTER_SETTLING,
     ACTIVITY_PRINTING,
@@ -64,11 +64,6 @@ _MAX_HISTORY = 100
 
 # Default time-to-live for persisted job files (image/pdf) in seconds (24 h).
 _DEFAULT_JOB_FILE_TTL_SECONDS = 86400
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _attempt_delays(value: Any) -> tuple:
@@ -277,7 +272,7 @@ class PrintQueueService:
             return False
         job["activity"] = activity
         job["activity_message"] = activity_message(activity, message)
-        job["activity_at"] = _now_iso() if activity else None
+        job["activity_at"] = now_iso() if activity else None
         return True
 
     def report_activity(self, activity: Optional[str],
@@ -415,7 +410,7 @@ class PrintQueueService:
             "type": job_type,
             "status": "queued",
             "label": label,
-            "created_at": _now_iso(),
+            "created_at": now_iso(),
             "started_at": None,
             "finished_at": None,
             "error": None,
@@ -463,7 +458,7 @@ class PrintQueueService:
                 "type": job_type,
                 "status": "queued",
                 "label": label,
-                "created_at": _now_iso(),
+                "created_at": now_iso(),
                 "started_at": None,
                 "finished_at": None,
                 "error": None,
@@ -508,7 +503,7 @@ class PrintQueueService:
             if job is None or job["status"] != "queued":
                 return False
             job["status"] = "cancelled"
-            job["finished_at"] = _now_iso()
+            job["finished_at"] = now_iso()
             # A job cancelled while the gate is holding it stops doing whatever
             # the gate said it was doing, even though the gate itself carries on
             # until its wait is over. Nothing the gate says from here lands on
@@ -589,7 +584,7 @@ class PrintQueueService:
                 job = self._jobs.get(jid)
                 if job is not None and job["status"] == "queued":
                     job["status"] = "cancelled"
-                    job["finished_at"] = _now_iso()
+                    job["finished_at"] = now_iso()
                     self._set_activity_locked(jid, None)
                     cancelled += 1
         if cancelled:
@@ -781,7 +776,7 @@ class PrintQueueService:
                 # The moment the job first went on the wire, kept across
                 # retries: "started" is when the printing began, not when the
                 # attempt that happened to work did.
-                job["started_at"] = job.get("started_at") or _now_iso()
+                job["started_at"] = job.get("started_at") or now_iso()
                 self._set_activity_locked(
                     job_id, ACTIVITY_PRINTING,
                     None if attempts == 1 else
@@ -880,7 +875,7 @@ class PrintQueueService:
             if job is not None:
                 job["status"] = status
                 job["error"] = error
-                job["finished_at"] = _now_iso()
+                job["finished_at"] = now_iso()
 
     def _run(self) -> None:
         """Worker loop: process queued jobs FIFO, one at a time."""
@@ -921,7 +916,7 @@ class PrintQueueService:
                             if job is not None:
                                 job["status"] = "failed"
                                 job["error"] = error
-                                job["finished_at"] = _now_iso()
+                                job["finished_at"] = now_iso()
                             # A gate failure is described by the error, not by a
                             # lingering activity: the message the gate raises
                             # says what it was doing and for how long, and that

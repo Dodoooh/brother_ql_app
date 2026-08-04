@@ -161,6 +161,7 @@ import structlog
 
 from src.services.settings_service import settings_service
 from src.utils.exceptions import RelayWebhookError
+from src.utils.formatting import now_iso
 from src.utils.job_activity import (
     ACTIVITY_PRINTER_SETTLING,
     ACTIVITY_SWITCHING_ON,
@@ -400,11 +401,6 @@ STEP_TURN_OFF = "turn_off"
 
 # Name of the state file, written beside settings.json.
 STATE_FILENAME = "relay_power.json"
-
-
-def _now_iso() -> str:
-    """Return the current UTC time as an ISO-8601 string."""
-    return datetime.now(timezone.utc).isoformat()
 
 
 def _iso(moment: Optional[float]) -> Optional[str]:
@@ -805,7 +801,7 @@ class RelayPowerService:
                 datetime.fromtimestamp(turn_off_at, timezone.utc).isoformat()
                 if turn_off_at is not None else None
             ),
-            "updated_at": _now_iso(),
+            "updated_at": now_iso(),
         }
         temp_path = self.state_file + ".tmp"
         try:
@@ -904,7 +900,7 @@ class RelayPowerService:
             "source": "brother_ql_app",
             "printer_uri": settings.get("printer_uri", ""),
             "printer_model": settings.get("printer_model", ""),
-            "timestamp": _now_iso(),
+            "timestamp": now_iso(),
         }
 
     def _default_sender(self, url: str, payload: Dict[str, Any],
@@ -1011,7 +1007,7 @@ class RelayPowerService:
 
         with self._lock:
             self._last_action = action
-            self._last_action_at = _now_iso()
+            self._last_action_at = now_iso()
             self._last_error = None
             self._last_error_at = None
         logger.info("Relay webhook sent", action=action)
@@ -1021,7 +1017,7 @@ class RelayPowerService:
         """Remember the most recent failure so the API can report it."""
         with self._lock:
             self._last_error = message
-            self._last_error_at = _now_iso()
+            self._last_error_at = now_iso()
 
     # ------------------------------------------------------------------ #
     # Sending one by hand

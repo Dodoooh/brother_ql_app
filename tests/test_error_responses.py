@@ -40,6 +40,7 @@ os.environ.setdefault("SKIP_INIT_CONFIG", "true")
 pytest.importorskip("connexion")
 pytest.importorskip("flask")
 
+from src.utils import exceptions as exceptions_module  # noqa: E402
 from src.utils.error_handlers import build_error_body  # noqa: E402
 from src.utils.exceptions import PrinterError  # noqa: E402
 
@@ -180,9 +181,11 @@ def test_a_printer_error_keeps_the_sentence_that_helps(client, printer_controlle
                       side_effect=PrinterError(refusal)):
         response = client.post(f"{API}/printers/status", json=VALID_STATUS_BODY)
 
-    # PRINTERERROR is the pre-existing code AppError derives from the class
-    # name; only the envelope around it changed here.
-    body = assert_error_shape(response, 500, "PRINTERERROR")
+    # PRINTER_ERROR is declared by the class itself. It used to be PRINTERERROR,
+    # derived from the class name -- a token no client could have read as
+    # anything but a typo, and the only one in the API not written in the same
+    # SCREAMING_SNAKE form as VALIDATION_ERROR and the rest.
+    body = assert_error_shape(response, 500, "PRINTER_ERROR")
     assert refusal in body["message"]
 
 
@@ -318,3 +321,59 @@ def test_a_5xx_keeps_its_status_but_not_its_words():
     assert body["message"] == "An internal error occurred"
     assert "snmp" not in json.dumps(body)
     assert body["details"]["error_id"]
+
+
+# --------------------------------------------------------------------------- #
+# The tokens a client switches on
+# --------------------------------------------------------------------------- #
+
+# Every error class and the code it reports. This is the published half of the
+# exception hierarchy: renaming a class must not silently rename a token here.
+EXPECTED_ERROR_CODES = {
+    "PrinterError": "PRINTER_ERROR",
+    "RelayWebhookError": "RELAY_WEBHOOK_ERROR",
+    "ImageProcessingError": "IMAGE_PROCESSING_ERROR",
+    "ConfigurationError": "CONFIGURATION_ERROR",
+    "ValidationError": "VALIDATION_ERROR",
+    "ConfirmationRequiredError": "CONFIRMATION_REQUIRED",
+    "ResourceNotFoundError": "RESOURCE_NOT_FOUND",
+    "InternalError": "INTERNAL_SERVER_ERROR",
+}
+
+# How to build one of each, since several take more than a message.
+_ERROR_INSTANCES = {
+    "PrinterError": lambda cls: cls("the cover is open"),
+    "RelayWebhookError": lambda cls: cls("the relay did not answer"),
+    "ImageProcessingError": lambda cls: cls("not an image"),
+    "ConfigurationError": lambda cls: cls("no printer configured"),
+    "ValidationError": lambda cls: cls("text is required", field="text"),
+    "ConfirmationRequiredError": lambda cls: cls(25),
+    "ResourceNotFoundError": lambda cls: cls("no such job"),
+    "InternalError": lambda cls: cls("abc123"),
+}
+
+
+def test_every_error_class_declares_its_code():
+    """A code is written down, never derived from the Python class name.
+
+    ``PrinterError`` used to fall through to ``self.__class__.__name__.upper()``
+    and answer ``PRINTERERROR`` -- the one token in the API that was neither
+    readable nor in the same form as the rest, and one that would have changed
+    the moment somebody renamed the class. The check is on the *instances*, so
+    it covers both the classes that pass a code explicitly and the ones that
+    declare ``DEFAULT_CODE``.
+    """
+    subclasses = {name: obj for name, obj in vars(exceptions_module).items()
+                  if isinstance(obj, type)
+                  and issubclass(obj, exceptions_module.AppError)
+                  and obj is not exceptions_module.AppError}
+
+    assert set(subclasses) == set(EXPECTED_ERROR_CODES), \
+        "a new error class has to decide which token it reports"
+
+    for name, cls in sorted(subclasses.items()):
+        error = _ERROR_INSTANCES[name](cls)
+        assert error.code == EXPECTED_ERROR_CODES[name], name
+        assert error.code != name.upper(), \
+            f"{name} is falling back to the class name again"
+        assert error.to_dict()["code"] == EXPECTED_ERROR_CODES[name], name

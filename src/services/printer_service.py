@@ -6024,18 +6024,6 @@ class PrinterService:
             logger.warning("TCP ping error", ip_address=ip_address, error=str(e))
             return False
     
-    def _is_docker_host_internal(self, ip_address: str) -> bool:
-        """
-        Check if the IP address is a Docker host.internal address.
-        
-        Args:
-            ip_address: IP address to check.
-            
-        Returns:
-            True if it's a Docker host.internal address, False otherwise.
-        """
-        return "host.docker.internal" in ip_address or "docker.host.internal" in ip_address
-    
     def _keep_alive_worker(self, printer_uri: str, printer_model: str, interval: int, stop_event: threading.Event) -> None:
         """
         Worker function for the keep alive thread.

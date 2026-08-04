@@ -218,15 +218,6 @@ function setupEventListeners() {
         navbarKeepAlive.addEventListener('click', toggleKeepAliveFromNavbar);
     }
     
-    // Settings card toggle
-    const settingsHeader = document.querySelector('.settings-card .card-header');
-    if (settingsHeader) {
-        settingsHeader.addEventListener('click', function() {
-            const expanded = this.getAttribute('aria-expanded') === 'true';
-            this.setAttribute('aria-expanded', !expanded);
-        });
-    }
-    
     // Tab change events for preview updates
     const tabEls = document.querySelectorAll('button[data-bs-toggle="tab"]');
     tabEls.forEach(tabEl => {

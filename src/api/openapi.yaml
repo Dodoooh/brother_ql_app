@@ -63,6 +63,8 @@ paths:
                 type: array
                 items:
                   $ref: '#/components/schemas/Printer'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -93,6 +95,8 @@ paths:
                 $ref: '#/components/schemas/PrinterStatus'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -112,6 +116,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/KeepAliveStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
     
@@ -136,6 +142,8 @@ paths:
                 $ref: '#/components/schemas/KeepAliveResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -185,6 +193,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/RelayPowerStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -241,6 +251,8 @@ paths:
                 $ref: '#/components/schemas/RelayPowerSendResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -269,6 +281,8 @@ paths:
                 $ref: '#/components/schemas/PrintResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -299,6 +313,8 @@ paths:
                 $ref: '#/components/schemas/PreviewResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -367,6 +383,8 @@ paths:
                   height: 8000
                   pixels: 64000000
                   limit: 50000000
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -426,6 +444,8 @@ paths:
                   height: 8000
                   pixels: 64000000
                   limit: 50000000
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -508,6 +528,8 @@ paths:
                   requested_pages: 40
                   total_pages: 40
                   limit: 20
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -549,6 +571,8 @@ paths:
                 $ref: '#/components/schemas/PdfPreview'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -580,6 +604,8 @@ paths:
           description: Redirect to UI with staged file
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -605,6 +631,8 @@ paths:
               schema:
                 type: string
                 format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -630,6 +658,8 @@ paths:
                 $ref: '#/components/schemas/PrintResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -660,6 +690,8 @@ paths:
                 $ref: '#/components/schemas/PreviewResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -685,6 +717,8 @@ paths:
                 $ref: '#/components/schemas/PrintResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -778,6 +812,8 @@ paths:
                   height: 8000
                   pixels: 64000000
                   limit: 50000000
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -806,6 +842,8 @@ paths:
                 $ref: '#/components/schemas/PreviewResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -860,6 +898,8 @@ paths:
                 $ref: '#/components/schemas/CalibrationPrintResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -895,6 +935,8 @@ paths:
                 $ref: '#/components/schemas/PreviewResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -912,6 +954,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Settings'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
     
@@ -936,6 +980,8 @@ paths:
                 $ref: '#/components/schemas/SuccessResponse'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -958,6 +1004,8 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/JobStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -982,6 +1030,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/JobStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1013,6 +1063,8 @@ paths:
                     type: boolean
                     description: Whether the job was cancelled (only queued jobs can be cancelled)
                     example: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1046,6 +1098,8 @@ paths:
                     type: string
                     description: Identifier of the newly created reprint job
                     example: "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d"
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1075,6 +1129,8 @@ paths:
               schema:
                 type: string
                 format: binary
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1099,6 +1155,8 @@ paths:
                     type: integer
                     description: Number of finished jobs removed from the registry
                     example: 3
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1123,6 +1181,8 @@ paths:
                     type: integer
                     description: Number of jobs removed from the registry
                     example: 5
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1154,6 +1214,8 @@ paths:
                     type: boolean
                     description: Whether the job was removed (a printing job cannot be removed)
                     example: true
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
@@ -1173,6 +1235,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueueStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1192,6 +1256,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueueStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1209,6 +1275,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/QueueStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -1235,6 +1303,8 @@ paths:
                         type: integer
                         description: Number of queued jobs cancelled by the stop
                         example: 4
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -3572,8 +3642,19 @@ components:
       properties:
         code:
           type: string
-          description: Error code
-          example: "PRINTER_NOT_FOUND"
+          description: >-
+            Stable machine-readable token, safe to switch on. Every code is
+            SCREAMING_SNAKE_CASE and declared by the app rather than derived
+            from anything internal. The ones a client can encounter:
+            `VALIDATION_ERROR` (a rejected input, including the ones the
+            specification itself rejects), `CONFIRMATION_REQUIRED` (a large
+            batch needs `confirm_large_batch`), `UNAUTHORIZED`,
+            `RESOURCE_NOT_FOUND`, `METHOD_NOT_ALLOWED`, `PAYLOAD_TOO_LARGE`,
+            `PRINTER_ERROR` (the printer refused; `message` carries its own
+            words), `RELAY_WEBHOOK_ERROR` (the relay could not be reached, so
+            the printer cannot be powered), `IMAGE_PROCESSING_ERROR`,
+            `CONFIGURATION_ERROR` and `INTERNAL_SERVER_ERROR`.
+          example: "VALIDATION_ERROR"
         message:
           type: string
           description: Error message
@@ -3591,11 +3672,27 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
           example:
-            code: "INVALID_REQUEST"
-            message: "Invalid request parameters"
+            code: "VALIDATION_ERROR"
+            message: "'printer_uri' is a required property"
             details:
               field: "printer_uri"
-              reason: "Required field is missing"
+
+    Unauthorized:
+      description: >-
+        Missing or invalid API key. Only ever returned when the server was
+        started with the API_KEY environment variable set; with it unset the
+        API is unauthenticated and this response cannot occur. The UI, the
+        Swagger UI, the specification itself and the health endpoints stay
+        reachable without a key.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: "UNAUTHORIZED"
+            message: "A valid API key is required for this endpoint"
+            details:
+              header: "X-API-Key"
 
     NotFound:
       description: Resource not found
@@ -3604,19 +3701,28 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
           example:
-            code: "PRINTER_NOT_FOUND"
+            code: "RESOURCE_NOT_FOUND"
             message: "The specified printer could not be found"
             details:
-              printer_uri: "tcp://192.168.1.100"
+              resource_type: "printer"
+              resource_id: "tcp://192.168.1.100"
 
     InternalServerError:
-      description: Internal server error
+      description: >-
+        Something went wrong on the server side. Two different things arrive
+        here: a printer that refused the job, which answers `PRINTER_ERROR`
+        with the device's own words in `message` because that is what the
+        caller has to act on, and a fault inside the app, which answers
+        `INTERNAL_SERVER_ERROR` with a fixed sentence plus `details.error_id` —
+        the same short token the log record for that failure carries, so an
+        operator can find the complete story without anything about the
+        server's insides travelling in the response.
       content:
         application/json:
           schema:
             $ref: '#/components/schemas/Error'
           example:
-            code: "INTERNAL_ERROR"
-            message: "An unexpected error occurred"
+            code: "INTERNAL_SERVER_ERROR"
+            message: "An internal error occurred"
             details:
               error_id: "e12345"

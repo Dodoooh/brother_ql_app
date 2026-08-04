@@ -24,6 +24,7 @@ from src.utils.exceptions import (
 from src.utils.print_settings_schema import parse_and_validate_settings
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 from src.utils.dry_run import is_dry_run, build_dry_run_response
+from src.utils.formatting import short_label
 
 # Reuse the image controller's persistent-upload helpers to avoid duplication.
 from src.api.image_controller import (
@@ -33,17 +34,10 @@ from src.api.image_controller import (
 
 logger = structlog.get_logger()
 
+
 # Guard against decompression-bomb DoS: cap the number of pixels Pillow will
 # decode from an uploaded image.
 Image.MAX_IMAGE_PIXELS = 50_000_000
-
-
-def _short_label(text: str, limit: int = 40) -> str:
-    """Build a short, single-line human label for a queued job."""
-    flattened = " ".join((text or "").split())
-    if len(flattened) > limit:
-        return flattened[:limit].rstrip() + "..."
-    return flattened
 
 
 def print_text_image() -> Dict[str, Any]:
@@ -153,7 +147,7 @@ def print_text_image() -> Dict[str, Any]:
             "position": position,
         }
         job_id = print_queue.submit(
-            "label", "Text+Image: " + _short_label(text), job,
+            "label", "Text+Image: " + short_label(text), job,
             params=params, file_path=stored_path
         )
         logger.info("Text+image label print job queued", job_id=job_id, path=stored_path)

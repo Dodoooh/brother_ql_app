@@ -25,18 +25,26 @@ _logger = structlog.get_logger()
 
 class AppError(Exception):
     """Base exception for all application errors."""
-    
+
+    #: The ``code`` this class reports when the raiser does not pass one. Every
+    #: subclass whose errors reach a client sets it, because that token is what
+    #: a client switches on: leaving it to the fallback below would tie a public
+    #: part of the API to a Python class name, and produce run-together tokens
+    #: (``PRINTERERROR``) that no other code in the app uses. The fallback stays
+    #: for an internal subclass nobody has had to name yet.
+    DEFAULT_CODE = None
+
     def __init__(self, message: str, code: str = None, details: dict = None):
         """
         Initialize the exception.
-        
+
         Args:
             message: Error message.
-            code: Error code.
+            code: Error code. Defaults to the class's :attr:`DEFAULT_CODE`.
             details: Additional error details.
         """
         self.message = message
-        self.code = code or self.__class__.__name__.upper()
+        self.code = code or self.DEFAULT_CODE or self.__class__.__name__.upper()
         self.details = details or {}
         super().__init__(self.message)
     
@@ -56,7 +64,8 @@ class AppError(Exception):
 
 class PrinterError(AppError):
     """Exception raised for printer-related errors."""
-    pass
+
+    DEFAULT_CODE = "PRINTER_ERROR"
 
 
 class RelayWebhookError(PrinterError):
@@ -68,17 +77,22 @@ class RelayWebhookError(PrinterError):
     without being taught a new type, while code that cares specifically about
     the relay can still tell the two apart.
     """
-    pass
+
+    # Kept distinct from PRINTER_ERROR for the same reason the class is: a
+    # caller that wants to know the relay is at fault can still see it.
+    DEFAULT_CODE = "RELAY_WEBHOOK_ERROR"
 
 
 class ImageProcessingError(AppError):
     """Exception raised for image processing errors."""
-    pass
+
+    DEFAULT_CODE = "IMAGE_PROCESSING_ERROR"
 
 
 class ConfigurationError(AppError):
     """Exception raised for configuration errors."""
-    pass
+
+    DEFAULT_CODE = "CONFIGURATION_ERROR"
 
 
 class ValidationError(AppError):
