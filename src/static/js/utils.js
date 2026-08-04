@@ -24,17 +24,29 @@ function showNotification(message, type = 'info', duration = 5000) {
     // The icon is the only part that changes colour with the type: the card
     // itself is identical for every severity, so a warning and a confirmation
     // are the same object saying different things rather than two designs.
+    //
+    // The message itself is set as *text*, never as markup. Almost every call
+    // site here interpolates something the app did not write -- `error.message`
+    // straight out of a server JSON body, the relay's warning sentence, a job
+    // label -- and a printer name or a filename containing "<" is enough to
+    // break the card even without anyone meaning harm. The scaffolding around
+    // it is still built as markup because it is a constant, so the two are kept
+    // apart: the frame is written once here, the message only ever fills a text
+    // node. Any caller that wants emphasis has to gain a separate parameter for
+    // it; none does today.
     const icon = getNotificationIcon(type);
     notification.innerHTML = `
         <div class="d-flex align-items-center">
             <i class="${icon} notification-icon me-2" aria-hidden="true"></i>
-            <div>${message}</div>
+            <div class="notification-message"></div>
             <button type="button" class="notification-close ms-3" aria-label="Close">
                 <i class="bi bi-x"></i>
             </button>
         </div>
     `;
-    
+    const messageEl = notification.querySelector('.notification-message');
+    if (messageEl) messageEl.textContent = message == null ? '' : String(message);
+
     // Add notification to container
     notificationsContainer.appendChild(notification);
     

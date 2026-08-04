@@ -25,6 +25,14 @@ The status enum is untouched -- a job in the gate is still ``queued``, which is
 what it is -- so no client that switches on ``status`` has to change. The queue
 sets the activity for the phases it owns (printing, and clearing it when the job
 finishes); the gate reports its own through :meth:`report_activity`.
+
+A job that has finished takes no more activities. The gate is a plain callable
+that does not know which job it is holding and cannot be interrupted, so it goes
+on describing its phases for as long as its wait lasts -- possibly minutes after
+the job was cancelled underneath it. Those reports are dropped rather than
+written onto a terminal job, which is what keeps :meth:`queue_status` from
+answering "nothing is queued, nothing is printing, and here is what is currently
+happening" in the same breath.
 """
 
 import copy
@@ -64,7 +72,7 @@ def _now_iso() -> str:
 
 
 def _attempt_delays(value: Any) -> tuple:
-    """Read the pre-job gate's return value as a print attempt schedule.
+    """Read a print attempt schedule out of whatever the gate handed back.
 
     The gate is a plain callable the queue knows nothing else about, so what it
     hands back is treated as advice rather than as a contract: anything that is
@@ -82,6 +90,35 @@ def _attempt_delays(value: Any) -> tuple:
             return ()
         delays.append(max(0.0, seconds))
     return tuple(delays)
+
+
+def _gate_advice(value: Any) -> tuple:
+    """Read the gate's return value as ``(delays, first_pause_message)``.
+
+    Two shapes are accepted, and the second is a superset of the first:
+
+    * a bare sequence of pauses (or None), which is what a gate that has nothing
+      to say hands back;
+    * a mapping carrying ``delays`` and a ``message`` describing what the pause
+      before the *first* attempt is waiting on.
+
+    The message exists because only the gate knows why it let the job through.
+    It may have been released on the printer saying it was ready, or on the
+    printer merely answering steadily without ever saying so -- two different
+    things to be told, and the queue cannot tell them apart because it does not
+    know what a printer is. So the gate supplies the sentence and the queue
+    displays it, and neither has to learn the other's vocabulary. A gate that
+    supplies none gets wording that claims nothing the queue cannot see for
+    itself.
+
+    Read as leniently as the schedule itself: an unusable mapping degrades to
+    "print once, now" rather than failing the job.
+    """
+    if isinstance(value, dict):
+        message = value.get("message")
+        return _attempt_delays(value.get("delays")), (
+            str(message) if message else None)
+    return _attempt_delays(value), None
 
 
 def _writes_begun() -> int:
@@ -180,7 +217,10 @@ class PrintQueueService:
         The gate takes no arguments and is not told which job it is holding. If
         it wants to say what it is doing it calls :meth:`report_activity`, which
         finds the job for it -- so the gate stays a plain callable and the queue
-        stays the only thing that knows the job registry exists.
+        stays the only thing that knows the job registry exists. Once that job
+        has finished, been cancelled included, those reports are dropped and
+        :meth:`report_activity` says so by returning False; a gate that is still
+        waiting is never interrupted and its own run always finishes normally.
 
         It may hand back a print attempt schedule: a sequence of pauses, one per
         attempt, taken before each. That is how a gate says "I have just powered
@@ -188,9 +228,23 @@ class PrintQueueService:
         job" without the queue learning what a relay or a printer is. Returning
         nothing means what it always meant: print once, now.
 
+        A gate with something to say about the pause *before the first attempt*
+        hands back a mapping instead::
+
+            {"delays": (5.0, 20.0, 20.0),
+             "message": "The printer reports itself ready. Giving it 5s before
+                         printing."}
+
+        That first pause is the one wait the queue cannot describe truthfully on
+        its own: it is a grace after the gate released the job, and only the gate
+        knows what it released on. The queue displays the sentence verbatim under
+        the ``printer_settling`` activity and falls back to wording that claims
+        nothing when there is none. Every later pause is a retry, which the queue
+        does know about because it has the failure in hand.
+
         Args:
-            gate: ``gate() -> None | Sequence[float]``, or None to remove the
-                current one.
+            gate: ``gate() -> None | Sequence[float] | {"delays": Sequence[float],
+                "message": str | None}``, or None to remove the current one.
         """
         self._pre_job_gate = gate
 
@@ -204,11 +258,22 @@ class PrintQueueService:
         Clearing (``activity=None``) drops the message and the timestamp with
         it, so a job that is not doing anything never carries the description of
         something it was doing a minute ago.
+
+        A job in a terminal state takes no new activity. It is done, failed or
+        cancelled, and nothing is happening to it by definition -- yet the gate
+        holding it can go on reporting phases for minutes after a cancel,
+        because it is a plain callable that cannot be told to stop. Writing
+        those onto the job would resurrect it in every display, and would make
+        :meth:`queue_status` report a live activity while counting nothing as
+        queued or printing. Clearing is still allowed, and has to be: it is how
+        the worker tidies up after the outcome has been recorded.
         """
         if job_id is None:
             return False
         job = self._jobs.get(job_id)
         if job is None:
+            return False
+        if activity and job.get("status") in _FINISHED_STATES:
             return False
         job["activity"] = activity
         job["activity_message"] = activity_message(activity, message)
@@ -234,9 +299,12 @@ class PrintQueueService:
                 omitted.
 
         Returns:
-            True when it was recorded, False when no job is being processed (a
-            gate called by hand, say). Never raises: a job must not fail because
-            the app could not describe it.
+            True when it was recorded, False when there is no job to record it
+            on -- either nothing is being processed (a gate called by hand, say)
+            or the job in hand has already finished or been cancelled. Never
+            raises: a job must not fail because the app could not describe it,
+            and a gate that is mid-wait when its job is cancelled must be able to
+            run to the end of that wait without noticing.
         """
         with self._lock:
             return self._set_activity_locked(self._current_job_id, activity, message)
@@ -247,8 +315,17 @@ class PrintQueueService:
             return self._current_activity_locked()
 
     def _current_activity_locked(self) -> Dict[str, Any]:
-        """The current job's activity. Caller must hold ``self._lock``."""
+        """The current job's activity. Caller must hold ``self._lock``.
+
+        A job the worker still has in hand but which has already finished (it
+        was cancelled while the gate held it, most often) reports no activity,
+        whatever is left on it. The counts in :meth:`queue_status` are taken
+        under this same lock and no longer count such a job, so reporting an
+        activity for it would make one answer contradict the other.
+        """
         job = self._jobs.get(self._current_job_id) if self._current_job_id else None
+        if job is not None and job.get("status") in _FINISHED_STATES:
+            job = None
         activity = job.get("activity") if job else None
         return {
             "activity": activity,
@@ -439,7 +516,14 @@ class PrintQueueService:
             job["finished_at"] = _now_iso()
             # A job cancelled while the gate is holding it stops doing whatever
             # the gate said it was doing, even though the gate itself carries on
-            # until its wait is over.
+            # until its wait is over. Nothing the gate says from here lands on
+            # it: _set_activity_locked refuses a terminal job.
+            #
+            # _current_job_id is deliberately left alone. The worker is still
+            # holding this job, and that is the only signal anything has that a
+            # gate is running -- see has_pending_work, which is what stops mains
+            # power being cut while a printer is being brought up for a job the
+            # user has since cancelled.
             self._set_activity_locked(job_id, None)
         logger.info("Print job cancelled", job_id=job_id)
         return True
@@ -594,6 +678,27 @@ class PrintQueueService:
         status.update(activity)
         return status
 
+    def has_pending_work(self) -> bool:
+        """Whether the queue has anything left to do.
+
+        Broader than the counts in :meth:`queue_status`, and deliberately so.
+        Anything queued or printing counts, as it always has -- and so does a job
+        the worker still has in hand even after it reached a terminal state.
+        That last case is real work: the pre-job gate can be holding a job it was
+        given minutes ago, and cancelling that job does not stop the gate, which
+        may well be halfway through switching a printer's mains supply on and
+        waiting for it to boot.
+
+        Whoever asks this question is asking whether it is safe to act as though
+        the queue were idle, and while a gate is still running it is not. The
+        answer errs towards "busy" for the length of one gate, which is bounded.
+        """
+        with self._lock:
+            if self._current_job_id is not None:
+                return True
+            return any(job["status"] in ("queued", "printing")
+                       for job in self._jobs.values())
+
     # ------------------------------------------------------------------ #
     # Internal helpers
     # ------------------------------------------------------------------ #
@@ -619,7 +724,7 @@ class PrintQueueService:
             self._files.pop(jid, None)
 
     def _print_job(self, job_id: str, fn: Callable[[], Any],
-                   delays: tuple) -> None:
+                   delays: tuple, first_pause_message: Optional[str] = None) -> None:
         """Run the print, once, or on the attempt schedule the gate handed back.
 
         ``delays`` is one pause per attempt, taken *before* that attempt, and is
@@ -648,6 +753,9 @@ class PrintQueueService:
         to mean its remaining attempts ran too, long after the queue had been
         stopped. The schedule is abandoned instead, and the job fails carrying
         the printer's own last words.
+
+        ``first_pause_message`` is the gate's own wording for the pause before
+        the first attempt, and is None when it had none. See :func:`_gate_advice`.
         """
         attempts = max(1, len(delays))
         error: Optional[str] = None
@@ -655,7 +763,8 @@ class PrintQueueService:
             pause = delays[attempt - 1] if attempt <= len(delays) else 0.0
             if pause > 0:
                 held = self._hold_before_attempt(job_id, pause, attempt,
-                                                 attempts, error)
+                                                 attempts, error,
+                                                 first_pause_message)
                 if held == "gone":
                     return  # cancelled meanwhile; the worker's finally cleans up
                 if held == "stopped":
@@ -712,8 +821,20 @@ class PrintQueueService:
             return
 
     def _hold_before_attempt(self, job_id: str, seconds: float, attempt: int,
-                             attempts: int, error: Optional[str]) -> str:
+                             attempts: int, error: Optional[str],
+                             first_pause_message: Optional[str] = None) -> str:
         """Wait before a print attempt, saying why, and stop if told to.
+
+        The first pause and the later ones are different waits and are worded by
+        different owners. A later pause follows a failed attempt, and the queue
+        has that failure in hand, so it says so itself. The first pause follows
+        nothing: it is a grace the gate asked for after releasing the job, and
+        why the gate released it is something the queue does not and should not
+        know. So the gate's own sentence is displayed when it supplied one, and
+        the fallback states only what is true from here -- that a pause is
+        running before the first attempt. It used to assert that the printer had
+        reported itself ready, which is one of two ways the gate releases a job
+        and was simply wrong for the other.
 
         Returns:
             ``"go"`` when the wait ran to the end and the attempt should be
@@ -732,8 +853,8 @@ class PrintQueueService:
             if attempt == 1:
                 self._set_activity_locked(
                     job_id, ACTIVITY_PRINTER_SETTLING,
-                    f"The printer reports itself ready. Giving it {seconds:.0f}s "
-                    f"before printing.")
+                    first_pause_message or
+                    f"Waiting {seconds:.0f}s before the first print attempt.")
             else:
                 because = f" ({_short(error)})" if error else ""
                 self._set_activity_locked(
@@ -792,9 +913,10 @@ class PrintQueueService:
                 # which is what stops the relay switching off underneath it.
                 gate = self._pre_job_gate
                 attempt_delays: tuple = ()
+                first_pause_message: Optional[str] = None
                 if gate is not None:
                     try:
-                        attempt_delays = _attempt_delays(gate())
+                        attempt_delays, first_pause_message = _gate_advice(gate())
                     except Exception as e:  # noqa: BLE001 - fail this job, keep the worker
                         error = str(e)
                         logger.error("Pre-job gate failed", job_id=job_id,
@@ -814,7 +936,7 @@ class PrintQueueService:
                             self._set_activity_locked(job_id, None)
                         continue
 
-                self._print_job(job_id, fn, attempt_delays)
+                self._print_job(job_id, fn, attempt_delays, first_pause_message)
             finally:
                 # Whatever happened -- printed, failed, cancelled under us,
                 # skipped -- the job is no longer doing anything, and nothing is

@@ -555,6 +555,16 @@ function setupEventListeners() {
         });
     });
 
+    // Threshold also changes the *client* image preview, which now derives its
+    // black/white cutoff from that field exactly the way the printer does. The
+    // server render usually covers the picture a moment later, but not in the
+    // demo and not when a render fails -- and while the number is being typed,
+    // this is the only thing that answers at all.
+    const thresholdField = document.getElementById('threshold');
+    if (thresholdField && typeof refreshImagePreviewMode === 'function') {
+        thresholdField.addEventListener('input', refreshImagePreviewMode);
+    }
+
     // Text markup also changes the *client* preview -- it is the one setting
     // that decides whether the browser draws emphasis at all -- so it refreshes
     // that too. Without this, switching it produced no visible change until the
@@ -636,6 +646,21 @@ function startActivityPolling() {
 }
 
 /**
+ * Stop the header's activity poll.
+ *
+ * The counterpart `startActivityPolling()` never had: the loop ran from load
+ * until the tab was closed, including for the hours the tab spent in the
+ * background. Nobody reads a pill they cannot see, and every one of those
+ * requests wakes the queue lock on a machine that may be a Raspberry Pi.
+ */
+function stopActivityPolling() {
+    if (activityPollTimer !== null) {
+        clearInterval(activityPollTimer);
+        activityPollTimer = null;
+    }
+}
+
+/**
  * Wire up the print queue: start/stop polling on Queue tab show/hide, the
  * "Clear finished" button, and per-job Cancel buttons (event delegation).
  */
@@ -690,6 +715,17 @@ function setupQueue() {
             const action = btn.getAttribute('data-action');
             const jobId = btn.getAttribute('data-job-id');
             if (!jobId) return;
+            // A button marked inert (today: Open on a job this build has no
+            // compose form for) says why instead of doing nothing. It is not a
+            // real `disabled` button precisely so this can happen -- see the
+            // note next to the button in renderJobs.
+            if (btn.getAttribute('aria-disabled') === 'true') {
+                const reason = btn.getAttribute('title');
+                if (reason && typeof showNotification === 'function') {
+                    showNotification(reason, 'warning');
+                }
+                return;
+            }
             if (action === 'cancel' && typeof cancelJob === 'function') {
                 cancelJob(jobId);
             } else if (action === 'reprint' && typeof reprintJob === 'function') {
@@ -706,6 +742,20 @@ function setupQueue() {
     // first opened, and the header's phase pill with it.
     if (typeof refreshJobs === 'function') refreshJobs();
     startActivityPolling();
+
+    // A hidden tab is not worth polling for: the pill it feeds is off screen,
+    // and what it would have learned in the meantime is one request away on
+    // return. Coming back therefore refreshes immediately rather than waiting
+    // out the 4.5 s interval, so the pill is never stale for the first glance
+    // -- `startActivityPolling()` does that read itself before arming the
+    // timer. Same shape as the relay countdown's handling (relay.js).
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+            stopActivityPolling();
+        } else {
+            startActivityPolling();
+        }
+    });
 }
 
 /**

@@ -328,8 +328,13 @@
     /**
      * Queue a new demo job for a print request and flip it to "done" shortly
      * after, so the UI sees it move through the queue on the next poll.
+     *
+     * @param {string} type - the queue type, as shown in the job row
+     * @param {Object} body - the parsed request body
+     * @param {string} [paramsType] - the `params.type` the UI opens the job by,
+     *   when it differs from the queue type (Text+Image). Defaults to `type`.
      */
-    function queuePrintJob(type, body) {
+    function queuePrintJob(type, body, paramsType) {
         const id = hexId();
         const job = {
             id: id,
@@ -340,7 +345,8 @@
             started_at: null,
             finished_at: null,
             error: null,
-            params: Object.assign({ type: type }, body && typeof body === 'object' ? body : {}),
+            params: Object.assign({ type: paramsType || type },
+                                  body && typeof body === 'object' ? body : {}),
             can_reprint: true
         };
         state.jobs.unshift(job);
@@ -544,16 +550,24 @@
         }
 
         // ----- Print endpoints -----
+        // Two names per endpoint, because the real server uses two: the queue
+        // type it files the job under, and the `params.type` the UI reads to
+        // decide which compose form can open it again. They differ for
+        // Text+Image, which is queued as a "label" but carries the params type
+        // "text-image" (see text_image_controller.py). This mock used to say
+        // "textimage" for both, so a demo job took a code path no real job ever
+        // takes -- and the one type whose Open button was broken was the one
+        // the demo could not reproduce.
         const printMap = {
-            '/text/print': 'text',
-            '/qrcode/print': 'qrcode',
-            '/label/text-qrcode': 'label',
-            '/image/print': 'image',
-            '/pdf/print': 'pdf',
-            '/label/text-image': 'textimage'
+            '/text/print': ['text', 'text'],
+            '/qrcode/print': ['qrcode', 'qrcode'],
+            '/label/text-qrcode': ['label', 'label'],
+            '/image/print': ['image', 'image'],
+            '/pdf/print': ['pdf', 'pdf'],
+            '/label/text-image': ['label', 'text-image']
         };
         if (printMap[p] && method === 'POST') {
-            const jobId = queuePrintJob(printMap[p], body);
+            const jobId = queuePrintJob(printMap[p][0], body, printMap[p][1]);
             return jsonResponse({
                 success: true,
                 job_id: jobId,

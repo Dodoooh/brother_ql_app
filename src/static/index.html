@@ -11,6 +11,17 @@
     <meta name="theme-color" content="#F4F6F9" media="(prefers-color-scheme: light)">
     <meta name="theme-color" content="#0B0E14" media="(prefers-color-scheme: dark)">
     <title>Brother QL Label Printer</title>
+    <!-- The tab icon, drawn inline rather than served as a file.
+         Without a declared icon every browser asks for /favicon.ico, the app has
+         no such route, and the 404 that comes back is the only error in an
+         otherwise clean console -- the kind of noise that trains people to stop
+         reading the console. An SVG data URI settles it with no binary in the
+         repository and no second request.
+         It is a printer with a label coming out, in the same teal as the app's
+         accent, on a filled tile: the glyph is white on teal in both themes, so
+         it holds its shape against a light and a dark tab strip alike, which a
+         bare outline would not. -->
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230891B2'/%3E%3Crect x='9.5' y='4' width='13' height='8' rx='1' fill='%23fff' fill-opacity='.5'/%3E%3Crect x='4' y='11' width='24' height='10' rx='2.5' fill='%23fff'/%3E%3Ccircle cx='24' cy='16' r='1.6' fill='%230891B2'/%3E%3Crect x='8.5' y='17' width='15' height='11' rx='1.5' fill='%23fff' stroke='%230891B2' stroke-width='2'/%3E%3Crect x='11' y='20' width='10' height='1.8' rx='.9' fill='%230891B2'/%3E%3Crect x='11' y='23.6' width='6.5' height='1.8' rx='.9' fill='%230891B2'/%3E%3C/svg%3E">
     <!-- Everything is served from this app. A label printer sits on a network
          that may have no way out, and the previous CDN links failed silently
          when it did not: the stylesheet degraded, but the Bootstrap bundle
@@ -128,12 +139,18 @@
                      phase and for how long, because a job held for four minutes
                      is a thing to notice from wherever you happen to be. Hidden
                      unless something is actually happening, and a click goes to
-                     the queue for the rest of the story. -->
+                     the queue for the rest of the story.
+
+                     The stopwatch is aria-hidden, as its twin in the queue panel
+                     is: it is rewritten on every poll, and inside a live region
+                     that turns a four-minute boot into the same phase name read
+                     out some fifty times. What changed for a screen reader is
+                     the phase, and the phase alone is what stays announceable. -->
                 <button type="button" id="navbar-activity" class="pill pill-activity" hidden
                         title="What the print queue is doing" aria-live="polite">
                     <i class="bi bi-hourglass-split pill-icon" id="navbar-activity-icon" aria-hidden="true"></i>
                     <span id="navbar-activity-label">Waiting</span>
-                    <span class="pill-activity-elapsed" id="navbar-activity-elapsed"></span>
+                    <span class="pill-activity-elapsed" id="navbar-activity-elapsed" aria-hidden="true"></span>
                 </button>
                 <!-- Asks the printer again right now instead of waiting out the
                      30 s poll - the moment for it is a roll change. Icon only at

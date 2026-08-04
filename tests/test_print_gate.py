@@ -287,14 +287,67 @@ def test_a_cold_start_hands_back_the_attempt_schedule(tmp_path):
     service = _service(tmp_path, cold, blind_wait=0.0, probe_pause=0.001)
     service.print_attempt_delays = (5.0, 20.0, 20.0)
 
-    assert service.ensure_printer_powered() == (5.0, 20.0, 20.0)
+    assert service.ensure_printer_powered()["delays"] == (5.0, 20.0, 20.0)
 
     warm = _Probe(PRINTER_STATE_READY)
     service = _service(tmp_path, warm, probe_pause=0.001)
     service.print_attempt_delays = (5.0, 20.0, 20.0)
 
-    assert service.ensure_printer_powered() == (), (
+    answer = service.ensure_printer_powered()
+    assert answer["delays"] == (), (
         "a printer that was already up is printed to once, like it always was")
+    assert answer["message"] is None, "nothing was waited for, so nothing is described"
+
+
+def test_the_gate_says_it_was_the_printer_that_reported_itself_ready(tmp_path):
+    """Only the gate knows what it released a job on, so only it can say.
+
+    The pause before the first attempt is a grace after the release, and the
+    queue cannot describe it truthfully: it does not know what a printer is,
+    let alone whether this one said anything. So the gate hands the sentence
+    over with the schedule.
+    """
+    probe = _Probe(PRINTER_STATE_UNREACHABLE, PRINTER_STATE_READY)
+    service = _service(tmp_path, probe, blind_wait=0.0, probe_pause=0.001)
+    service.print_attempt_delays = (5.0, 20.0, 20.0)
+
+    message = service.ensure_printer_powered()["message"]
+
+    assert "The printer reports itself ready" in message, (
+        "it did report itself ready, and that is worth saying")
+    assert "5s" in message, "the wording names the pause it is describing"
+
+
+@pytest.mark.parametrize("state", [PRINTER_STATE_UNKNOWN, PRINTER_STATE_BLOCKED])
+def test_the_gate_does_not_claim_a_readiness_it_never_heard(tmp_path, state):
+    """The other way a job is released, and it must not borrow the first's words.
+
+    A printer with IPP switched off has no readiness to state, and one reporting
+    a blocking condition has stated the opposite. Both are handed the job anyway,
+    on the strength of having answered steadily -- deliberately, because the gate
+    waits for printers to come up and does not adjudicate whether they can print.
+    What it must not do is tell the user the printer said it was ready.
+    """
+    probe = _Probe(PRINTER_STATE_UNREACHABLE, state)
+    service = _service(tmp_path, probe, blind_wait=0.0, probe_pause=0.001,
+                       answering_settle=0.02)
+    service.print_attempt_delays = (5.0, 20.0, 20.0)
+
+    answer = service.ensure_printer_powered()
+
+    assert answer["delays"] == (5.0, 20.0, 20.0), "it was still switched on here"
+    assert "The printer reports itself ready" not in answer["message"]
+    assert "has not reported itself ready" in answer["message"]
+    assert "5s" in answer["message"]
+
+
+def test_a_schedule_without_a_first_pause_has_nothing_to_describe(tmp_path):
+    """No pause, no sentence: the queue would have nowhere to show it."""
+    probe = _Probe(PRINTER_STATE_UNREACHABLE, PRINTER_STATE_READY)
+    service = _service(tmp_path, probe, blind_wait=0.0, probe_pause=0.001)
+    service.print_attempt_delays = (0.0, 20.0)
+
+    assert service.ensure_printer_powered()["message"] is None
 
 
 def test_the_settle_looks_more_often_than_the_wait_that_precedes_it(tmp_path):
@@ -918,8 +971,15 @@ def test_a_job_waiting_for_its_next_attempt_is_queued_and_cancellable(tmp_path):
     assert queue.get(job_id)["status"] == "cancelled"
 
 
-def test_the_pause_before_the_first_attempt_says_the_printer_is_up(tmp_path):
-    """The first pause is a grace, not a failure, and is worded as one."""
+def test_the_pause_before_the_first_attempt_is_a_grace_and_not_a_retry(tmp_path):
+    """The first pause is a grace, not a failure, and is worded as one.
+
+    A gate that hands back a bare schedule says nothing about why, so the queue
+    says only what it can see from where it stands: a pause is running before
+    the first attempt. It used to assert here that the printer had reported
+    itself ready -- which the queue has no way of knowing, and which is untrue
+    whenever the gate released the job on it merely answering.
+    """
     queue = _queue()
     printed = threading.Event()
 
@@ -931,12 +991,120 @@ def test_the_pause_before_the_first_attempt_says_the_printer_is_up(tmp_path):
                  and queue.get(job_id)),
         what="the pause before the first attempt")
     assert settling["status"] == "queued"
-    assert "reports itself ready" in settling["activity_message"]
+    assert settling["activity_message"] == "Waiting 2s before the first print attempt."
+    assert "reports itself ready" not in settling["activity_message"], (
+        "claimed a readiness nobody told the queue about")
     assert not printed.is_set(), "printed before the grace had run"
 
     queue.cancel(job_id)
     _eventually(lambda: queue.queue_status()["activity"] is None,
                 what="the worker to move on")
+
+
+@pytest.mark.parametrize("said", [
+    "The printer reports itself ready. Giving it 5s before printing.",
+    "The printer is answering but has not reported itself ready. Giving it 5s "
+    "before printing anyway.",
+])
+def test_the_first_pause_shows_the_gate_wording_verbatim(tmp_path, said):
+    """Both of the gate's answers reach the job unaltered.
+
+    The queue displays the sentence and never inspects it, which is what lets
+    the gate distinguish the two releases without the queue learning what a
+    printer state is. Both wordings are exercised so a change to either is a
+    change this test sees.
+    """
+    queue = _queue()
+    printed = threading.Event()
+
+    queue.set_pre_job_gate(lambda: {"delays": (2.0, 2.0), "message": said})
+    job_id = queue.submit("text", "Hello", printed.set)
+
+    settling = _eventually(
+        lambda: (queue.get(job_id)["activity"] == ACTIVITY_PRINTER_SETTLING
+                 and queue.get(job_id)),
+        what="the pause before the first attempt")
+    assert settling["activity_message"] == said
+    assert settling["status"] == "queued", "a job in the grace is not on the wire"
+
+    queue.cancel(job_id)
+    _eventually(lambda: queue.queue_status()["activity"] is None,
+                what="the worker to move on")
+
+
+def test_the_gate_wording_covers_only_the_first_pause(tmp_path):
+    """Later pauses follow a failure, and the queue owns that story.
+
+    It has the printer's own refusal in hand there, which is more use than
+    anything the gate could have said before the job was ever tried.
+    """
+    queue = _queue()
+    failed_once = threading.Event()
+
+    def printing():
+        failed_once.set()
+        raise RuntimeError("Printer is not ready")
+
+    queue.set_pre_job_gate(lambda: {
+        "delays": (0.0, 2.0, 2.0),
+        "message": "The printer reports itself ready. Giving it 5s before printing.",
+    })
+    job_id = queue.submit("text", "Hello", printing)
+    assert failed_once.wait(3.0)
+
+    waiting = _eventually(
+        lambda: (queue.get(job_id)["activity"] == ACTIVITY_RETRYING
+                 and queue.get(job_id)),
+        what="the job to be waiting for its next attempt")
+    assert "Attempt 1 of 3" in waiting["activity_message"]
+    assert "Printer is not ready" in waiting["activity_message"]
+    assert "reports itself ready" not in waiting["activity_message"]
+
+    queue.cancel(job_id)
+    _eventually(lambda: queue.queue_status()["activity"] is None,
+                what="the worker to move on")
+
+
+def test_a_schedule_handed_over_as_a_mapping_still_schedules_the_attempts(tmp_path):
+    """The wording rides along with the schedule; it does not replace it."""
+    queue = _queue()
+    calls = {"n": 0}
+
+    def printing():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("Printer is not ready")
+
+    queue.set_pre_job_gate(lambda: {"delays": (0.0, 0.01, 0.01),
+                                    "message": "Giving it a moment."})
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "done",
+                what="the job to print")
+
+    assert calls["n"] == 3
+
+
+@pytest.mark.parametrize("answer", [
+    {},                                   # a mapping saying nothing
+    {"message": "words, no schedule"},    # wording without a schedule to hang it on
+    {"delays": "5, 20, 20"},              # a schedule that is not one
+])
+def test_a_mapping_the_queue_cannot_use_prints_once_rather_than_failing(tmp_path,
+                                                                        answer):
+    """Still advice from a plain callable, in the richer shape as in the plain one."""
+    queue = _queue()
+    calls = {"n": 0}
+
+    def printing():
+        calls["n"] += 1
+
+    queue.set_pre_job_gate(lambda: answer)
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "done",
+                what="the job to print")
+
+    assert calls["n"] == 1
+    assert queue.get(job_id)["activity"] is None
 
 
 def test_a_gate_returning_nonsense_prints_once_rather_than_failing(tmp_path):
@@ -999,6 +1167,149 @@ def test_cancelling_a_job_in_the_gate_stops_it_claiming_to_be_busy(tmp_path):
     release.set()
     _eventually(lambda: queue.queue_status()["activity"] is None,
                 what="the worker to move on")
+
+
+def test_a_cancelled_job_takes_no_more_of_what_the_gate_says(tmp_path):
+    """The gate cannot be interrupted, so its later reports must not land.
+
+    Cancelling a job held by the gate does not stop the gate -- it is a plain
+    callable that may have a printer's whole boot still ahead of it, up to a few
+    minutes. It goes on reporting each phase to a queue that hands those reports
+    to whichever job the worker has in hand, which is still this one. Written
+    through, they put a live activity back onto a job the user has cancelled,
+    and the UI shows "waiting for the printer" for minutes on an empty queue.
+    """
+    queue = _queue()
+    reached = threading.Event()
+    cancelled = threading.Event()
+    finished = threading.Event()
+    accepted = []
+
+    def gate():
+        queue.report_activity(ACTIVITY_SWITCHING_ON)
+        reached.set()
+        assert cancelled.wait(3.0)
+        # Exactly what the real gate does next: name the phases it goes through.
+        accepted.append(queue.report_activity(ACTIVITY_WAITING_FOR_PRINTER))
+        accepted.append(queue.report_activity(
+            ACTIVITY_PRINTER_SETTLING, "The printer is answering."))
+        finished.set()
+
+    queue.set_pre_job_gate(gate)
+    job_id = queue.submit("text", "Hello", lambda: None)
+    assert reached.wait(3.0)
+    assert queue.get(job_id)["activity"] == ACTIVITY_SWITCHING_ON
+
+    assert queue.cancel(job_id) is True
+    cancelled.set()
+    assert finished.wait(3.0), "the gate did not run to the end of its own wait"
+
+    assert accepted == [False, False], (
+        "a terminal job accepted an activity, or the gate was told it had")
+    job = queue.get(job_id)
+    assert job["status"] == "cancelled"
+    assert job["activity"] is None, "a cancelled job was made to look busy again"
+    assert job["activity_message"] is None
+    assert job["activity_at"] is None
+
+
+def test_the_queue_is_never_idle_and_busy_in_the_same_answer(tmp_path):
+    """queued=0, printing=0 and "here is what is happening" cannot both be true.
+
+    They were: the counts stopped including a job the moment it was cancelled,
+    while the activity carried on being written to it by the gate that was still
+    holding it. One lock, one read, and now one story.
+    """
+    queue = _queue()
+    reached = threading.Event()
+    cancelled = threading.Event()
+    reported = threading.Event()
+
+    def gate():
+        reached.set()
+        assert cancelled.wait(3.0)
+        queue.report_activity(ACTIVITY_PRINTER_SETTLING,
+                              "The printer is answering.")
+        reported.set()
+
+    queue.set_pre_job_gate(gate)
+    job_id = queue.submit("text", "Hello", lambda: None)
+    assert reached.wait(3.0)
+    assert queue.cancel(job_id) is True
+    cancelled.set()
+    assert reported.wait(3.0)
+
+    status = queue.queue_status()
+    assert status["queued"] == 0 and status["printing"] == 0
+    assert status["activity"] is None
+    assert status["activity_message"] is None
+    assert status["activity_at"] is None
+    assert status["activity_job_id"] is None
+
+
+def test_a_gate_that_is_still_running_is_work_the_queue_has_in_hand(tmp_path):
+    """Cancelling the job does not un-switch-on the printer the gate is booting.
+
+    The counts alone said the queue was idle from the moment of the cancel, and
+    the one thing that reads them is the check that stops mains power being cut
+    while there is work. A gate mid-boot is work: it has already closed the relay
+    and is waiting for the device to come up.
+    """
+    queue = _queue()
+    reached = threading.Event()
+    release = threading.Event()
+
+    def gate():
+        reached.set()
+        release.wait(3.0)
+
+    queue.set_pre_job_gate(gate)
+    job_id = queue.submit("text", "Hello", lambda: None)
+    assert reached.wait(3.0)
+    assert queue.has_pending_work() is True
+
+    assert queue.cancel(job_id) is True
+    status = queue.queue_status()
+    assert status["queued"] == 0 and status["printing"] == 0, (
+        "the counts really do read as idle here; that is the whole problem")
+    assert queue.has_pending_work() is True, (
+        "the gate is still holding a printer it switched on")
+
+    release.set()
+    _eventually(lambda: queue.has_pending_work() is False,
+                what="the gate to finish and the queue to fall idle")
+
+
+def test_the_next_job_is_unaffected_by_the_one_cancelled_under_the_gate(tmp_path):
+    """The gate ends its run normally, and the worker carries straight on."""
+    queue = _queue()
+    reached = threading.Event()
+    release = threading.Event()
+    gates = {"n": 0}
+
+    def gate():
+        gates["n"] += 1
+        if gates["n"] == 1:
+            queue.report_activity(ACTIVITY_WAITING_FOR_PRINTER)
+            reached.set()
+            release.wait(3.0)
+            queue.report_activity(ACTIVITY_PRINTER_SETTLING)
+
+    queue.set_pre_job_gate(gate)
+    doomed = queue.submit("text", "Hello", lambda: None)
+    assert reached.wait(3.0)
+    assert queue.cancel(doomed) is True
+
+    printed = threading.Event()
+    second = queue.submit("text", "Again", printed.set)
+    release.set()
+
+    assert printed.wait(3.0), "the worker did not get past the cancelled job"
+    _eventually(lambda: queue.get(second)["status"] == "done",
+                what="the second job to be recorded as done")
+    assert queue.get(second)["activity"] is None
+    assert queue.get(doomed)["activity"] is None
+    assert gates["n"] == 2, "the second job ran the gate exactly once"
 
 
 def test_a_job_simply_waiting_its_turn_reports_no_activity(tmp_path):

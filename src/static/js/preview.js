@@ -439,6 +439,63 @@ function handleTextImagePreview(event) {
 }
 
 /**
+ * The 0-255 pixel cutoff the printer will actually use, derived from the 0-100
+ * Threshold setting exactly the way the server does it.
+ *
+ * These are two different scales for the same idea and they have to agree.
+ * `brother_ql.conversion.convert` maps the setting to a pixel value as
+ * `(100 - threshold) * 255 / 100`, and `printer_service._to_print_appearance`
+ * replicates that formula so the server-rendered preview matches the print.
+ * This preview used a hard-coded 128 instead, i.e. a setting of 49.8 -- which
+ * meant the Threshold field moved the print and the dial next to it, and left
+ * the picture in the browser exactly where it was. A control that does nothing
+ * visible is worse than no control.
+ *
+ * @returns {number} The cutoff in 0-255. Pixels at or above it stay white.
+ */
+function printThresholdCutoff() {
+    const field = document.getElementById('threshold');
+    // Same fallback as the server (`settings.get("threshold", 70)`), for the
+    // case where this runs before the settings have loaded.
+    let threshold = field ? parseFloat(field.value) : NaN;
+    if (!isFinite(threshold)) threshold = 70;
+    return (100 - threshold) * 255 / 100;
+}
+
+/**
+ * Convert one pixel to the grayscale value the server would see.
+ *
+ * Pillow's `convert("L")` -- the first step of the server's black/white
+ * rendering -- uses the ITU-R 601-2 luma coefficients, not the plain average of
+ * the three channels this preview used to take. On a red logo the two disagree
+ * by a wide margin (average 85, luma 76 for pure red), which is enough to land
+ * on opposite sides of the cutoff and show a shape the printer will not print.
+ *
+ * @param {number} r
+ * @param {number} g
+ * @param {number} b
+ * @returns {number} Luminance in 0-255.
+ */
+function toGrayLevel(r, g, b) {
+    return (r * 299 + g * 587 + b * 114) / 1000;
+}
+
+/**
+ * Re-run the current Image Mode over the loaded preview image.
+ *
+ * Called when a setting that feeds the conversion changes (Threshold), so the
+ * black/white preview answers the dial immediately instead of waiting for the
+ * next file selection.
+ */
+function refreshImagePreviewMode() {
+    const previewImage = document.getElementById('preview-image');
+    const imageMode = document.getElementById('image-mode');
+    if (!previewImage || !imageMode) return;
+    if (!previewImage.dataset.originalSrc) return;
+    applyImageMode(previewImage, imageMode.value);
+}
+
+/**
  * Apply image processing mode to the preview image
  * @param {HTMLImageElement} imageElement - The image element to process
  * @param {string} mode - The processing mode (color, bw, bw-dither)
@@ -470,23 +527,34 @@ function applyImageMode(imageElement, mode) {
         const data = imageData.data;
         
         if (mode === 'bw') {
-            // Simple black and white conversion (threshold at 128)
+            // Hard threshold, on the printer's own terms: grayscale by luma,
+            // then the cutoff the Threshold setting works out to. "At or above
+            // stays white" matches the server's `p >= cutoff` comparison, so a
+            // pixel sitting exactly on the boundary falls the same way in both.
+            const cutoff = printThresholdCutoff();
             for (let i = 0; i < data.length; i += 4) {
-                const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-                const val = avg > 128 ? 255 : 0;
+                const gray = toGrayLevel(data[i], data[i + 1], data[i + 2]);
+                const val = gray >= cutoff ? 255 : 0;
                 data[i] = data[i + 1] = data[i + 2] = val;
             }
         } else if (mode === 'bw-dither') {
-            // Floyd-Steinberg dithering
+            // Floyd-Steinberg dithering.
+            //
+            // Dithering deliberately ignores the Threshold setting, because the
+            // server does: with `dither` on it calls Pillow's `convert("1")`,
+            // whose error diffusion is fixed at the 128 midpoint and takes no
+            // threshold argument. Error diffusion is what decides how dark the
+            // result is here, so a second dial on top of it would only make the
+            // preview disagree with the print again -- in the other direction.
             const width = canvas.width;
             const height = canvas.height;
-            
-            // Convert to grayscale first
+
+            // Convert to grayscale first, with the same luma weights as above.
             for (let i = 0; i < data.length; i += 4) {
-                const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
-                data[i] = data[i + 1] = data[i + 2] = avg;
+                const gray = toGrayLevel(data[i], data[i + 1], data[i + 2]);
+                data[i] = data[i + 1] = data[i + 2] = gray;
             }
-            
+
             // Apply dithering
             for (let y = 0; y < height; y++) {
                 for (let x = 0; x < width; x++) {

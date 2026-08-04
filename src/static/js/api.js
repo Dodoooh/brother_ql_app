@@ -356,6 +356,12 @@ async function checkPrinterStatus() {
         if (typeof applyPrinterStatusMedia === 'function') applyPrinterStatusMedia(data);
         const mediaLine = (typeof mediaStatusLine === 'function') ? mediaStatusLine() : '';
 
+        // `mediaLine` arrives ready-made as markup and escapes its own data
+        // (media.js). Everything the printer itself said -- `data.status` below,
+        // `error.message` in the catch -- is plain text from a device on the
+        // network and is escaped here before it goes anywhere near innerHTML.
+        // The two sat side by side in the same template with only one of them
+        // escaped, which is the kind of asymmetry that reads as intentional.
         if (data.available) {
             // Update status result in modal
             if (statusResult) {
@@ -365,7 +371,7 @@ async function checkPrinterStatus() {
                             <i class="bi bi-check-circle-fill me-2 fs-4"></i>
                             <div>
                                 <strong>Printer is available</strong><br>
-                                ${data.status}${mediaLine}
+                                ${escapeHtml(data.status)}${mediaLine}
                             </div>
                         </div>
                     </div>
@@ -396,7 +402,7 @@ async function checkPrinterStatus() {
                             <i class="bi bi-exclamation-triangle-fill me-2 fs-4"></i>
                             <div>
                                 <strong>${blocked ? 'Printer cannot print right now' : 'Printer is not available'}</strong><br>
-                                ${data.status}${mediaLine}
+                                ${escapeHtml(data.status)}${mediaLine}
                             </div>
                         </div>
                     </div>
@@ -435,7 +441,7 @@ async function checkPrinterStatus() {
                         <i class="bi bi-x-circle-fill me-2 fs-4"></i>
                         <div>
                             <strong>${isConnectionError ? 'Connection Error' : 'Error'}</strong><br>
-                            ${error.message}
+                            ${escapeHtml(error.message)}
                             ${isConnectionError ? '<br><br>Please check that:<ul class="mb-0 ps-3"><li>The printer is turned on</li><li>The printer is connected to the network</li><li>The IP address is correct</li></ul>' : ''}
                         </div>
                     </div>
@@ -1795,6 +1801,52 @@ function updateQueueBadge(jobs) {
 // (e.g. Open) can read the job's `params` without an extra round-trip.
 const jobsById = {};
 
+// The `params.type` values `openJob()` has a compose form for. This is the
+// list that decides whether the Open button is offered as a working control or
+// as an explanation, so it lives next to the renderer rather than inside
+// openJob(): the row has to know before the click, not after it.
+//
+// Deliberately absent: "calibration". A calibration sweep is generated from the
+// settings dialog, not composed in a tab, so there is no form to load it back
+// into and never will be -- Reprint is the operation that makes sense for it.
+const OPENABLE_JOB_PARAM_TYPES = ['text', 'qrcode', 'label', 'image', 'pdf', 'text-image'];
+
+/**
+ * Why Open cannot be offered for a job of this type -- a sentence for the
+ * button's tooltip and for the notification if it is pressed anyway.
+ * @param {?string} type - the job's `params.type`
+ * @returns {string}
+ */
+function unsupportedOpenReason(type) {
+    if (type === 'calibration') {
+        return 'A calibration sweep has no compose form to open — use Reprint to run it again';
+    }
+    if (!type) {
+        return 'This job did not record what it was, so there is nothing to open';
+    }
+    return `No compose form for "${type}" jobs — use Reprint to run it again`;
+}
+
+/**
+ * Whether the Open button can do anything for this job.
+ *
+ * The server marks every job `can_reprint: true` without qualification, and it
+ * is right to: re-running a stored job needs nothing from this side. Opening it
+ * does -- it needs a form built for that kind of job -- so the two buttons
+ * cannot share one flag. They did, and the result was an Open button on every
+ * calibration job that led straight to an error message.
+ *
+ * @param {Object} job - a job as returned by /api/v1/jobs
+ * @returns {{supported: boolean, reason: string}}
+ */
+function jobOpenSupport(job) {
+    const type = job && job.params ? job.params.type : null;
+    if (type && OPENABLE_JOB_PARAM_TYPES.indexOf(type) !== -1) {
+        return { supported: true, reason: '' };
+    }
+    return { supported: false, reason: unsupportedOpenReason(type) };
+}
+
 /**
  * Render the list of jobs into the Queue panel.
  */
@@ -1826,9 +1878,21 @@ function renderJobs(jobs) {
         const cancelBtn = job.status === 'queued'
             ? `<button type="button" class="btn-ghost btn-sm queue-cancel" data-action="cancel" data-job-id="${escapeHtml(job.id)}"><i class="bi bi-x-lg"></i> Cancel</button>`
             : '';
+        // Reprint follows the server's flag; Open follows what this build can
+        // actually put on screen. When it cannot, the button stays -- greyed,
+        // marked `aria-disabled`, carrying the reason as its tooltip -- rather
+        // than disappearing: a control that is missing on some rows and present
+        // on others reads as a bug, and a control that vanishes explains
+        // nothing. It is left clickable on purpose, because a real `disabled`
+        // button shows no tooltip and swallows the click, which would leave the
+        // reason unreachable for anyone not hovering with a mouse.
+        const openSupport = jobOpenSupport(job);
+        const openBtn = openSupport.supported
+            ? `<button type="button" class="btn-ghost btn-sm queue-open" data-action="open" data-job-id="${escapeHtml(job.id)}"><i class="bi bi-box-arrow-up-right"></i> Open</button>`
+            : `<button type="button" class="btn-ghost btn-sm queue-open" data-action="open" data-job-id="${escapeHtml(job.id)}" aria-disabled="true" title="${escapeHtml(openSupport.reason)}"><i class="bi bi-box-arrow-up-right"></i> Open</button>`;
         const reprintBtns = job.can_reprint === true
             ? `<button type="button" class="btn-ghost btn-sm queue-reprint" data-action="reprint" data-job-id="${escapeHtml(job.id)}"><i class="bi bi-arrow-clockwise"></i> Reprint</button>` +
-              `<button type="button" class="btn-ghost btn-sm queue-open" data-action="open" data-job-id="${escapeHtml(job.id)}"><i class="bi bi-box-arrow-up-right"></i> Open</button>`
+              openBtn
             : '';
         // Delete is available for any job that is not currently printing.
         const deleteBtn = job.status !== 'printing'
@@ -2035,10 +2099,20 @@ function applyHeaderActivity(activity, elapsed) {
     if (icon) icon.className = `bi ${meta.icon} pill-icon`;
     const label = document.getElementById('navbar-activity-label');
     if (label && label.textContent !== name) label.textContent = name;
+    // Every write inside this live region is guarded against writing what is
+    // already there, the way the queue panel's strip is. The stopwatch is also
+    // marked aria-hidden in the markup, so this second measure is only about
+    // not disturbing the region at all -- a mutation to a hidden descendant is
+    // still a mutation, and the announcement rules for that are not the same in
+    // every screen reader.
     const elapsedEl = document.getElementById('navbar-activity-elapsed');
-    if (elapsedEl) elapsedEl.textContent = elapsed || '';
+    const elapsedText = elapsed || '';
+    if (elapsedEl && elapsedEl.textContent !== elapsedText) {
+        elapsedEl.textContent = elapsedText;
+    }
     pill.classList.toggle('is-retrying', activity === 'retrying');
-    pill.title = `Print queue: ${meta.label}`;
+    const title = `Print queue: ${meta.label}`;
+    if (pill.title !== title) pill.title = title;
     pill.hidden = false;
 }
 
@@ -2507,16 +2581,36 @@ async function openJob(jobId) {
             if (!loaded) return;
             activateComposeTab('image-tab');
             dispatchOn('image-input', 'change');
-        } else if (type === 'pdf') {
+        } else if (type === 'text-image') {
+            // Spelled with a hyphen because that is what the server writes
+            // (`text_image_controller.py`). The *queue* type of these jobs is
+            // "label", so this branch is the only thing that can tell them
+            // apart from a Text+QR job -- which is exactly why they used to
+            // fall through to "Unsupported job type".
+            //
+            // The layout fields are carried twice by the server: once at the
+            // top level of `params` and once folded into `settings` under the
+            // names the service layer reads. The top level is the form's own
+            // vocabulary, so it is preferred and the settings copy is the
+            // fallback for anything a future server stops sending.
             applySettingsToForm(settings);
-            setFieldValue('pdf-pages', params.pages);
-            setFieldValue('pdf-scale-mode', params.scale_mode);
-            const loaded = await loadJobFileIntoInput(jobId, 'pdf-input', params.filename || 'reprint.pdf');
+            setFieldValue('textimage-text', params.text);
+            const fontSize = params.font_size != null ? params.font_size : settings.text_font_size;
+            setFieldValue('textimage-font-size', fontSize != null ? String(fontSize) : null);
+            setFieldValue('textimage-alignment', params.alignment || settings.text_alignment);
+            setFieldValue('textimage-position', params.position || settings.image_position);
+            const loaded = await loadJobFileIntoInput(jobId, 'textimage-input', params.filename || 'reprint-image');
             if (!loaded) return;
-            activateComposeTab('pdf-tab');
-            dispatchOn('pdf-input', 'change');
+            activateComposeTab('textimage-tab');
+            dispatchOn('textimage-input', 'change');
         } else {
-            showNotification('Unsupported job type', 'error');
+            // Reached only for a job whose type this build has no form for --
+            // today a calibration sweep, tomorrow whatever a newer server
+            // adds. The button for those is rendered inert with the reason on
+            // it (see `jobOpenSupport`), so this is the belt to that braces:
+            // it also catches an "Open" triggered before the row was
+            // re-rendered, and it names the type instead of shrugging.
+            showNotification(unsupportedOpenReason(type), 'warning');
             return;
         }
     } catch (error) {

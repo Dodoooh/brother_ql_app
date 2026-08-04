@@ -1221,16 +1221,25 @@ class RelayPowerService:
         return printer_service.last_print_origin()
 
     def _default_pending_work_probe(self) -> bool:
-        """Whether the print queue holds anything queued or printing."""
+        """Whether the print queue still has work of any kind.
+
+        Anything queued or printing, and also a job the queue's worker is still
+        holding after it reached a terminal state -- which is the case that
+        matters most here. Cancelling a job does not stop the gate that job is
+        sitting in, and that gate may be halfway through switching this very
+        printer's mains supply on. Reading only the queued/printing counts made
+        the queue look idle from that moment on, and a turn-off falling due in
+        the same window would then cut power to a printer the app was in the
+        middle of booting.
+        """
         from src.services.queue_service import print_queue
 
         try:
-            status = print_queue.queue_status()
+            return bool(print_queue.has_pending_work())
         except Exception as e:  # noqa: BLE001 - unknown means "assume busy"
             logger.warning("Could not read queue status; treating it as busy",
                            error=str(e))
             return True
-        return bool(status.get("queued") or status.get("printing"))
 
     # ------------------------------------------------------------------ #
     # turn_on
@@ -1401,7 +1410,49 @@ class RelayPowerService:
             if self._sleep(pause):
                 return outcome
 
-    def ensure_printer_powered(self) -> Tuple[float, ...]:
+    @staticmethod
+    def _gate_answer(delays: Tuple[float, ...] = (),
+                     message: Optional[str] = None) -> Dict[str, Any]:
+        """The gate's answer to the print queue.
+
+        Two fields and nothing else: how to schedule the print attempts, and
+        what the pause before the first one is waiting on. The queue displays
+        the message and never inspects it, so nothing about relays, webhooks or
+        printer states crosses over -- the queue still only knows that something
+        may have to happen before a job starts, and that it may have to be
+        described while it does.
+        """
+        return {"delays": tuple(delays), "message": message}
+
+    def _first_pause_message(self, delays: Tuple[float, ...],
+                             stated_ready: bool) -> Optional[str]:
+        """Say what the pause before the first print attempt is waiting on.
+
+        The gate releases a job on either of two readings, and they are not the
+        same claim (see :meth:`_wait_until_ready`):
+
+        * the printer stated over IPP that it can print, or
+        * it merely answered steadily for :attr:`answering_settle` without ever
+          saying so -- no IPP, or something reported as in the way.
+
+        The queue used to announce the first of those in both cases, because the
+        gate handed back a schedule and nothing else. It is the difference
+        between "the printer says it is ready" and "the printer is there and has
+        not said", which is exactly what somebody watching a job that will not
+        print needs to know.
+
+        Returns None when there is no pause to describe.
+        """
+        if not delays or delays[0] <= 0:
+            return None
+        seconds = delays[0]
+        if stated_ready:
+            return (f"The printer reports itself ready. Giving it {seconds:.0f}s "
+                    f"before printing.")
+        return (f"The printer is answering but has not reported itself ready. "
+                f"Giving it {seconds:.0f}s before printing anyway.")
+
+    def ensure_printer_powered(self) -> Dict[str, Any]:
         """Make sure the printer is up before a job is started.
 
         This is the queue's pre-job gate. It returns quietly in the overwhelming
@@ -1424,11 +1475,14 @@ class RelayPowerService:
         than swallowed.
 
         Returns:
-            When the printer was switched on here, the pauses before each print
-            attempt (:data:`PRINT_ATTEMPT_DELAYS_SECONDS`): the caller is being
-            told it is printing into a boot window and should try more than
-            once. An empty tuple otherwise, meaning "print once, now" -- which
-            is every job at a printer that was already up.
+            The queue's marching orders, as ``{"delays": ..., "message": ...}``.
+            When the printer was switched on here, ``delays`` is the pauses
+            before each print attempt (:data:`PRINT_ATTEMPT_DELAYS_SECONDS`):
+            the caller is being told it is printing into a boot window and
+            should try more than once, and ``message`` says what the first of
+            those pauses is waiting on. An empty schedule otherwise, meaning
+            "print once, now" -- which is every job at a printer that was
+            already up, and has nothing to describe.
 
         Raises:
             RelayWebhookError: When the webhook cannot be delivered, or when the
@@ -1441,18 +1495,18 @@ class RelayPowerService:
         # being off must mean no outbound request AND no extra work at all, so
         # an install that ignores it behaves exactly as it did before.
         if not self.is_enabled(settings):
-            return ()
+            return self._gate_answer()
         url = self.turn_on_url(settings)
         if not url:
             logger.warning("Relay power control is enabled but no turn_on URL is "
                            "configured; not switching the printer on")
-            return ()
+            return self._gate_answer()
 
         state, blocking = self._probe(settings)
         if state != PRINTER_STATE_UNREACHABLE:
             logger.debug("Printer already answering; no relay turn_on needed",
                          state=state, blocking_reasons=blocking)
-            return ()
+            return self._gate_answer()
 
         logger.info("Printer not reachable; switching it on via the relay")
         waits = tuple(self.turn_on_waits)
@@ -1489,7 +1543,10 @@ class RelayPowerService:
                 # the job goes on to fail, the relay must still be scheduled to
                 # switch off instead of being left on indefinitely.
                 self.arm()
-                return tuple(self.print_attempt_delays)
+                delays = tuple(self.print_attempt_delays)
+                return self._gate_answer(
+                    delays,
+                    self._first_pause_message(delays, outcome["stated_ready"]))
 
         elapsed = time.monotonic() - started
         # Say what it saw, when it saw anything. "Never answered" and "answered

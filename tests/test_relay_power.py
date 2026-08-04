@@ -40,7 +40,7 @@ from src.services.relay_service import (
     RelayPowerService,
 )
 from src.services.settings_service import SettingsService
-from src.utils.exceptions import PrinterError, RelayWebhookError, ValidationError
+from src.utils.exceptions import InternalError, RelayWebhookError, ValidationError
 from src.utils.uri_validation import validate_printer_uri, validate_webhook_url
 
 HOUR = 3600
@@ -856,6 +856,63 @@ def test_a_printing_job_also_holds_the_relay_open(tmp_path):
         queue._order.append("j1")
         assert service.tick() == "deferred"
         assert sender.calls == []
+
+
+def test_a_gate_still_bringing_a_printer_up_holds_the_relay_open(tmp_path):
+    """The one path that cuts mains power must not fire during a boot.
+
+    Cancelling a job that is sitting in the gate leaves the gate running: it has
+    already sent turn_on, the relay is closed, and it is waiting out a boot that
+    can take a couple of minutes. Counting only queued and printing jobs made the
+    queue read as idle from the instant of the cancel, so a turn-off falling due
+    in that window went out and cut power to the printer the app was in the
+    middle of switching on.
+
+    Driven end to end through a real queue and its worker, because the bug lived
+    exactly in the seam between the two services.
+    """
+    queue = PrintQueueService()
+    queue._sweep_job_files = lambda: None
+    sender = _Sender()
+    service = RelayPowerService(
+        state_file=str(tmp_path / "s.json"),
+        settings_provider=_Settings(_settings()),
+        readiness_probe=lambda _s: True,
+        pending_work_probe=None,     # the real queue-backed probe, as shipped
+        sender=sender,
+    )
+
+    in_the_gate = threading.Event()
+    release = threading.Event()
+
+    def gate():
+        in_the_gate.set()
+        release.wait(5)
+
+    queue.set_pre_job_gate(gate)
+    with patch("src.services.queue_service.print_queue", queue):
+        queue.start()
+        job_id = queue.submit("text", "waiting", lambda: None)
+        assert in_the_gate.wait(5)
+
+        # A turn-off that is overdue, and a job the user then cancels.
+        service.note_print_activity(time.time() - (8 * HOUR))
+        assert queue.cancel(job_id) is True
+        assert queue.queue_status()["queued"] == 0, "the counts do read as idle"
+
+        assert service.tick() == "deferred", (
+            "cut mains power while the gate was still bringing the printer up")
+        assert sender.calls == []
+
+        # The gate finishes; now the queue really is idle and the moment stands.
+        release.set()
+        assert _drain(queue)
+        deadline = time.time() + 5
+        while queue.has_pending_work() and time.time() < deadline:
+            time.sleep(0.01)
+        service.note_print_activity(time.time() - (8 * HOUR))
+        assert service.tick() == ACTION_TURN_OFF
+        assert sender.actions == [ACTION_TURN_OFF]
 
 
 def test_the_schedule_survives_a_restart(tmp_path):
@@ -1682,11 +1739,21 @@ def test_the_endpoint_turns_a_refusal_into_a_bad_request():
     assert exc.value.code == "VALIDATION_ERROR"
 
 
-def test_the_endpoint_turns_an_unexpected_failure_into_a_printer_error():
+def test_the_endpoint_turns_an_unexpected_failure_into_a_generic_internal_error():
+    """An unexpected failure is neither the relay's fault nor the caller's business.
+
+    It used to become ``PrinterError("Error sending relay webhook: <raw text>")``,
+    which blamed the printer and handed the caller the exception verbatim. Now it
+    becomes an InternalError whose message says nothing about the cause -- the
+    cause is in the log, findable by the error_id the response carries.
+    """
     stub = _RelayStub(error=RuntimeError("the disk is on fire"))
     with patch("src.api.printer_controller.relay_service", stub):
-        with pytest.raises(PrinterError):
+        with pytest.raises(InternalError) as exc:
             printer_controller.send_relay_power_webhook({"action": "turn_on"})
+    assert "disk is on fire" not in str(exc.value)
+    assert exc.value.code == "INTERNAL_SERVER_ERROR"
+    assert exc.value.details["error_id"]
 
 
 def test_the_status_endpoint_still_sends_nothing(tmp_path):

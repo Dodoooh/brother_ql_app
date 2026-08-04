@@ -867,6 +867,20 @@ body.dark-mode .queue-badge { color: #06222B; }
     border-radius: 8px;
 }
 
+/* A ghost button the interface offers but cannot carry out for this row --
+   today only "Open" on a job with no compose form behind it. It keeps its place
+   in the row so the action bar does not change shape from job to job, and it
+   stays clickable (not `disabled`) so the tooltip appears and a press can say
+   why; the pointer is the one that means "this will not go anywhere". */
+.btn-ghost[aria-disabled="true"] {
+    opacity: .45;
+    cursor: not-allowed;
+}
+.btn-ghost[aria-disabled="true"]:hover {
+    border-color: var(--border);
+    color: var(--ink);
+}
+
 /* Danger-accented ghost buttons (Stop / Clear all) */
 .btn-ghost.btn-danger-ghost:hover,
 .btn-ghost.btn-danger-ghost:focus-visible {

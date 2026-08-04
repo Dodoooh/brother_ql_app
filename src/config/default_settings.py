@@ -47,6 +47,64 @@ BLEED_LIMIT_MM = 5.0
 
 
 # --------------------------------------------------------------------------- #
+# Resource limits on what a single upload may cost the app.
+#
+# These are not print settings and deliberately live outside ``settings.json``:
+# they bound how much memory one HTTP request can make the process allocate,
+# which is an operator's decision about the machine, not a user's decision about
+# a label. Both are therefore read from the environment
+# (``MAX_PDF_PAGES`` / ``MAX_UPLOAD_IMAGE_PIXELS``) so a deployment can move
+# them without a rebuild, and both fall back to the numbers below whenever the
+# environment says something the app cannot make sense of -- a bad value must
+# never keep the app from starting.
+#
+# An explicit ``0`` means "no limit". This is a single-tenant, self-hosted app,
+# and somebody who really does print a 200-page manual on a box with the RAM to
+# spare must be able to say so; typing a zero is an unambiguous act. An *empty*
+# variable does NOT disable the limit -- ``MAX_PDF_PAGES=`` in a compose file
+# reads as "not configured yet", and a protection that silently disappears
+# because a variable was left blank is the wrong way round.
+# --------------------------------------------------------------------------- #
+
+# How many PDF pages one print job may rasterise.
+#
+# The cost this bounds is memory, not paper: ``render_pdf`` builds the whole
+# selection as a list of PIL images before the first label is sent, so peak
+# usage is the sum of every selected page. pypdfium2 hands back RGB, 3 bytes per
+# pixel, and the render scale is ``dpi / 72``:
+#
+#     62 x 29 mm label page, 300 dpi ->   732 x  342 px ~   0.8 MB
+#     A4 page,               300 dpi ->  2480 x 3508 px ~  26 MB
+#     A4 page,               600 dpi ->  4960 x 7016 px ~ 104 MB
+#
+# Label-sized pages -- what this app is for -- are free at any sane page count;
+# the ceiling exists for the A4-and-larger case, where 20 pages is about 0.5 GB
+# at 300 dpi. That is survivable on a container without a memory limit, whereas
+# the unbounded path was not: the pentest had a 40-page document accepted, and
+# nothing stopped a thousand-page one.
+#
+# 20 also sits comfortably above the 12 pages the preview renders, so a job can
+# still be larger than what the UI shows at a glance. Deployments that print
+# multi-page documents at ``dpi_600`` (four times the memory per page) should
+# lower it rather than trust this default.
+DEFAULT_MAX_PDF_PAGES = 20
+
+# How many pixels an uploaded image may contain before it is rejected.
+#
+# This is the number the API controllers already hand Pillow's own
+# ``Image.MAX_IMAGE_PIXELS``, made into a hard limit. Pillow's setting is a
+# *warning* threshold: it only raises ``DecompressionBombError`` above twice the
+# value, so with 50 MP configured everything up to 100 MP was decoded anyway --
+# a 79 KB, 8000 x 8000 PNG (64 MP) went through the whole resize pipeline, which
+# is ~64 MB as grayscale and ~190 MB as RGB in memory.
+#
+# 50 MP is far above anything that can reach a label: a 62 x 100 mm label is
+# 0.9 MP at 300 dpi and 3.5 MP at 600 dpi, and a full-frame camera file is
+# 20-50 MP, so even a photo straight off a modern sensor still prints.
+DEFAULT_MAX_UPLOAD_IMAGE_PIXELS = 50_000_000
+
+
+# --------------------------------------------------------------------------- #
 # Relay power control.
 #
 # The printer's mains supply can be switched by a relay driven over a webhook,

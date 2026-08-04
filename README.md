@@ -9,7 +9,7 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 ## 🚀 Features
 
-- **🖋 Text Printing**: Easily print HTML-formatted text, such as `<b>Bold</b>` or `<span color="red">Red</span>`, for precise label designs.
+- **🖋 Text Printing**: Print multi-line text; line breaks are taken from newlines and from `<br>`, and any other HTML tag is dropped while its text is kept. Emphasis is opt-in: switch on `text_markup` and `**bold**` and `*italic*` are honoured on text labels instead of being printed as typed.
 
 - **🖼 Image Printing**: Upload and print images effortlessly to create visually appealing labels.
 
@@ -49,6 +49,10 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **🔄 Error Handling**: Robust error handling with informative messages and toast notifications.
 
+- **🔌 Runs on an isolated network**: every asset the interface needs — Bootstrap's stylesheet and bundle, the icon font, the two web fonts and the QR library — is served by the app itself. Nothing is fetched from a CDN at load time, so a LAN with no route out gets the full interface rather than a page that looks fine and does nothing.
+
+- **🎪 Live Demo**: try the interface without installing anything at [dodoooh.github.io/brother_ql_app](https://dodoooh.github.io/brother_ql_app/). Demo mode is a bundled layer that answers every `/api/v1` call from mocked data (no printer, no backend, every action simulated), and its previews are drawn in the browser rather than rendered true-to-print. It activates only on a `*.github.io` host or with `?demo` in the URL, so a normal installation never touches it. The hosted demo may carry a self-hosted analytics snippet, which the Pages workflow injects into the published artifact only — it is in no clone, fork or Docker image.
+
 ## 📸 Screenshots
 
 ### Desktop
@@ -62,6 +66,8 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 ### Mobile
 ![Mobile UI](doc/images/screenshot_mobile.png)
+
+*The screenshots predate the loaded-media pill, the queue's phase rail and the relay panel in Settings, so the header carries fewer pills there than it does now.*
 
 
 ## 🏗️ Architecture
@@ -81,8 +87,10 @@ The application is available as a Docker image from DockerHub:
 
 ```bash
 # DockerHub
-docker pull dodoooh/brother_ql_app:latest  # or a specific version: dodoooh/brother_ql_app:3.1.0
+docker pull dodoooh/brother_ql_app:latest  # or a specific version: dodoooh/brother_ql_app:3.1.0 (the latest stable release)
 ```
+
+Inside the container the app is served by **gunicorn** (`wsgi:application`, one worker, four threads), started by `docker-entrypoint.sh`. One worker is a requirement rather than a tuning choice: keep-alive, the print queue and the relay scheduler are single-process singletons owning background threads, and a second worker would run a second copy of each. Setting `FLASK_ENV=development` makes the entrypoint start the Flask development server instead.
 
 ### Using Docker Compose
 
@@ -154,6 +162,14 @@ Open your browser and navigate to [http://localhost:5000](http://localhost:5000)
 
 3. Access the application at [http://localhost:5000](http://localhost:5000)
 
+To run it the way the container does, serve `wsgi.py` with gunicorn instead:
+
+```bash
+gunicorn --workers 1 --threads 4 --bind 0.0.0.0:5000 wsgi:application
+```
+
+Stay at one worker and do not use `--preload`: the keep-alive, queue and relay singletons own background threads that must live in the worker process, and a second worker would duplicate all of them.
+
 ## Configuration
 
 The application settings can be configured in the `data/settings.json` file. This file contains the default printer settings as well as the global options described below.
@@ -176,6 +192,7 @@ The application settings can be configured in the `data/settings.json` file. Thi
 - `cut_mode`: When to cut the tape — `each` (after every label), `end` (only after the last), or `none`
 - `dpi_600`: Whether to print at 600 dpi where supported (`true`/`false`)
 - `hq`: Whether to use high-quality printing (`true`/`false`)
+- `text_markup`: Whether `**bold**` and `*italic*` in the text are honoured or printed as typed (`true`/`false`, default `false`). Off by default on purpose: a label is normally set in DejaVu Sans Bold, which is the more legible weight on a thermal printer but leaves nothing heavier for bold to be, so honouring the markers drops the base to the regular weight and every label set that way comes out lighter. Applies to the text label endpoints (`/text/print`, `/text/preview`); the QR and image layouts render text through their own paths and print the markers as typed
 - `keep_alive_enabled`: Whether to keep the printer connection alive (only needed for network printers)
 - `keep_alive_interval`: The interval for keep-alive messages (in seconds, minimum `10`)
 - `keep_alive_mode`: `forever` to keep the printer awake continuously, or `timed` to keep it awake only for a window after each print
@@ -183,6 +200,7 @@ The application settings can be configured in the `data/settings.json` file. Thi
 - `ipp_port`: The IPP port used to query printer status (default `631`)
 - `media_auto_switch`: Whether to adopt the label type the printer reports as loaded when it disagrees with `label_size` (`true`/`false`, default `false`). Off by default on purpose: every other setting here changes what happens when you ask for something, while this one changes a stored setting without you acting at all. Where the loaded medium is ambiguous and nothing resolves it, it switches nothing and reports the ambiguity instead. See [Loaded Media Detection](#loaded-media-detection)
 - `owned_media`: The media you actually own, as label identifiers, e.g. `["62red", "d24"]` (default `[]`). A hint for resolving an ambiguous detection and for putting your own media at the top of the label picker, never a filter: a roll the printer reports is read, identified and reported whether or not it appears here. Unknown identifiers are rejected by name, because an entry here helps choose a label size on your behalf
+- `media_preference`: The variant that wins for a medium, keyed by the medium's plain variant, e.g. `{"62": "62red"}` (default `{}`) — "when a 62 mm roll is loaded, I mean the red one". It is consulted **first** when an ambiguous detection has to be resolved, ahead of `media_memory`, `owned_media` and the plain-variant default: the memory is inferred (what happened last) while a preference is stated (what was meant), so one contrary pick on some Tuesday does not repeal a standing instruction. Empty by default, so an installation that never sets one resolves exactly as it did before. An entry naming no medium, one keyed on a variant (`{"62red": "62red"}`) or one pairing a medium with a label type it cannot be (`{"62": "d24"}`) is rejected by name; an entry for a medium with only one variant (`{"d24": "d24"}`) is inert rather than rejected, since it can neither change an outcome nor break one
 - `media_memory`: The label type last settled on for each medium, keyed by the medium's plain variant, e.g. `{"62": "62red"}` (default `{}`). Maintained by the app while `media_auto_switch` is on; it is what turns "guess between `62` and `62red`" into "recall what was in use last time this roll was loaded"
 - `relay_webhook_enabled`: Whether to switch the printer's mains supply through a relay driven over a webhook (`true`/`false`, default `false`). While it is off no outbound request is ever made and every other `relay_*` setting is inert. See [Relay Power Control](#relay-power-control)
 - `relay_webhook_turn_on_url`: The URL POSTed to switch the printer on. Required once `relay_webhook_enabled` is `true`. `http://` and `https://` to LAN and private addresses only; loopback, link-local and cloud metadata endpoints are refused
@@ -230,9 +248,12 @@ Identification returns every candidate the reading is consistent with, and the r
 
 Switching can also be automatic. Turn on `media_auto_switch` and the app adopts the detected roll by itself, resolving an ambiguous one in a fixed order, where the first step that yields exactly one identifier wins:
 
-1. **Memory** — the label type last settled on for this medium (`media_memory`, maintained by the app).
-2. **Ownership** — the only candidate that appears in `owned_media`.
-3. **The plain variant** — `62` over `62red`, `12` over `12+17`, `103` over `104`.
+1. **Preference** — the variant declared for this medium in `media_preference`, e.g. `{"62": "62red"}`.
+2. **Memory** — the label type last settled on for this medium (`media_memory`, maintained by the app).
+3. **Ownership** — the only candidate that appears in `owned_media`.
+4. **The plain variant** — `62` over `62red`, `12` over `12+17`, `103` over `104`.
+
+The preference comes first deliberately, and it is the step that exists because ownership was supposed to settle these three media and mostly cannot: `12`/`12+17` and `103`/`104` are one physical roll under two identifiers, so owning "both" is not a thing anyone can do, and `62`/`62red` is only settled by ownership for someone who owns the red roll and no plain one. Own a black roll and a black/red roll — the ordinary case for the one medium where guessing wrong costs a finished bad label — and ownership narrows nothing. A preference states what was meant, where the memory only records what happened last, so a single contrary run does not quietly repeal it: the pick is still remembered, it simply does not outrank the instruction. A preferred or remembered label that is not among the current candidates is skipped rather than trusted.
 
 Each of those is something you told the app; none is a tie-break the app invented. If none of them decides, nothing is switched and the ambiguity is surfaced exactly as it is on the manual path. Automatic switching never moves away from a label type that already fits what is loaded (`62red` stays `62red` on a 62 mm roll), it is announced rather than modal, and it stands down for the current roll right after a manual choice. The media you own also leads the label picker under **My media**, below the roll that is actually loaded.
 
@@ -256,6 +277,18 @@ The webhook is a POST with a JSON body; `action` is the only field a relay flow 
 
 If the endpoint needs a credential, set `RELAY_WEBHOOK_AUTHORIZATION` in the environment and its value is sent verbatim as the `Authorization` header. It is deliberately not a setting: `GET /settings` returns the configuration in full to every client that can read it, and a header that can switch mains power does not belong in that response.
 
+**Firing the relay by hand.** `POST /api/v1/printers/relay-power/send` sends one `turn_on` or `turn_off` webhook immediately and reports what came back — the URL, the exact body, the relay's HTTP status, and whether a credential went with it — so a relay can be proved to answer without queueing a print job or waiting out a four-hour window. ⚠️ **It really switches the relay:** `turn_off` cuts mains power to the printer, which is why the action is named in a POST body rather than reachable by following a link. It requires `relay_webhook_enabled` and a URL for the action, but deliberately **not** an armed schedule — whether the relay switches off is worth establishing *before* arming something that will cut power unattended. The schedule is untouched in either direction: a hand-sent `turn_off` does not clear a scheduled one, and a hand-sent `turn_on` does not arm one, because the scheduled moment is measured from the last print and a button press is not a print. The HTTP status describes the request, not the relay: a relay that refused, answered 401 or never answered comes back as `200` with `success: false` and the error; `400` means nothing was sent at all. A delivery that could not be confirmed reports mains power as `unknown` rather than `off`, since the relay may well have acted before its answer failed.
+
+**Waiting for the printer, and printing into its boot window.** The gate in front of every job only acts on a printer that does not answer at all; a printer that answers is left alone entirely — no webhook, no wait, no retries — so a cover-open job fails at the printer with the printer's own reason. For a printer that is not there:
+
+- After the `turn_on` webhook the printer is left alone for **20 s** before it is looked at at all. Nothing answers before about 15.7 s from mains-on, and an unanswered probe costs 3.5 s, so probing into that window spends the budget on a question whose answer is known.
+- Then it is probed for up to **120 s**. If the printer still has not come up, a **second** `turn_on` goes out with a shorter budget (20 s + 60 s) — that attempt is for a request that was accepted but not acted on, not for a printer that is merely slow. Worst case end to end is therefore about **220 s** before the job fails, and the failure names the webhooks delivered, the blind wait, and how many probes were made over what period.
+- The job is released on the printer's **own "ready"**, not on a fixed settle. A printer that answers without ever stating readiness — no IPP, or a blocking condition such as a transient `media-empty` reported while booting — is released after **20 s of continuous answering** instead, deliberately: the gate's job is to wait for the printer to come up, not to adjudicate whether it can print. Probing tightens to one second once anything answers, because the IPP port drops out for about 1.4 s partway through the boot and a coarser probe steps straight over the hole.
+- A job whose printer *this app* just switched on is then tried **up to three times, with 5 s, 20 s and 20 s before the attempts**, because a refusal in the boot window says as much about the moment as about the job. Between attempts the job goes back to `queued` carrying the activity `retrying`: it is not on the wire and stays cancellable, and a cancel lands within a quarter second. Only the last failure is the job's failure, and it carries the printer's own words. The schedule ends early in two cases — the printer was already written to (part of the job may be on the label, so repeating it would print that part twice), or the queue was paused or stopped.
+- A printer that was already up when the job arrived gets exactly **one** attempt: a wrong label size should not be tried three times before it is reported.
+
+Everything here is a ceiling, so a printer ready at thirty seconds prints at thirty-eight and one already awake waits not at all. The numbers come from watching a QL-820NWB come up from mains-off with `tools/boot_timeline.py`, which records ICMP, tcp/631, tcp/9100 and the app's own status check from t=0; run it against your own printer if yours boots differently.
+
 **The timing.** The printer's own auto-power-off starts counting when the keep-alive heartbeat stops, so left alone a four-hour window would give four hours *plus* the device's timer. `printer_auto_power_off_minutes` is therefore subtracted from `keep_alive_duration_seconds`, and the total comes out at exactly what you configured. With a 4 h window, a 10 min device timer and the default 5 min delay:
 
 ```
@@ -269,7 +302,7 @@ A duration equal to the device interval is valid and intended: the heartbeat the
 
 > ⚠️ **This app cannot read or change the printer's built-in auto-power-off time.** `printer_auto_power_off_minutes` is a statement about the device, not a setting on it, and nothing verifies that the two agree. Set it to exactly what the printer's own menu shows. **If the real interval on the device is longer than the value configured here, the relay will cut mains power while the printer is still running, which can interrupt a print mid-feed and can damage the printer.**
 
-Two things are guaranteed regardless: pending work resets the clock unconditionally, so a queued or printing job can never be switched off underneath itself, and the scheduled moment is persisted, so a restart mid-window does not strand the relay in the on state. Neither of them protects against a wrong interval. `GET /api/v1/printers/relay-power` reports the current state, the derived timing and the last webhook sent or failed, and never sends one itself.
+Two things are guaranteed regardless: pending work resets the clock unconditionally, so a queued or printing job can never be switched off underneath itself, and the scheduled moment is persisted, so a restart mid-window does not strand the relay in the on state. Neither of them protects against a wrong interval. `GET /api/v1/printers/relay-power` reports the current state, the derived timing and the last webhook sent or failed, and never sends one itself — `POST /api/v1/printers/relay-power/send` is the one endpoint that does.
 
 ### Multiple Printers
 
@@ -328,6 +361,10 @@ The following environment variables can be set (e.g. in `docker-compose.yml` or 
 - `UPLOAD_FOLDER`: Directory used to persist uploaded image/PDF files (job files and shared files). Defaults to an app-relative `uploads/` folder.
 - `JOB_FILE_TTL_SECONDS`: How long persisted image/PDF job files are kept so they can be reprinted or re-opened (default `86400`, i.e. 24 hours).
 - `SHARE_TTL_SECONDS`: How long files staged via the `/share` endpoint are kept before cleanup (default `3600`, i.e. 1 hour).
+- `LOG_LEVEL`: Log level for the root logger (default `INFO`, e.g. `DEBUG` or `WARNING`). The one knob the logging has.
+- `APP_VERSION`: The version `GET /health` reports (default `4.0.0-dev`). Useful for a deployment that wants its own build tag to come back from the health probe.
+- `FLASK_ENV`: Set to `development` to run the Flask development server instead of gunicorn (the Docker entrypoint branches on it) and to enable the debugger; anything else, including unset, is production. `FLASK_ENV=production` also turns the Swagger UI off unless `ENABLE_SWAGGER_UI` says otherwise. `FLASK_DEBUG` is deliberately ignored, so a stray `FLASK_DEBUG=1` cannot expose the interactive debugger.
+- `SKIP_INIT_CONFIG`: Set to `true` to tell the app that `/app/data/settings.json` has already been initialised. `docker-entrypoint.sh` sets it after doing that work; only a custom entrypoint needs to care.
 - `RELAY_WEBHOOK_AUTHORIZATION`: Credential for the relay power-control webhook. When set, its value is sent verbatim as the `Authorization` header on every relay request. It is an environment variable rather than a setting because `GET /settings` returns the configuration verbatim to every client that can read it. See [Relay Power Control](#relay-power-control).
 
 ## 📔 API Documentation
@@ -344,6 +381,7 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 - **GET /api/v1/printers/keep-alive**: Get keep-alive status
 - **PUT /api/v1/printers/keep-alive**: Start/stop the keep-alive feature
 - **GET /api/v1/printers/relay-power**: Relay power-control state, derived timing and last webhook (read-only, sends nothing)
+- **POST /api/v1/printers/relay-power/send**: Send one `turn_on`/`turn_off` webhook now and report what came back. ⚠️ **This really switches mains power to the printer**; it leaves the schedule untouched
 
 **Printing**
 - **POST /api/v1/text/print**: Print text on a label
@@ -353,6 +391,7 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 - **POST /api/v1/label/text-image**: Print an uploaded image and a text block side by side on a label
 - **POST /api/v1/pdf/print**: Print selected pages of an uploaded PDF
 - **POST /api/v1/share**: Generic share hand-off endpoint for mobile share shortcuts (image/PDF)
+- **GET /api/v1/share/{token}**: Retrieve a file staged by `POST /share`, by its token (this is what the UI fetches when it opens `/?share=<token>`)
 
 **Live preview** (true-to-print PNG render)
 - **POST /api/v1/text/preview**, **/qrcode/preview**, **/label/preview**, **/image/preview**, **/pdf/preview**
@@ -374,16 +413,22 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 - **POST /api/v1/jobs/pause** · **/jobs/resume** · **/jobs/stop**: Control queue processing
 
 **Health**
-- **GET /health**: Liveness probe reporting that the web application process is up
+- **GET /health**: Liveness probe reporting that the web application process is up. It answers `{"status": "pass", "version": "4.0.0-dev"}` and never touches the printer, so a powered-off printer cannot mark the container unhealthy. The version is the only way to ask a running instance which build it is (override it with `APP_VERSION`)
 - **GET /health/printer**: Readiness probe reporting whether the configured printer is reachable, plus the media it has loaded. The HTTP code follows reachability: 200 when the printer answers, 503 when it does not. A printer that answers but cannot print — open cover, empty media bay — reports `warn` with the blocking reason rather than failing, as does a loaded roll that does not match the configured label size
 
 > **Large batches:** Any print request that would print 10 or more copies must include an explicit `confirm_large_batch` flag (boolean `true` for JSON endpoints, the string `"true"` for multipart endpoints). Without it the request is rejected with HTTP 400 and the error code `CONFIRMATION_REQUIRED`.
 
-> **Optional `settings`:** On every print and preview endpoint, `settings` (and any field within it) is optional: anything omitted is taken from the app's saved configuration, with request fields overriding. So printing on the configured printer needs no `settings` at all.
+> **Optional `settings`:** On every print and preview endpoint, `settings` (and any field within it) is optional: anything omitted is taken from the app's saved configuration, with request fields overriding. So printing on the configured printer needs no `settings` at all. On the multipart endpoints the `settings` form field is a JSON string, which the specification can only describe as a string; it is parsed and validated against the same `PrintSettings` schema the JSON endpoints use, so `copies: 101` is rejected with HTTP 400 on an upload exactly as it is on `/text/print` instead of being queued and failing later in the worker. Keys the schema does not name still pass, because layout hints ride along in the same object.
 
 > **Raw PNG previews:** The preview endpoints (`/text/preview`, `/qrcode/preview`, `/label/preview`, `/image/preview`) return the JSON wrapper `{"image": "data:image/png;base64,…"}` by default. Send `Accept: image/png` to instead receive the raw PNG bytes (with `X-Label-Width-Px` / `X-Label-Height-Px` headers) — handy for piping a preview straight to an `<img>`.
 
 > **Automatic wrapping:** Long text is wrapped at word boundaries to fit the label (over-long words are hard-broken) instead of being truncated. This applies to plain text, text+QR and QR captions, in both print and preview. It is on by default; disable per request with `text.wrap: false` (or `settings.text_wrap: false`).
+
+> **Fitting (`auto_fit`):** On top of wrapping, the font is shrunk until the text fits the medium: on a die-cut label that means its fixed height, on continuous tape — which grows instead — it means shrinking until no single word has to be broken mid-word. `font_size` is the *starting* size while this is on. It applies only while `text_wrap` is on, is on by default, and is disabled per request with `settings.auto_fit: false`. Like `text_wrap`, it is a per-request option rather than a stored setting: both default to on and neither is read from `settings.json`.
+
+> **Emphasis (`text_markup`):** Off by default. With it on, `**bold**` and `*italic*` are honoured on `/text/print` and `/text/preview` instead of being printed as typed; with it off the asterisks stay literal and the label is rendered exactly as it always was. Turning it on drops the base weight from DejaVu Sans Bold to regular so that bold has something to be heavier than, which makes every label set this way look lighter. Unlike `text_wrap` and `auto_fit` this one *is* a stored setting, and it is inherited by a request that omits `settings`. Other layouts (QR, image, the combined labels) render text through their own paths and print the markers as typed.
+
+> **QR captions:** On `/qrcode/print` and `/qrcode/preview`, sending a `text` object whose `position` is anything but `none` and leaving `text.content` empty labels the code with the data it encodes (the UI's "Show text with QR code" with an empty field does exactly this). The combined `/label/text-qrcode` layout is deliberately excluded: there the text is the label's content rather than a caption, and empty really is an error.
 
 > **Lengthwise text:** Set `settings.orientation` to `lengthwise` on `/text/print` or `/text/preview` to run the text along the tape instead of across it: the roll's printable width becomes the line height and the tape grows with the message, so a long text on a narrow roll prints as one continuous strip instead of a shrunken column. The text reads bottom-to-top when the strip is held upright; add `rotate: 180` for the opposite direction. Continuous rolls only; die-cut labels have a fixed size in both directions and always render `across` (the default).
 
@@ -397,9 +442,13 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 
 > **Readiness vs. reachability (`available` changed meaning):** `POST /printers/status` now answers two questions separately. **`available` means "nothing known prevents printing"**. It is `false` both when the device does not answer and when it reports a blocking condition. It previously meant only "the device answered", so a printer with its cover open came back as `available: true` beside a status line reading "Printer is stopped". That old meaning now lives in the new **`reachable`** field, and two more fields say which question was settled: `state` (`ready`, `blocked`, `unknown`, `unreachable`) and `blocking_reasons` (IPP keywords such as `cover-open` or `media-empty`). *A client that used `available` as "can I print now?" needs no change and simply becomes correct; a client that used it as a reachability or monitoring signal must switch to `reachable`, or an open cover will start looking like an outage.* The dry run's `printer_reachable` follows `reachable`, and `GET /health/printer` still keys its 200/503 on reachability alone.
 
-> **Loaded media:** `POST /printers/status` also returns a `media` block describing the roll the printer reports as loaded: `detected`, `detection` (`ok`, `unidentified`, `no-media`, `unreachable`, `unsupported`), `width_mm`, `length_mm`, `media_type`, `media_name`, `is_round`, `candidates`, `ambiguous`, `reason` and `matches_label_size`. `candidates` is a list because three continuous media genuinely cannot be told apart from the device (`62`/`62red`, `12`/`12+17`, `103`/`104`), and returning both with the reason is deliberate: guessing would trade a visible error for a finished bad label. `matches_label_size` is `null` — never `false` — when nothing could be identified, so "unknown" stays distinguishable from "they disagree". Pass an optional `label_size` in the request to compare against something other than the configured one. A `media.resolution` block reports which single identifier the candidates come down to and how (`detection`, `memory`, `owned`, `default`), and `media.auto_switch` reports what should be done about it (`none`, `switch`, `ambiguous`). **The server decides and the client applies**: a status check never writes settings, so asking whether the printer is up cannot change the configuration. See [Loaded Media Detection](#loaded-media-detection).
+> **Loaded media:** `POST /printers/status` also returns a `media` block describing the roll the printer reports as loaded: `detected`, `detection` (`ok`, `unidentified`, `no-media`, `unreachable`, `unsupported`), `width_mm`, `length_mm`, `media_type`, `media_name`, `is_round`, `candidates`, `ambiguous`, `reason` and `matches_label_size`. `candidates` is a list because three continuous media genuinely cannot be told apart from the device (`62`/`62red`, `12`/`12+17`, `103`/`104`), and returning both with the reason is deliberate: guessing would trade a visible error for a finished bad label. `matches_label_size` is `null` — never `false` — when nothing could be identified, so "unknown" stays distinguishable from "they disagree". Pass an optional `label_size` in the request to compare against something other than the configured one. A `media.resolution` block reports which single identifier the candidates come down to (`label_size`, null when nothing settles it), how (`resolved_by`: `detection` — the report left only one possibility — then `preference`, `memory`, `owned`, `default` in the order they are tried) and why (`reason`), and `media.auto_switch` reports what should be done about it (`none`, `switch`, `ambiguous`). **The server decides and the client applies**: a status check never writes settings, so asking whether the printer is up cannot change the configuration. See [Loaded Media Detection](#loaded-media-detection).
 
-> **Relay power control:** `GET /printers/relay-power` reports whether the feature is on, whether a URL and a credential are configured (never their values), the timing it derives from the settings (`configured_window_seconds`, `effective_keep_alive_seconds`, `turn_off_delay_seconds`, `scheduled_turn_off_at`, `seconds_until_turn_off`) and the last webhook sent or failed. It is read-only and side-effect free: it never sends a webhook and never contacts the printer. While the feature and its `turn_off` half are both on, the response carries a `warning` field: the app cannot verify `printer_auto_power_off_minutes` against the device, and if the device's real interval is longer, the relay cuts power to a running printer. Display it wherever the setting is made. See [Relay Power Control](#relay-power-control).
+> **Relay power control:** `GET /printers/relay-power` reports whether the feature is on, whether a URL and a credential are configured (never their values), the timing it derives from the settings, and the last webhook sent or failed. The timing comes as a chain of **clock times rather than offsets**: a single `server_time` a client can measure its skew against once, and then, for each of the four moments — where the chain starts (`origin_at`/`_iso`), the end of the keep-alive heartbeat (`keep_alive_ends_at`), the printer's own power-off (`printer_power_off_at`) and the `turn_off` webhook (`scheduled_turn_off_at`) — an absolute timestamp, an ISO-8601 form and its own `seconds_until_…`, so each countdown is anchored to its own moment and cannot drift. `origin_source` says what the origin actually is (`print`, `startup` before anything has printed, or `idle` after the window has run out) and `last_print_at` carries the real last print, null when there has not been one, so a display never names a print that never happened. `next_step` (+ `next_step_at`, `seconds_until_next_step`) names the step the chain is waiting on — answered by the server because the hard part is which steps exist at all, not which timestamp is smallest. `scheduled_turn_off_at` is null while nothing is armed and is never projected, since it is the one step that can cut mains power. `hardware_offset_applied` says whether `printer_auto_power_off_minutes` was really subtracted, which the numbers alone cannot distinguish from subtracting zero. The older summary fields (`configured_window_seconds`, `effective_keep_alive_seconds`, `printer_power_off_seconds`, `turn_off_delay_seconds`) are still there. It is read-only and side-effect free: it never sends a webhook and never contacts the printer. While the feature and its `turn_off` half are both on, the response carries a `warning` field: the app cannot verify `printer_auto_power_off_minutes` against the device, and if the device's real interval is longer, the relay cuts power to a running printer. Display it wherever the setting is made. See [Relay Power Control](#relay-power-control).
+
+> **Sending a relay webhook by hand:** `POST /printers/relay-power/send` with `{"action": "turn_on"}` or `{"action": "turn_off"}` sends that webhook immediately and reports the URL, the body sent, the relay's HTTP status, whether a credential went with it, and the resulting mains power (`"on"`, `"off"` or `"unknown"` when delivery could not be confirmed). ⚠️ **It really switches mains power.** The HTTP status is about the request: a relay that refused or never answered is a `200` with `success: false` and the error, and `400` means nothing was sent. It needs `relay_webhook_enabled` and a URL for the action but not an armed schedule, and it neither arms nor clears one. See [Relay Power Control](#relay-power-control).
+
+> **What a waiting job is doing:** `GET /jobs`, `GET /jobs/{id}` and `GET /jobs/queue` carry `activity`, `activity_message` and `activity_at` alongside `status`. `activity` is a stable token to branch on — `switching_on`, `waiting_for_printer`, `printer_settling`, `printing`, `retrying`, or null for a job that is genuinely just waiting its turn — while `activity_message` is a sentence for a human that may quote concrete durations and is therefore not stable enough to switch on; `activity_at` is when the phase began, so a client can show how long it has been running. **`status` keeps exactly its five documented values** (`queued`, `printing`, `done`, `failed`, `cancelled`): the activity sits beside the status rather than inside it, so no client that branches on `status` has to change. It is plain state, not an event — reading it does not consume it, which is what lets `/jobs` and `/jobs/queue` agree with each other between polls.
 
 ## 📤 Example API Usage
 
@@ -618,6 +667,8 @@ All print requests are queued and processed sequentially by a single background 
 
 The same controls are available via the `/api/v1/jobs/*` endpoints listed above. Image and PDF jobs keep their uploaded file for a configurable time (`JOB_FILE_TTL_SECONDS`, default 24 h) so they can be reprinted or re-opened.
 
+**What a job is doing while it waits.** A job sent to a printer that is switched off at the wall can sit in the queue for minutes while the relay closes and the printer boots, and `status: "queued"` alone makes that indistinguishable from an idle queue. Every job therefore also carries an `activity` — `switching_on`, `waiting_for_printer`, `printer_settling`, `printing`, `retrying`, or null when it is simply waiting its turn — with a readable `activity_message` and the time the phase started (`activity_at`). `status` is unchanged and still has exactly the five values above; the activity is a detail beside it, not a sixth status. The Queue panel draws those phases as a rail — switching on, booting, settling, printing — with what is done behind the current mark and what is still to come ahead of it, so a long wait reads as a place in a sequence rather than as a stall; a retry is the printing step in trouble, so it changes that mark's colour and icon rather than getting a mark of its own. The same phase appears as a pill in the header beside the printer status, with its own slow poll of `/jobs/queue` (every 4.5 s) that stands down whenever the Queue panel is open and polling faster.
+
 ## 📲 Share from your Phone
 
 The generic `/share` endpoint lets you send a PDF or image straight from your phone into the print form using **Apple Shortcuts** (iOS) or **HTTP Shortcuts** (Android) — no PWA required.
@@ -631,7 +682,7 @@ curl -i -F "file=@label.pdf" http://localhost:5000/api/v1/share
 
 On a phone, create a Shortcut that takes the shared file and performs a "Get contents of URL" `POST` to `http://<host>:5000/api/v1/share` with the file as a form field named `file`, then opens the returned URL.
 
-Staged files live in `uploads/shared/` and are automatically removed after `SHARE_TTL_SECONDS` (default `3600`, i.e. 1 hour).
+The staged file itself is served by `GET /api/v1/share/{token}`, which is what the page fetches when it opens that URL. Staged files live in `uploads/shared/` and are automatically removed after `SHARE_TTL_SECONDS` (default `3600`, i.e. 1 hour).
 
 ## 📝 License
 

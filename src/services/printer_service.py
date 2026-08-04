@@ -40,6 +40,7 @@ from src.config.default_settings import (
     CALIBRATION_SCALE_MAX,
     CALIBRATION_SCALE_MIN,
     DEFAULT_CALIBRATION_SCALE,
+    DEFAULT_MAX_UPLOAD_IMAGE_PIXELS,
     MEDIA_EQUIVALENTS,
     medium_variants,
 )
@@ -150,6 +151,106 @@ MIN_CALIBRATION_FONT_PX = 14
 # cap is deliberately low: nine steps at 0.5 mm already cover +/-2 mm, which is
 # more than the registration tolerance this feature exists to cancel out.
 MAX_CALIBRATION_SWEEP_STEPS = 9
+
+
+# --------------------------------------------------------------------------- #
+# How big an uploaded image may be before it is turned away.
+#
+# Pillow's ``Image.MAX_IMAGE_PIXELS``, which the API controllers set to 50 MP,
+# does NOT answer this question: it is a warning threshold, and Pillow only
+# raises ``DecompressionBombError`` above *twice* that. Everything in between
+# passed -- a 79 KB, 8000 x 8000 PNG (64 MP) was decoded and resized in full,
+# and it was decoded before the printer URI was even validated, so the work
+# happened even for a job that could never print.
+#
+# So the app states its own limit and checks it itself, at the point where the
+# image is still nothing but a path on disk. ``Image.open`` reads the header and
+# does not decode, which is what makes the check nearly free: dimensions are
+# known long before any pixel buffer is allocated.
+# --------------------------------------------------------------------------- #
+
+def max_upload_image_pixels() -> int:
+    """Return how many pixels an uploaded image may hold (robustly parsed).
+
+    Reads ``MAX_UPLOAD_IMAGE_PIXELS`` from the environment on every call, so a
+    deployment's value takes effect wherever the process reads it and tests can
+    set it per case.
+
+    The variable is deliberately NOT called ``MAX_IMAGE_PIXELS``: that name is
+    already taken by Pillow's own module attribute with different semantics (a
+    soft warning at the value, a hard error at twice it), and two settings
+    sharing one name would be read as one setting by everybody who met either.
+
+    ``0`` means "no limit". A missing, empty, negative or non-numeric value
+    falls back to
+    :data:`~src.config.default_settings.DEFAULT_MAX_UPLOAD_IMAGE_PIXELS`; only
+    an explicit zero switches the guard off, because a blank variable in a
+    compose file means "not configured", not "unprotected".
+
+    Returns:
+        Maximum pixel count, or 0 for "unlimited".
+    """
+    raw = os.environ.get("MAX_UPLOAD_IMAGE_PIXELS")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_MAX_UPLOAD_IMAGE_PIXELS
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_UPLOAD_IMAGE_PIXELS
+    # Negative is nonsense rather than an opt-out; only an explicit 0 disables.
+    return value if value >= 0 else DEFAULT_MAX_UPLOAD_IMAGE_PIXELS
+
+
+def guard_image_pixels(image_path: str) -> None:
+    """Reject an image whose pixel count exceeds :func:`max_upload_image_pixels`.
+
+    Call this BEFORE anything opens the file for real: rotation, resizing and
+    the round-label ink scan all walk the decoded bitmap, and the whole point is
+    that the decode never happens for a file this size.
+
+    A file that is not an image at all, or cannot be read, is deliberately NOT
+    turned into an error here -- that is not the question being asked, and the
+    pipeline behind this call already reports those cases in its own words. The
+    guard only ever speaks about size.
+
+    Args:
+        image_path: Path to the image file as it arrived from the caller.
+
+    Raises:
+        ValidationError: If the image is larger than the configured limit, or
+            large enough that Pillow refused to open it at all (-> HTTP 400).
+    """
+    limit = max_upload_image_pixels()
+    if not limit:
+        return
+
+    try:
+        with Image.open(image_path) as probe:
+            width, height = probe.size
+    except Image.DecompressionBombError as e:
+        # Past twice Pillow's own threshold the header is all we get: Pillow
+        # will not hand over the size. Its message carries the pixel count, so
+        # quoting it still names both the actual value and the limit.
+        raise ValidationError(
+            f"Image is too large to print: {e} (this app allows at most "
+            f"{limit} pixels; set MAX_UPLOAD_IMAGE_PIXELS to change it, "
+            f"0 removes the limit).",
+            field="image",
+            details={"limit": limit},
+        ) from e
+    except Exception:  # noqa: BLE001 - not an image, or unreadable: not our call
+        return
+
+    pixels = width * height
+    if pixels > limit:
+        raise ValidationError(
+            f"Image is too large to print: {width}x{height} is {pixels} pixels, "
+            f"more than the limit of {limit}. Scale the image down, or raise "
+            f"MAX_UPLOAD_IMAGE_PIXELS (0 removes the limit).",
+            field="image",
+            details={"width": width, "height": height,
+                     "pixels": pixels, "limit": limit},
+        )
 
 
 # --------------------------------------------------------------------------- #
@@ -2768,8 +2869,16 @@ class PrinterService:
         Raises:
             PrinterError: If there's an error printing the image.
             ImageProcessingError: If there's an error processing the image.
+            ValidationError: If the image exceeds the configured pixel limit.
             ValueError: If settings are invalid.
         """
+        # Size check first, and outside the try below on purpose: it must run
+        # before the first decode (rotation already walks the full bitmap), and
+        # the caller is better served by the guard's own message -- which names
+        # the limit, the actual size and the field -- than by a re-wrapped copy
+        # of it that keeps only the text.
+        guard_image_pixels(image_path)
+
         # Track only the artifacts generated *here* (resized_/rotated_). The
         # original uploaded ``image_path`` is intentionally NOT tracked so we
         # don't double-delete a file owned by the image controller.
@@ -2842,8 +2951,13 @@ class PrinterService:
         Raises:
             PrinterError: If there's an error printing the label.
             ImageProcessingError: If there's an error composing the label.
+            ValidationError: If the image exceeds the configured pixel limit.
             ValueError: If settings are invalid.
         """
+        # Size check before the composition decodes the upload (see print_image
+        # for why this sits outside the try).
+        guard_image_pixels(image_path)
+
         # Track only the artifacts generated *here* (composed label and its
         # rotated derivative). The original uploaded ``image_path`` is owned by
         # the controller and intentionally not tracked.
@@ -3027,7 +3141,8 @@ class PrinterService:
             Dict with ``success``, ``job_id``, ``message`` and ``pages_printed``.
 
         Raises:
-            ValidationError: For invalid ``scale_mode`` / page spec (-> 400).
+            ValidationError: For invalid ``scale_mode`` / page spec, or for a
+                selection larger than ``MAX_PDF_PAGES`` allows (-> 400).
             PrinterError: For render/IO/printer failures (-> 500).
         """
         # Only artifacts generated *here* (temporary PNGs and their
@@ -3046,7 +3161,10 @@ class PrinterService:
                 # Render the requested pages. parse_page_range (invoked inside
                 # render_pdf) raises ValueError for a bad page spec; an unreadable
                 # / non-PDF file also raises ValueError -- both are caller input
-                # problems and surface as a 400.
+                # problems and surface as a 400. A selection over the page limit
+                # raises ValidationError instead, before any page is rasterised;
+                # it passes straight through this handler and is re-raised
+                # untouched below, so its message and details survive.
                 images = render_pdf(pdf_path, pages, dpi=dpi)
             except ValueError as e:
                 logger.warning("Invalid input for PDF print", job_id=job_id, error=str(e))
@@ -3295,9 +3413,15 @@ class PrinterService:
         here -- only the resized/rotated derivatives generated internally are.
 
         Raises:
-            ValidationError: For invalid input/settings (-> 400).
+            ValidationError: For invalid input/settings, including an image
+                over the configured pixel limit (-> 400).
             PrinterError: For render failures (-> 500).
         """
+        # A preview decodes exactly what a print decodes, so it is guarded the
+        # same way -- and being the synchronous endpoint, this is where the
+        # caller sees the 400 immediately rather than on a queued job.
+        guard_image_pixels(image_path)
+
         temp_files: List[str] = []
         try:
             job_id = f"preview_image_{uuid.uuid4().hex[:8]}"

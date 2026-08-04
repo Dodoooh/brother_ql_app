@@ -347,12 +347,31 @@ paths:
               schema:
                 $ref: '#/components/schemas/PrintResponse'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: >-
+            Invalid request parameters, or an image larger than the server's
+            pixel limit. The limit defaults to 50000000 pixels (50 MP) and is
+            configured with the MAX_UPLOAD_IMAGE_PIXELS environment variable
+            (0 removes it). The error message names both the limit and the
+            image's actual dimensions and pixel count; details carries width,
+            height, pixels and limit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: "VALIDATION_ERROR"
+                message: "Image is too large to print: 8000x8000 is 64000000 pixels, more than the limit of 50000000. Scale the image down, or raise MAX_UPLOAD_IMAGE_PIXELS (0 removes the limit)."
+                details:
+                  field: "image"
+                  width: 8000
+                  height: 8000
+                  pixels: 64000000
+                  limit: 50000000
         '404':
           $ref: '#/components/responses/NotFound'
         '500':
           $ref: '#/components/responses/InternalServerError'
-          
+
   /image/preview:
     post:
       summary: Render a server-side preview of an image label
@@ -388,7 +407,25 @@ paths:
               schema:
                 $ref: '#/components/schemas/PreviewResponse'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: >-
+            Invalid request parameters, or an image larger than the server's
+            pixel limit. A preview decodes exactly what a print decodes, so the
+            same limit applies: 50000000 pixels (50 MP) by default, configured
+            with the MAX_UPLOAD_IMAGE_PIXELS environment variable (0 removes
+            it).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: "VALIDATION_ERROR"
+                message: "Image is too large to print: 8000x8000 is 64000000 pixels, more than the limit of 50000000. Scale the image down, or raise MAX_UPLOAD_IMAGE_PIXELS (0 removes the limit)."
+                details:
+                  field: "image"
+                  width: 8000
+                  height: 8000
+                  pixels: 64000000
+                  limit: 50000000
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -416,7 +453,11 @@ paths:
                   example: '{"printer_uri": "tcp://192.168.1.100", "printer_model": "QL-800", "label_size": "62"}'
                 pages:
                   type: string
-                  description: Optional page selection (e.g. "1-3,5"); empty means all pages
+                  description: >-
+                    Optional page selection (e.g. "1-3,5"); empty means all
+                    pages. The selection is what counts against the server's
+                    page limit, so a range is the way to print part of a long
+                    document.
                   example: "1-3,5"
                 scale_mode:
                   type: string
@@ -447,7 +488,26 @@ paths:
               schema:
                 $ref: '#/components/schemas/PrintResponse'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: >-
+            Invalid request parameters, or a selection of more pages than the
+            server renders in one job. Every selected page is rasterised into
+            memory before the first label is sent, so the limit defaults to 20
+            pages and is configured with the MAX_PDF_PAGES environment variable
+            (0 removes it). The error message names both the limit and the
+            number of pages requested; details carries requested_pages,
+            total_pages and limit.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: "VALIDATION_ERROR"
+                message: "This PDF would print 40 pages, more than the limit of 20. Select fewer pages with the 'pages' field, or raise MAX_PDF_PAGES (0 removes the limit)."
+                details:
+                  field: "pages"
+                  requested_pages: 40
+                  total_pages: 40
+                  limit: 20
         '500':
           $ref: '#/components/responses/InternalServerError'
 
@@ -457,7 +517,9 @@ paths:
       description: >-
         Renders the selected pages of an uploaded PDF as small PNG thumbnails
         (data URLs) without printing. Uses a low DPI and caps the number of
-        rendered pages so previewing large PDFs stays fast.
+        rendered pages so previewing large PDFs stays fast. The preview
+        truncates (see the truncated flag) and never rejects; the page limit
+        that can reject a job (MAX_PDF_PAGES) applies to /pdf/print only.
       operationId: api.pdf_controller.preview_pdf
       tags:
         - pdf
@@ -698,7 +760,24 @@ paths:
               schema:
                 $ref: '#/components/schemas/PrintResponse'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: >-
+            Invalid request parameters, or an image larger than the server's
+            pixel limit (50000000 pixels by default, configured with the
+            MAX_UPLOAD_IMAGE_PIXELS environment variable; 0 removes it). The
+            error message names both the limit and the image's actual size.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: "VALIDATION_ERROR"
+                message: "Image is too large to print: 8000x8000 is 64000000 pixels, more than the limit of 50000000. Scale the image down, or raise MAX_UPLOAD_IMAGE_PIXELS (0 removes the limit)."
+                details:
+                  field: "image"
+                  width: 8000
+                  height: 8000
+                  pixels: 64000000
+                  limit: 50000000
         '500':
           $ref: '#/components/responses/InternalServerError'
 

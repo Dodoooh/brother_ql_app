@@ -11,8 +11,12 @@ contract consumed by ``PrinterService.print_pdf``.
 
 import base64
 import io
+import os
 
 import structlog
+
+from src.config.default_settings import DEFAULT_MAX_PDF_PAGES
+from src.utils.exceptions import ValidationError
 
 logger = structlog.get_logger()
 
@@ -26,6 +30,31 @@ except ImportError:  # pragma: no cover - exercised only when dep is absent
     pdfium = None
     PDFIUM_AVAILABLE = False
     logger.warning("pypdfium2 not available, PDF printing will not work")
+
+
+def max_pdf_pages() -> int:
+    """Return how many PDF pages one job may rasterise (robustly parsed).
+
+    Reads ``MAX_PDF_PAGES`` from the environment on every call -- never cached,
+    so a deployment's value is picked up wherever the process happens to read it
+    and tests can set it per case. ``0`` means "no limit"; a missing, empty,
+    negative or non-numeric value falls back to
+    :data:`~src.config.default_settings.DEFAULT_MAX_PDF_PAGES`, because a
+    protection that disappears on a typo is worse than no protection at all --
+    at least the latter is visible.
+
+    Returns:
+        Maximum number of pages, or 0 for "unlimited".
+    """
+    raw = os.environ.get("MAX_PDF_PAGES")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_MAX_PDF_PAGES
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_PDF_PAGES
+    # Negative is nonsense rather than an opt-out; only an explicit 0 disables.
+    return value if value >= 0 else DEFAULT_MAX_PDF_PAGES
 
 
 def parse_page_range(spec, total: int) -> list:
@@ -130,6 +159,9 @@ def render_pdf(pdf_path: str, pages=None, dpi: int = 300) -> list:
     Raises:
         ValueError: If pypdfium2 is unavailable, the page spec is invalid, or
             the file cannot be opened/read as a PDF.
+        ValidationError: If the selection holds more pages than
+            :func:`max_pdf_pages` allows (-> HTTP 400). Raised before anything
+            is rendered.
     """
     if not PDFIUM_AVAILABLE:
         raise ValueError(
@@ -151,6 +183,29 @@ def render_pdf(pdf_path: str, pages=None, dpi: int = 300) -> list:
 
         # parse_page_range may raise ValueError for a bad spec -> propagate.
         page_numbers = parse_page_range(pages, total)
+
+        # Refuse an oversized job BEFORE a single page is rasterised. Every
+        # rendered page is held in ``images`` until the last one is printed, so
+        # the cost of this call is the sum of the selection and the only place
+        # it can still be turned down for free is here: opening the document and
+        # counting its pages is cheap, rendering them is not.
+        #
+        # The *selection* is what is measured, not the document: asking for
+        # three pages out of four hundred renders three pages and costs three
+        # pages, so a page range is a legitimate way to print a long document.
+        limit = max_pdf_pages()
+        if limit and len(page_numbers) > limit:
+            raise ValidationError(
+                f"This PDF would print {len(page_numbers)} pages, more than the "
+                f"limit of {limit}. Select fewer pages with the 'pages' field, "
+                f"or raise MAX_PDF_PAGES (0 removes the limit).",
+                field="pages",
+                details={
+                    "requested_pages": len(page_numbers),
+                    "total_pages": total,
+                    "limit": limit,
+                },
+            )
 
         scale = dpi / 72.0
         images = []
@@ -178,6 +233,12 @@ def render_pdf_thumbnails(pdf_path: str, pages=None, dpi: int = 120,
     Intended for a fast, server-side *preview* (not printing): it renders at a
     low DPI and caps the number of rendered pages so previewing a large PDF
     stays cheap.
+
+    The cap here *truncates* rather than rejects, which is deliberately unlike
+    the print path's :func:`max_pdf_pages`: looking at the first pages of a
+    document costs those pages and nothing more, so there is nothing to refuse.
+    Printing is where the whole selection has to be held in memory at once, and
+    that is where the hard limit lives.
 
     Args:
         pdf_path: Path to the PDF file.
