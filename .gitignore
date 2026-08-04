@@ -50,6 +50,7 @@ coverage.xml
 *.py,cover
 .hypothesis/
 .pytest_cache/
+.ruff_cache/
 cover/
 
 # Translations
@@ -186,7 +187,6 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
-/dist/ # Frontend build output
 /.nuxt/
 /.output/
 /.vitepress/cache
@@ -194,18 +194,16 @@ pnpm-debug.log*
 
 # Docker
 docker-compose.override.yml
-.dockerignore # Often committed, but can be ignored if generated
 
 # Uploads (Assuming 'uploads/' directory is for runtime data)
 uploads/
 src/uploads/
-src/src/uploads/ # Based on file listing
 
 # Data (Assuming 'data/' directory is for runtime data)
 data/
 
-# Settings (If settings.json contains secrets or local config)
-# src/config/settings.json # Uncomment if it contains sensitive info
+# Editor / tooling artefacts that must never reach the remote
+.claude/
 
 # Local planning / internal notes (not for the public repo)
 .planning/

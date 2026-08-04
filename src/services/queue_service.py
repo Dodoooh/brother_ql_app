@@ -309,11 +309,6 @@ class PrintQueueService:
         with self._lock:
             return self._set_activity_locked(self._current_job_id, activity, message)
 
-    def current_activity(self) -> Dict[str, Any]:
-        """Return the activity of the job being processed, as a small dict."""
-        with self._lock:
-            return self._current_activity_locked()
-
     def _current_activity_locked(self) -> Dict[str, Any]:
         """The current job's activity. Caller must hold ``self._lock``.
 

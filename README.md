@@ -19,7 +19,7 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **📄 PDF Printing**: Upload a PDF and print selected pages, with per-page preview and fit/fill scaling.
 
-- **👁️ Live Preview**: See how your labels will look before printing for all label types, with an instant client-side preview backed by a true-to-print server render.
+- **👁️ Live Preview**: See how your labels will look before printing for all label types, with an instant client-side preview backed by a true-to-print server render. The client-side black/white preview uses the printer's own cutoff — the `threshold` setting mapped the way `brother_ql` maps it, over ITU-R 601 luma — so moving the Threshold slider changes the picture the same way it changes the label.
 
 - **⚙️ Custom Settings**: Fine-tune font size, label size, alignment, rotation, threshold, dithering and red printing. Text can run across the tape or lengthwise along it on continuous rolls. Copies (1–100) and cut mode are available directly in every compose section.
 
@@ -47,7 +47,7 @@ A modern web application to control Brother QL printers, enabling customizable t
 
 - **📚 Swagger Documentation**: Explore and test the API using the built-in Swagger UI documentation.
 
-- **🔄 Error Handling**: Robust error handling with informative messages and toast notifications.
+- **🔄 Error Handling**: One error shape for the whole API — `code`, `message`, `details` — with messages a caller can act on, an id instead of internals when something breaks inside the app, and toast notifications in the UI.
 
 - **🔌 Runs on an isolated network**: every asset the interface needs — Bootstrap's stylesheet and bundle, the icon font, the two web fonts and the QR library — is served by the app itself. Nothing is fetched from a CDN at load time, so a LAN with no route out gets the full interface rather than a page that looks fine and does nothing.
 
@@ -92,23 +92,54 @@ docker pull dodoooh/brother_ql_app:latest  # or a specific version: dodoooh/brot
 
 Inside the container the app is served by **gunicorn** (`wsgi:application`, one worker, four threads), started by `docker-entrypoint.sh`. One worker is a requirement rather than a tuning choice: keep-alive, the print queue and the relay scheduler are single-process singletons owning background threads, and a second worker would run a second copy of each. Setting `FLASK_ENV=development` makes the entrypoint start the Flask development server instead.
 
+The image carries runtime dependencies only. `build-essential`, `libffi-dev` and `libssl-dev` were removed once it was established that every requirement resolves to a wheel on amd64 and arm64 and the one source distribution (`packbits`) is pure Python: the image went from **770 MB to 334 MB**, and its OS vulnerability count down to what `python:3.11-slim` brings on its own. The application code belongs to **root** and is not writable by the user the app runs as (`appuser`); only `/app/data` and `/app/uploads` are. `UPLOAD_FOLDER` is therefore set explicitly in the image, so the app never falls back to a directory inside the now read-only code tree.
+
 ### Using Docker Compose
 
 Create a `docker-compose.yml` file:
 
 ```yaml
-version: '3.8'
-
 services:
   brother_ql_app:
     image: dodoooh/brother_ql_app:latest
     container_name: brother_ql_app
     ports:
+      # Reachable from the LAN, because that is the point: Home Assistant, a
+      # phone, another host. Behind a reverse proxy on the same machine, bind
+      # it to loopback instead: "127.0.0.1:5000:5000"
       - "5000:5000"
     volumes:
       - ./data:/app/data
-      - ./uploads:/app/uploads
     restart: unless-stopped
+    environment:
+      - PYTHONPATH=/app
+      - FLASK_ENV=production
+      # Scratch space for rendered labels, job files and shared uploads,
+      # pointed into the tmpfs below so the container filesystem can stay
+      # read-only.
+      - UPLOAD_FOLDER=/tmp/uploads
+      # Strongly recommended: without it this API is unauthenticated, and it
+      # can switch mains power through the relay webhook.
+      # - API_KEY=change-me
+
+    # --- Container hardening ---
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health',timeout=2).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
 ```
 
 Start the service:
@@ -116,6 +147,15 @@ Start the service:
 ```bash
 docker-compose up -d
 ```
+
+What the hardening block does, and what it costs:
+
+- **`read_only: true`** makes the code tree's ownership structural: no permission mistake, now or later, can make `/app` writable. The one place the process genuinely writes — gunicorn's worker heartbeat and the rendered-label scratch directory — is the **64 MB tmpfs**, mounted `noexec` and `nosuid` because nothing in there is ever meant to be executed.
+- **`cap_drop: ALL`** because the app needs no Linux capability at all: it listens on 5000, which is above 1024, and opens ordinary sockets. **`no-new-privileges`** closes the escalation path through the SUID binaries the base image still carries.
+- **Bounds it has never come near**: 512 MB against a measured ~75 MB, one CPU, 256 processes. The memory headroom is deliberate — it has to cover the largest image the app accepts before refusing it (see `MAX_UPLOAD_IMAGE_PIXELS`).
+- **The cost:** with `UPLOAD_FOLDER` on the tmpfs, rendered labels and staged shares **do not survive a restart**. They were never meant to — render, print, delete, plus a TTL sweep — and the job list has always lived in process memory, so a restart loses nothing it did not lose before. To keep them, point `UPLOAD_FOLDER` at a mounted path instead (`UPLOAD_FOLDER=/app/uploads` with `./uploads:/app/uploads`) and give that path back its write permission.
+
+Only `./data` is mounted, since that is where `settings.json` lives and the only state that has to outlive the container.
 
 ### Using Docker Run
 
@@ -126,9 +166,16 @@ docker run -d \
   -p 5000:5000 \
   --name brother_ql_app \
   -v ./data:/app/data \
-  -v ./uploads:/app/uploads \
+  --read-only \
+  --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+  --cap-drop ALL \
+  --security-opt no-new-privileges:true \
+  --memory 512m --cpus 1 --pids-limit 256 \
+  -e UPLOAD_FOLDER=/tmp/uploads \
   dodoooh/brother_ql_app:latest
 ```
+
+If rendered labels and staged shares have to survive a restart, keep the flags and add `-v ./uploads:/app/uploads -e UPLOAD_FOLDER=/app/uploads`: a bind mount stays writable under `--read-only`, as long as the host directory is writable by the container's runtime user.
 
 ### Access the Application
 
@@ -184,7 +231,7 @@ The application settings can be configured in the `data/settings.json` file. Thi
 - `vertical_alignment`: How the text block sits across the label's height (`top`, `middle` — the default — or `bottom`), the counterpart to `alignment` along the width. Takes effect on die-cut labels and on continuous rolls set to `lengthwise`; a continuous roll printed `across` grows in length to fit the text exactly, so there is no spare height to move within
 - `orientation`: How text runs on the label — `across` (the default: text runs across the tape and the label grows in length) or `lengthwise` (text runs along the tape, so the roll's printable width becomes the line height). Text labels on continuous rolls only; die-cut labels always print `across`
 - `rotate`: The rotation applied to the rendered label in degrees (`0`, `90`, `180`, or `270`). `90` and `270` are currently not supported on rectangular die-cut labels, whose canvas is a fixed size in both directions — nor on a round die-cut label with `bleed_mm` set, whose canvas is no longer square either
-- `threshold`: The black/white threshold used when converting the image (e.g., `70.0`)
+- `threshold`: The black/white threshold used when converting the image (e.g., `70.0`). It is a 0–100 setting that becomes a 0–255 pixel cutoff as `(100 - threshold) * 255 / 100` — 76.5 at the default of 70 — and the client-side image preview applies the same formula, so the slider moves the preview and the print together. Dithering ignores it, because Pillow's one-bit conversion takes no threshold
 - `dither`: Whether to apply dithering when converting the image (`true`/`false`)
 - `compress`: Whether to enable printer-side compression (`true`/`false`)
 - `red`: Whether to use the red channel for two-color labels such as 62-red (`true`/`false`)
@@ -192,7 +239,7 @@ The application settings can be configured in the `data/settings.json` file. Thi
 - `cut_mode`: When to cut the tape — `each` (after every label), `end` (only after the last), or `none`
 - `dpi_600`: Whether to print at 600 dpi where supported (`true`/`false`)
 - `hq`: Whether to use high-quality printing (`true`/`false`)
-- `text_markup`: Whether `**bold**` and `*italic*` in the text are honoured or printed as typed (`true`/`false`, default `false`). Off by default on purpose: a label is normally set in DejaVu Sans Bold, which is the more legible weight on a thermal printer but leaves nothing heavier for bold to be, so honouring the markers drops the base to the regular weight and every label set that way comes out lighter. Applies to the text label endpoints (`/text/print`, `/text/preview`); the QR and image layouts render text through their own paths and print the markers as typed
+- `text_markup`: Whether `**bold**` and `*italic*` in the text are honoured or printed as typed (`true`/`false`, default `false`). Off by default on purpose: a label is normally set in DejaVu Sans Bold, which is the more legible weight on a thermal printer but leaves nothing heavier for bold to be, so honouring the markers drops the base to the regular weight and every label set that way comes out lighter. Applies to the text label endpoints (`/text/print`, `/text/preview`) and nowhere else; the QR and image layouts render text through their own paths and print the markers as typed. The interface says so where it matters — the hint under the text field reads "Line breaks print as typed. For \*\*bold\*\* and \*italic\*, switch on Text markup in Settings", and it is the only compose tab that mentions markup at all
 - `keep_alive_enabled`: Whether to keep the printer connection alive (only needed for network printers)
 - `keep_alive_interval`: The interval for keep-alive messages (in seconds, minimum `10`)
 - `keep_alive_mode`: `forever` to keep the printer awake continuously, or `timed` to keep it awake only for a window after each print
@@ -284,6 +331,7 @@ If the endpoint needs a credential, set `RELAY_WEBHOOK_AUTHORIZATION` in the env
 - After the `turn_on` webhook the printer is left alone for **20 s** before it is looked at at all. Nothing answers before about 15.7 s from mains-on, and an unanswered probe costs 3.5 s, so probing into that window spends the budget on a question whose answer is known.
 - Then it is probed for up to **120 s**. If the printer still has not come up, a **second** `turn_on` goes out with a shorter budget (20 s + 60 s) — that attempt is for a request that was accepted but not acted on, not for a printer that is merely slow. Worst case end to end is therefore about **220 s** before the job fails, and the failure names the webhooks delivered, the blind wait, and how many probes were made over what period.
 - The job is released on the printer's **own "ready"**, not on a fixed settle. A printer that answers without ever stating readiness — no IPP, or a blocking condition such as a transient `media-empty` reported while booting — is released after **20 s of continuous answering** instead, deliberately: the gate's job is to wait for the printer to come up, not to adjudicate whether it can print. Probing tightens to one second once anything answers, because the IPP port drops out for about 1.4 s partway through the boot and a coarser probe steps straight over the hole.
+- **The wait before the first attempt says which of those two it is.** The message shown under the `printer_settling` activity is "The printer reports itself ready. Giving it 5s before printing." when the device stated it, and "The printer is answering but has not reported itself ready. Giving it 5s before printing anyway." when it only answered steadily. It used to claim the first in both cases. The distinction is the difference between "the printer says it is ready" and "the printer is there and has not said", which is exactly what someone watching a job that will not print needs to know. Only the gate knows what it released on, so the gate supplies the sentence and the queue displays it verbatim.
 - A job whose printer *this app* just switched on is then tried **up to three times, with 5 s, 20 s and 20 s before the attempts**, because a refusal in the boot window says as much about the moment as about the job. Between attempts the job goes back to `queued` carrying the activity `retrying`: it is not on the wire and stays cancellable, and a cancel lands within a quarter second. Only the last failure is the job's failure, and it carries the printer's own words. The schedule ends early in two cases — the printer was already written to (part of the job may be on the label, so repeating it would print that part twice), or the queue was paused or stopped.
 - A printer that was already up when the job arrived gets exactly **one** attempt: a wrong label size should not be tried three times before it is reported.
 
@@ -302,7 +350,7 @@ A duration equal to the device interval is valid and intended: the heartbeat the
 
 > ⚠️ **This app cannot read or change the printer's built-in auto-power-off time.** `printer_auto_power_off_minutes` is a statement about the device, not a setting on it, and nothing verifies that the two agree. Set it to exactly what the printer's own menu shows. **If the real interval on the device is longer than the value configured here, the relay will cut mains power while the printer is still running, which can interrupt a print mid-feed and can damage the printer.**
 
-Two things are guaranteed regardless: pending work resets the clock unconditionally, so a queued or printing job can never be switched off underneath itself, and the scheduled moment is persisted, so a restart mid-window does not strand the relay in the on state. Neither of them protects against a wrong interval. `GET /api/v1/printers/relay-power` reports the current state, the derived timing and the last webhook sent or failed, and never sends one itself — `POST /api/v1/printers/relay-power/send` is the one endpoint that does.
+Two things are guaranteed regardless: pending work resets the clock unconditionally, so a queued or printing job can never be switched off underneath itself, and the scheduled moment is persisted, so a restart mid-window does not strand the relay in the on state. **Pending work counts a job the worker still has in hand**, including one that has already been cancelled: cancelling does not stop the gate holding it, and that gate may be halfway through switching this very printer's mains supply on. Reading only the queued/printing counts made the queue look idle from that moment on, and a turn-off falling due in the same window would have cut power to a printer the app was in the middle of booting. Neither of them protects against a wrong interval. `GET /api/v1/printers/relay-power` reports the current state, the derived timing and the last webhook sent or failed, and never sends one itself — `POST /api/v1/printers/relay-power/send` is the one endpoint that does.
 
 ### Multiple Printers
 
@@ -358,8 +406,10 @@ The following environment variables can be set (e.g. in `docker-compose.yml` or 
 - `CORS_ORIGINS`: Comma-separated list of allowed cross-origin origins (e.g. `https://home.example.com,https://hass.example.com`). When unset, only same-origin requests are allowed.
 - `SECRET_KEY`: The Flask secret key. Set a stable value in production; if unset, an ephemeral random key is generated on each start.
 - `ENABLE_SWAGGER_UI`: Set to `true` or `false` to force the Swagger UI on or off. When unset, the UI defaults to on unless `FLASK_ENV=production`.
-- `UPLOAD_FOLDER`: Directory used to persist uploaded image/PDF files (job files and shared files). Defaults to an app-relative `uploads/` folder.
+- `UPLOAD_FOLDER`: Directory used to persist uploaded image/PDF files (job files and shared files). Defaults to an app-relative `uploads/` folder when running from source; the Docker image sets it to `/app/uploads`, and the bundled `docker-compose.yml` moves it to `/tmp/uploads` on the tmpfs so the container filesystem can stay read-only — where these files do not survive a restart. Point it at a mounted path to keep them.
 - `JOB_FILE_TTL_SECONDS`: How long persisted image/PDF job files are kept so they can be reprinted or re-opened (default `86400`, i.e. 24 hours).
+- `MAX_PDF_PAGES`: How many PDF pages one print job may rasterise (default `20`). Every selected page is rendered into memory before the first label is sent, so the cost of a job is the sum of its pages — about 26 MB per A4 page at 300 dpi, four times that at 600. What counts is the **selection**, not the document, so `pages: "1-3"` prints three pages of a 200-page manual. `0` removes the limit; a missing, empty, negative or non-numeric value falls back to the default, because a blank variable in a compose file means "not configured", not "unprotected". The check runs once the page range is parsed and before a single page is rendered, and the refusal names both the limit and the number of pages requested (`details`: `requested_pages`, `total_pages`, `limit`). It applies to `POST /pdf/print` only — `POST /pdf/preview` truncates to the pages it renders and reports `truncated` instead of refusing.
+- `MAX_UPLOAD_IMAGE_PIXELS`: How many pixels an uploaded image may contain (default `50000000`, i.e. 50 MP). Pillow's own `MAX_IMAGE_PIXELS` is a *warning* threshold that only raises above twice its value, so an 8000 × 8000 PNG of 79 KB was decoded in full; this limit is read from the image header before any decode. 50 MP is far above anything that can reach a label — a 62 × 100 mm label is 0.9 MP at 300 dpi and 3.5 MP at 600 — so a photo straight off a full-frame sensor still prints. `0` removes the limit, and the same fallback rule as above applies to anything unparseable. The refusal names the limit and the image's actual size (`details`: `width`, `height`, `pixels`, `limit`). It covers `/image/print`, `/image/preview` and `/label/text-image`.
 - `SHARE_TTL_SECONDS`: How long files staged via the `/share` endpoint are kept before cleanup (default `3600`, i.e. 1 hour).
 - `LOG_LEVEL`: Log level for the root logger (default `INFO`, e.g. `DEBUG` or `WARNING`). The one knob the logging has.
 - `APP_VERSION`: The version `GET /health` reports (default `4.0.0-dev`). Useful for a deployment that wants its own build tag to come back from the health probe.
@@ -416,6 +466,10 @@ The API is fully documented using OpenAPI/Swagger. You can access the interactiv
 - **GET /health**: Liveness probe reporting that the web application process is up. It answers `{"status": "pass", "version": "4.0.0-dev"}` and never touches the printer, so a powered-off printer cannot mark the container unhealthy. The version is the only way to ask a running instance which build it is (override it with `APP_VERSION`)
 - **GET /health/printer**: Readiness probe reporting whether the configured printer is reachable, plus the media it has loaded. The HTTP code follows reachability: 200 when the printer answers, 503 when it does not. A printer that answers but cannot print — open cover, empty media bay — reports `warn` with the blocking reason rather than failing, as does a loaded roll that does not match the configured label size
 
+> **Error responses:** Every error, whichever layer produced it, comes back as the `Error` object the specification declares — `code` (a stable token to switch on), `message` (a sentence for a human) and `details` (always an object, never a string). That now includes the ones the app does not raise itself: the 400s from the specification-driven request validation (`VALIDATION_ERROR`, with the validator's text in `message` — `'text' is a required property`), 401 (`UNAUTHORIZED`), 404 (`RESOURCE_NOT_FOUND`), 405 (`METHOD_NOT_ALLOWED`) and 413 (`PAYLOAD_TOO_LARGE`), which previously answered in three other shapes. Anything a caller can act on keeps its wording: which field is missing, which label sizes exist, that `copies` exceeded its maximum, and the printer's own words when a print failed. Anything from the inside of the app does not: a 500 answers with the fixed message `An internal error occurred` plus `details.error_id`, a short token that also appears in the log record for that failure, so an operator handed the id can find the complete story (type, message, stack trace) in the log. Absolute server paths are removed from every outgoing message centrally, so a message written elsewhere cannot echo the app's own layout back to whoever uploaded a broken file.
+
+> **Upload limits:** A PDF is capped at `MAX_PDF_PAGES` selected pages (default 20) and an uploaded image at `MAX_UPLOAD_IMAGE_PIXELS` pixels (default 50 000 000); `0` removes either limit, and anything unparseable falls back to the default. The check happens before the pages are rendered and before the image is decoded, and the refusal names both the limit and the value that broke it, so it can be acted on without reading the source. **Where it surfaces differs by endpoint**, because the print endpoints enqueue the job before the service ever sees the file: `POST /image/preview` refuses immediately with HTTP 400, while `POST /image/print`, `POST /label/text-image` and `POST /pdf/print` answer `200` with a `job_id` as always and the same message arrives as that job's `failed` status and `error`. See [Environment Variables](#environment-variables) for what each limit costs and why.
+
 > **Large batches:** Any print request that would print 10 or more copies must include an explicit `confirm_large_batch` flag (boolean `true` for JSON endpoints, the string `"true"` for multipart endpoints). Without it the request is rejected with HTTP 400 and the error code `CONFIRMATION_REQUIRED`.
 
 > **Optional `settings`:** On every print and preview endpoint, `settings` (and any field within it) is optional: anything omitted is taken from the app's saved configuration, with request fields overriding. So printing on the configured printer needs no `settings` at all. On the multipart endpoints the `settings` form field is a JSON string, which the specification can only describe as a string; it is parsed and validated against the same `PrintSettings` schema the JSON endpoints use, so `copies: 101` is rejected with HTTP 400 on an upload exactly as it is on `/text/print` instead of being queued and failing later in the worker. Keys the schema does not name still pass, because layout hints ride along in the same object.
@@ -461,15 +515,15 @@ import requests
 
 url = 'http://localhost:5000/api/v1/text/print'
 payload = {
-    "text": {
-        "content": "Hello World!\nThis is a test print.",
-        "font_size": 40,
-        "alignment": "center"
-    },
+    # A plain string on this endpoint; font size and alignment are settings.
+    # (The combined /label/text-qrcode layout takes a text *object* instead.)
+    "text": "Hello World!\nThis is a test print.",
     "settings": {
         "printer_uri": "tcp://192.168.1.100",
         "printer_model": "QL-800",
         "label_size": "62",
+        "font_size": 40,
+        "alignment": "center",
         "rotate": 90,
         "threshold": 70.0,
         "dither": True,
@@ -662,12 +716,12 @@ All print requests are queued and processed sequentially by a single background 
 
 - **Pause/Resume** processing — a job that is already printing finishes; the next ones wait.
 - **Stop** — an emergency stop that pauses the queue and cancels all waiting jobs (a printing job still finishes).
-- **Reprint** a job with the same settings, or **Open** its parameters back into the form.
+- **Reprint** a job with the same settings, or **Open** its parameters back into the form — text, image, QR, combined text+QR, text+image and PDF jobs alike. A calibration job has no compose form to open, so its Open button stays in place and says why instead of failing when pressed.
 - **Delete** a single waiting or finished job, **Clear finished**, or **Clear all**.
 
 The same controls are available via the `/api/v1/jobs/*` endpoints listed above. Image and PDF jobs keep their uploaded file for a configurable time (`JOB_FILE_TTL_SECONDS`, default 24 h) so they can be reprinted or re-opened.
 
-**What a job is doing while it waits.** A job sent to a printer that is switched off at the wall can sit in the queue for minutes while the relay closes and the printer boots, and `status: "queued"` alone makes that indistinguishable from an idle queue. Every job therefore also carries an `activity` — `switching_on`, `waiting_for_printer`, `printer_settling`, `printing`, `retrying`, or null when it is simply waiting its turn — with a readable `activity_message` and the time the phase started (`activity_at`). `status` is unchanged and still has exactly the five values above; the activity is a detail beside it, not a sixth status. The Queue panel draws those phases as a rail — switching on, booting, settling, printing — with what is done behind the current mark and what is still to come ahead of it, so a long wait reads as a place in a sequence rather than as a stall; a retry is the printing step in trouble, so it changes that mark's colour and icon rather than getting a mark of its own. The same phase appears as a pill in the header beside the printer status, with its own slow poll of `/jobs/queue` (every 4.5 s) that stands down whenever the Queue panel is open and polling faster.
+**What a job is doing while it waits.** A job sent to a printer that is switched off at the wall can sit in the queue for minutes while the relay closes and the printer boots, and `status: "queued"` alone makes that indistinguishable from an idle queue. Every job therefore also carries an `activity` — `switching_on`, `waiting_for_printer`, `printer_settling`, `printing`, `retrying`, or null when it is simply waiting its turn — with a readable `activity_message` and the time the phase started (`activity_at`). `status` is unchanged and still has exactly the five values above; the activity is a detail beside it, not a sixth status. A job that has finished takes no further activities: the gate cannot be interrupted and goes on describing its phases for the rest of its wait, so those reports are dropped rather than written onto a job that was cancelled a minute ago — which is what keeps `/jobs/queue` from answering "nothing is queued, nothing is printing, and here is what is currently happening" in the same breath. The Queue panel draws those phases as a rail — switching on, booting, settling, printing — with what is done behind the current mark and what is still to come ahead of it, so a long wait reads as a place in a sequence rather than as a stall; a retry is the printing step in trouble, so it changes that mark's colour and icon rather than getting a mark of its own. The same phase appears as a pill in the header beside the printer status, with its own slow poll of `/jobs/queue` (every 4.5 s) that stands down whenever the Queue panel is open and polling faster.
 
 ## 📲 Share from your Phone
 

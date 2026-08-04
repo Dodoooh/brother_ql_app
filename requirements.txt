@@ -4,6 +4,11 @@
 Flask<2.3.0,>=2.0.0
 connexion[swagger-ui]==2.14.2
 flask-cors==6.0.5
+# Declared explicitly although connexion already pulls it in: src/app.py imports
+# yaml directly to read openapi.yaml before handing it to connexion. Relying on
+# the transitive install would break that import silently the day connexion
+# changes its own dependencies (the connexion 3 migration, most likely).
+PyYAML==6.0.3
 
 # Printer communication
 brother-ql-inventree==1.3

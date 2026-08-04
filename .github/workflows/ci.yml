@@ -17,10 +17,10 @@ jobs:
   # image.
   #
   # NOTE on blocking behaviour:
-  #   - ruff and pytest are intentionally still non-blocking (|| true) because
-  #     the codebase is not yet lint-clean and the test suite is still being
-  #     added. To make them block the build later, simply drop the `|| true`
-  #     from the corresponding step.
+  #   - ruff is intentionally still non-blocking (|| true) because the codebase
+  #     is not yet lint-clean. To make it block the build later, simply drop the
+  #     `|| true` from that step.
+  #   - pytest IS blocking: a failing test must stop the build.
   #   - pip-audit IS blocking (no `|| true`): a known vulnerability in the
   #     pinned/installed requirements must fail the pipeline and stop the build.
   test:
@@ -35,6 +35,17 @@ jobs:
         with:
           python-version: "3.11"
 
+      # The same font family the runtime image installs (see Dockerfile). Every
+      # rendering test looks for a real TrueType face and quietly skips itself
+      # when the host has none -- which on a bare runner was all of them, so a
+      # third of the suite never ran here and two genuine failures went unseen
+      # for weeks. `fonts-dejavu-core` is not enough: the markup tests need the
+      # oblique faces, which only the full package ships.
+      - name: Install DejaVu fonts (the render tests need a real font)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends fonts-dejavu
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -45,10 +56,10 @@ jobs:
       - name: Lint (ruff)
         run: ruff check . || true
 
-      # Non-blocking for now (test suite still being added) — remove `|| true`
-      # to enforce.
+      # BLOCKING: a failing test fails the job and, via `needs: test`, stops the
+      # image from being built and pushed.
       - name: Run tests (pytest)
-        run: pytest -q || true
+        run: pytest -q
 
       # BLOCKING: audit the pinned requirements. A vulnerability finding fails
       # this step, fails the `test` job, and (via `needs: test`) prevents the

@@ -6,7 +6,6 @@ import logging
 import structlog
 from flask import request, jsonify
 from flask_cors import CORS
-from pathlib import Path
 
 # Application version (surfaced by the /health liveness endpoint)
 APP_VERSION = os.environ.get("APP_VERSION", "4.0.0-dev")
@@ -37,9 +36,6 @@ structlog.configure(
     wrapper_class=structlog.stdlib.BoundLogger,
     cache_logger_on_first_use=True,
 )
-
-# Set root logger level to DEBUG to capture all messages
-#logging.basicConfig(level=logging.DEBUG, format='%(message)s') # Basic config for root logger
 
 # Create logger
 logger = structlog.get_logger()
@@ -352,14 +348,6 @@ def init_config():
         else:
             # This case should ideally not happen if the entrypoint runs correctly.
             logger.warning("SKIP_INIT_CONFIG is true, but initialization flag not found in data directory. Entrypoint might have failed.")
-            # Optionally, create the flag here as a fallback, though it indicates an issue.
-            # try:
-            #     os.makedirs(data_dir, exist_ok=True)
-            #     with open(init_flag_file, 'w') as f: f.write('')
-            #     os.chmod(init_flag_file, 0o666)
-            #     logger.info("Created missing initialization flag in data directory as fallback.")
-            # except Exception as e:
-            #     logger.error(f"Failed to create fallback initialization flag: {str(e)}")
         return # Skip the rest of the function
 
     # --- Fallback Logic (Should NOT run in standard Docker deployment) ---

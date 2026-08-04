@@ -42,8 +42,17 @@ def _preview_response(data_url: str) -> Union[Dict[str, Any], Response]:
     ``X-Label-Width-Px`` / ``X-Label-Height-Px`` headers. Otherwise the default
     JSON wrapper ``{"image": "data:image/png;base64,..."}`` is returned (keeping
     existing clients, including the bundled UI, working unchanged).
+
+    Content negotiation needs a live request, and there is not always one: these
+    functions are plain callables that anything in-process may invoke directly.
+    Without a request there is no ``Accept`` to honour, so the documented
+    default -- the JSON wrapper -- is what comes back, rather than the render
+    being lost to a context error. Same reasoning as :func:`_get_upload_folder`.
     """
-    accept = (request.headers.get("Accept") or "").lower()
+    try:
+        accept = (request.headers.get("Accept") or "").lower()
+    except RuntimeError:
+        accept = ""
     if "image/png" in accept and "application/json" not in accept:
         png = base64.b64decode(data_url.split(",", 1)[1])
         headers = {}

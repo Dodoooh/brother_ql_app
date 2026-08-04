@@ -11,6 +11,8 @@ setup(
         "Flask<2.3.0,>=2.0.0",
         "connexion[swagger-ui]==2.14.2",
         "flask-cors==6.0.5",
+        # Imported directly by src/app.py, not just transitively via connexion.
+        "PyYAML==6.0.3",
         # Printer communication
         "brother-ql-inventree==1.3",
         "Pillow==12.3.0",

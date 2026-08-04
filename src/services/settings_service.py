@@ -13,54 +13,25 @@ from brother_ql.backends import guess_backend
 
 from src.utils.uri_validation import validate_printer_uri, validate_webhook_url
 
-# Attempt to import default settings, handle potential import errors during startup phases
-try:
-    from src.config.default_settings import (
-        DEFAULT_SETTINGS,
-        BLEED_LIMIT_MM,
-        CALIBRATION_LIMIT_MM,
-        CALIBRATION_SCALE_MAX,
-        CALIBRATION_SCALE_MIN,
-        PRINTER_AUTO_POWER_OFF_CHOICES,
-        TURN_OFF_DELAY_LIMIT_MINUTES,
-        medium_key,
-        medium_variants,
-        supported_label_identifiers,
-    )
-except ImportError:
-    BLEED_LIMIT_MM = 5.0
-    CALIBRATION_LIMIT_MM = 10.0
-    CALIBRATION_SCALE_MIN = 0.95
-    CALIBRATION_SCALE_MAX = 1.05
-    PRINTER_AUTO_POWER_OFF_CHOICES = (10, 20, 30, 40, 50, 60)
-    TURN_OFF_DELAY_LIMIT_MINUTES = 60
-
-    def medium_key(label_size):  # type: ignore[misc]
-        return label_size
-
-    def medium_variants(label_size):  # type: ignore[misc]
-        return (label_size,)
-
-    def supported_label_identifiers():  # type: ignore[misc]
-        return None
-
-    logger = structlog.get_logger()
-    logger.error("Failed to import DEFAULT_SETTINGS. Using fallback defaults.")
-    # Define fallback defaults directly if import fails
-    DEFAULT_SETTINGS = {
-        "printer_uri": "tcp://192.168.1.100", "printer_model": "QL-800", "label_size": "62",
-        "font_size": 50, "alignment": "left", "rotate": 0, "threshold": 70.0,
-        "dither": False, "compress": False, "red": False,
-        "keep_alive_enabled": False, "keep_alive_interval": 60, "calibration": {},
-        "bleed_mm": {},
-        "media_auto_switch": False, "owned_media": [], "media_memory": {},
-        "media_preference": {},
-        "relay_webhook_enabled": False, "relay_webhook_turn_on_url": "",
-        "relay_webhook_turn_off_url": "", "relay_webhook_turn_off_enabled": False,
-        "relay_webhook_turn_off_delay_minutes": 5,
-        "printer_auto_power_off_minutes": 10,
-        "printers": [{"id": "default", "name": "Default Printer", "printer_uri": "tcp://192.168.1.100", "printer_model": "QL-800", "label_size": "62"}]
-    }
+# Imported unguarded, and deliberately so. This used to sit in a try/except
+# ImportError with a second, hand-written copy of DEFAULT_SETTINGS in the except
+# branch -- a copy that had silently fallen three releases behind (no
+# calibration, no bleed, no media detection, no relay control). A failing import
+# here means the package is broken, and starting anyway with a stale
+# configuration is worse than not starting at all. default_settings itself
+# imports nothing but `typing`, so there is no import order that can fail.
+from src.config.default_settings import (
+    DEFAULT_SETTINGS,
+    BLEED_LIMIT_MM,
+    CALIBRATION_LIMIT_MM,
+    CALIBRATION_SCALE_MAX,
+    CALIBRATION_SCALE_MIN,
+    PRINTER_AUTO_POWER_OFF_CHOICES,
+    TURN_OFF_DELAY_LIMIT_MINUTES,
+    medium_key,
+    medium_variants,
+    supported_label_identifiers,
+)
 
 logger = structlog.get_logger()
 

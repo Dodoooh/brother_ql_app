@@ -23,6 +23,7 @@ import os
 import pytest
 
 from src.services.printer_service import (
+    MIN_AUTO_FIT_FONT_SIZE,
     PrinterService,
     get_label_geometry,
     get_round_line_widths,
@@ -404,11 +405,52 @@ def test_rectangular_die_cut_shrinks_rather_than_breaking_a_word(
 
 @pytest.mark.parametrize("label_size", ["12", "62"])
 def test_continuous_tape_still_keeps_words_whole(service, drawn_lines, label_size):
-    """Guard the rule this borrows from; endless tape already got it right."""
-    service._create_text_label(
-        "Kalibrierungsetikett 2026", {"label_size": label_size, "font_size": 50})
+    """Guard the rule this borrows from; endless tape already got it right.
 
-    assert " ".join(drawn_lines).split() == ["Kalibrierungsetikett", "2026"]
+    The word has to be one the shrink can actually rescue on the narrower of
+    the two tapes: "Kalibriert" measures 43 px at the auto-fit floor of 8 px,
+    comfortably inside the 86 px of text area a 12 mm tape offers. Where that
+    is not true, the floor decides instead -- see the test below.
+    """
+    service._create_text_label(
+        "Kalibriert 2026", {"label_size": label_size, "font_size": 50})
+
+    assert " ".join(drawn_lines).split() == ["Kalibriert", "2026"]
+
+
+def test_a_word_wider_than_the_tape_breaks_only_at_the_font_floor(
+        service, drawn_lines):
+    """Keeping words whole ends where ``MIN_AUTO_FIT_FONT_SIZE`` does.
+
+    This case was once asserted as "12 mm keeps 'Kalibrierungsetikett' whole",
+    which no implementation could have delivered: auto-fit stops shrinking at
+    MIN_AUTO_FIT_FONT_SIZE = 8 px, and at 8 px DejaVu Sans Bold sets that word
+    92 px wide, while a 12 mm tape offers 86 px of text area (106 px printable
+    less a 10 px margin a side). It would first fit at 7 px -- below the floor,
+    and below anything worth printing. The floor is deliberate, so on a tape
+    this narrow the guarantee is the weaker one asserted here: shrink all the
+    way down first, break as late as the floor permits, and lose nothing.
+    """
+    font_module = pytest.importorskip("PIL.ImageFont")
+
+    service._create_text_label(
+        "Kalibrierungsetikett 2026", {"label_size": "12", "font_size": 50})
+
+    words = " ".join(drawn_lines).split()
+    # Every character survives in order: the break inserts nothing, drops
+    # nothing, and only the word too wide to fit is split at all.
+    assert "".join(words) == "Kalibrierungsetikett2026"
+    assert words[-1] == "2026"
+
+    # And the break really is as late as the floor allows. Measured at the
+    # floor, each drawn line fits the tape while one more character would not
+    # -- which is only true if the wrap was computed at 8 px, not at some
+    # larger size that gave up earlier.
+    font = font_module.truetype(service.font_path, MIN_AUTO_FIT_FONT_SIZE)
+    text_area = WIDTH_12MM - 20
+    assert max(font.getlength(line) for line in drawn_lines) <= text_area
+    first_line, remainder = drawn_lines[0], drawn_lines[1]
+    assert font.getlength(first_line + remainder[0]) > text_area
 
 
 @pytest.mark.parametrize("label_size", ["d24", "d12", "62x29"])

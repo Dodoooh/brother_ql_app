@@ -231,20 +231,6 @@
     }
 
     /**
-     * Build a PNG blob Response from a data URL.
-     */
-    function pngResponse(dataUrl) {
-        const base64 = dataUrl.split(',')[1];
-        const bytes = atob(base64);
-        const buf = new Uint8Array(bytes.length);
-        for (let i = 0; i < bytes.length; i++) buf[i] = bytes.charCodeAt(i);
-        return new Response(buf, {
-            status: 200,
-            headers: { 'Content-Type': 'image/png' }
-        });
-    }
-
-    /**
      * Draw a stand-in alignment target as a PNG data URL: a crosshair through
      * the centre, concentric rings and edge ticks, which is what the real
      * server renders for a calibration test print. Drawn on a canvas rather

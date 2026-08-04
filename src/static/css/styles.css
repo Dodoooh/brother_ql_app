@@ -1680,12 +1680,6 @@ body.dark-mode .queue-badge { color: #06222B; }
     background: var(--panel-2);
     color: var(--muted);
 }
-.lp-flag--warn {
-    border-color: color-mix(in srgb, var(--red) 40%, var(--border));
-    color: var(--red);
-    background: transparent;
-}
-
 .lp-empty {
     padding: 14px;
     font-size: 12px;
