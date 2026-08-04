@@ -42,9 +42,30 @@
             hq: true,
             keep_alive_enabled: true,
             keep_alive_interval: 60,
-            keep_alive_mode: 'forever',
-            keep_alive_duration_seconds: 7200,
+            // A timed window rather than "forever", because the whole relay
+            // timing chain hangs off one: the turn-off moment is measured from
+            // the end of it, and with no window there is nothing for the
+            // Settings panel to draw. 4 h with a 10 min device timer is the
+            // configuration the documentation works through, so the demo shows
+            // the chain everybody has already read about.
+            keep_alive_mode: 'timed',
+            keep_alive_duration_seconds: 14400,
             ipp_port: 631,
+            // Relay power control, switched on. The demo exists to show what
+            // the app does, and a feature that is off shows one master switch
+            // and nothing else. The turn-off half is armed too: it is the half
+            // that produces a scheduled moment, and the countdown to it is the
+            // one part of this chain that visibly moves.
+            //
+            // The URL is a plausible LAN address for a Shelly-style relay. It
+            // is never called: the fetch patch below answers the send endpoint
+            // itself, so nothing leaves the browser.
+            relay_webhook_enabled: true,
+            relay_webhook_turn_on_url: 'http://192.168.1.42/relay/0?turn=on',
+            relay_webhook_turn_off_url: '',
+            relay_webhook_turn_off_enabled: true,
+            relay_webhook_turn_off_delay_minutes: 5,
+            printer_auto_power_off_minutes: 10,
             printers: [
                 {
                     id: 'default',
@@ -61,7 +82,29 @@
             running: true
         },
         jobs: [],
-        queue: { paused: false, queued: 0, printing: 0 }
+        // `activityJobId` is the mock's version of the queue worker's
+        // "job in hand": the one job an activity may be attributed to, so
+        // /jobs and /jobs/queue can never disagree about which job is busy.
+        queue: { paused: false, queued: 0, printing: 0, activityJobId: null },
+        relay: {
+            // The moment the timing chain is measured from. The seeded jobs are
+            // written as if they had just run, so the chain starts from now and
+            // every print pushes it along again.
+            lastPrintAt: Date.now(),
+            // What the simulated relay was last told to do, and when. Written
+            // by the cold start below, which is the only thing in the demo that
+            // would send a webhook if there were anything to send it to.
+            lastAction: null,
+            lastActionAt: null,
+            // A hand-fired webhook records itself here rather than under
+            // last_action: in the demo nothing is delivered, and a "last
+            // webhook: turn_on" line would say it was.
+            lastError: null,
+            lastErrorAt: null,
+            // Whether the simulated printer has mains power. False at load, so
+            // the first print tells the cold-start story; see coldStartPhases.
+            printerPowered: false
+        }
     };
 
     /**
@@ -164,6 +207,16 @@
             can_reprint: true
         }
     ];
+
+    // Every job record carries the activity triplet, exactly as the server's
+    // does: null all round for a job nothing in particular is happening to,
+    // which is every seeded one. A job that was merely waiting its turn has no
+    // activity, and a finished one never keeps the activity it had.
+    state.jobs.forEach(job => {
+        job.activity = null;
+        job.activity_message = null;
+        job.activity_at = null;
+    });
 
     // A tiny light-gray label with the word "DEMO", encoded as a PNG data URL.
     // Used as the placeholder for every preview endpoint.
@@ -311,9 +364,210 @@
         return type;
     }
 
+    // ===================== What a job is doing =====================
+    //
+    // The interesting half of a print in the real app happens before anything
+    // is printed. A job that arrives at a printer whose mains supply is off
+    // waits in the queue -- as "queued", which is what it is -- while the relay
+    // is told to switch the printer on, the device boots, and the app decides
+    // it is ready. Each of those phases is named by an `activity` token
+    // (src/utils/job_activity.py), and the UI draws them as the rail in the
+    // Queue panel and the pill in the header.
+    //
+    // Without the fields, the demo showed neither: a mocked print went from
+    // queued to printing in under a second and the feature the queue was
+    // rebuilt around was invisible on the only build most people ever see.
+
+    // The fallback wording, mirroring ACTIVITY_MESSAGES. Used exactly where the
+    // server uses it: a phase that reports a token without a sentence of its
+    // own. Deliberately free of numbers, because a duration belongs to whoever
+    // owns it.
+    // The states a job never comes back from, and therefore never carries an
+    // activity in: nothing is happening to a job that is done, failed or
+    // cancelled.
+    const FINISHED_STATES = ['done', 'failed', 'cancelled'];
+
+    const ACTIVITY_MESSAGES = {
+        switching_on: 'Switching the printer on at the relay.',
+        waiting_for_printer: 'Waiting for the printer to come up.',
+        printer_settling: 'The printer is answering; letting it settle before printing.',
+        printing: 'Printing.',
+        retrying: 'The print did not go through; trying again.'
+    };
+
     /**
-     * Queue a new demo job for a print request and flip it to "done" shortly
-     * after, so the UI sees it move through the queue on the next poll.
+     * Write an activity onto a job, or clear it.
+     *
+     * The three fields move together, the way they do on the server: clearing
+     * drops the message and the timestamp with it, so a finished job never
+     * keeps the phase it was last in.
+     *
+     * @param {Object} job - the demo job record
+     * @param {?string} activity - a token, or null to clear
+     * @param {?string} [message] - the phase's own sentence; the fallback is
+     *   used when a token arrives without one
+     */
+    function setJobActivity(job, activity, message) {
+        job.activity = activity || null;
+        job.activity_message = activity
+            ? (message || ACTIVITY_MESSAGES[activity] || null)
+            : null;
+        job.activity_at = activity ? new Date().toISOString() : null;
+    }
+
+    // The cold start, in compressed seconds.
+    //
+    // This is the sequence the real app runs when a job arrives at a printer
+    // that is switched off at the wall, with one failed print attempt in it so
+    // the rail also shows `retrying` -- which is the one phase a healthy run
+    // never reaches, and therefore the one nobody would otherwise see.
+    //
+    // The real thing takes about 45 s to a minute: 20 s of not looking at the
+    // printer at all, up to 120 s of probing, a 5 s grace, then attempts 20 s
+    // apart. Nobody watches a web demo for a minute, so every wait is scaled
+    // down to roughly a tenth and the sentences quote the compressed numbers
+    // rather than the real ones. A demo whose text says 20 s while the bar
+    // moves on in 3 is a demo that has to be explained.
+    //
+    // The wording is otherwise the server's own, phrase for phrase
+    // (relay_service._wait_until_ready, _first_pause_message and
+    // queue_service._hold_before_attempt), so what is read here is what is read
+    // in front of a real printer.
+    const COLD_START_PHASES = [
+        {
+            activity: 'switching_on', status: 'queued', seconds: 2.0,
+            message: 'Switching the printer on at the relay.',
+            // The webhook the real gate sends at this point. In the demo it
+            // moves the simulated mains state and the "last webhook" line in
+            // Settings, and nothing else: no request is made.
+            onEnter: function () {
+                state.relay.lastAction = 'turn_on';
+                state.relay.lastActionAt = new Date().toISOString();
+                state.relay.printerPowered = true;
+            }
+        },
+        {
+            activity: 'waiting_for_printer', status: 'queued', seconds: 3.0,
+            message: 'Switched on at the relay. Leaving the printer alone for 3s ' +
+                'while it boots.'
+        },
+        {
+            activity: 'waiting_for_printer', status: 'queued', seconds: 2.5,
+            message: 'Waiting for the printer to come up.'
+        },
+        {
+            activity: 'printer_settling', status: 'queued', seconds: 3.0,
+            message: 'The printer reports itself ready. Giving it 3s before printing.'
+        },
+        {
+            activity: 'printing', status: 'printing', seconds: 2.0,
+            message: 'Printing (attempt 1 of 3).'
+        },
+        {
+            // The built-in failure. A printer that has just been switched on can
+            // refuse the first raster it is handed -- its IPP port comes and
+            // goes during the boot -- which is why the real app tries three
+            // times before the failure is the job's. Note the status: a job
+            // between attempts is back to `queued`, not `printing`. It is not on
+            // the wire, and it can still be cancelled.
+            activity: 'retrying', status: 'queued', seconds: 3.0,
+            message: 'Attempt 1 of 3 did not go through (the printer refused the ' +
+                'raster). Trying again in 3s.'
+        },
+        {
+            activity: 'printing', status: 'printing', seconds: 2.0,
+            message: 'Printing (attempt 2 of 3).'
+        }
+    ];
+
+    // A print at a printer that is already up: a moment in the queue with no
+    // activity at all, then the wire. The real app does exactly this -- the
+    // gate returns immediately for a printer that answers, with no webhook, no
+    // wait and no retries -- and the absence of a rail is part of what the
+    // demo should show, because it is what almost every print looks like.
+    const WARM_PHASES = [
+        { activity: null, status: 'queued', seconds: 0.7, message: null },
+        { activity: 'printing', status: 'printing', seconds: 1.1, message: null }
+    ];
+
+    /**
+     * Move a job through a list of phases, one timer at a time.
+     *
+     * Everything the two endpoints report is read from the job record itself,
+     * so `GET /jobs` and `GET /jobs/queue` cannot drift apart: the queue status
+     * names the job it is attributing an activity to and then reads that job.
+     *
+     * @param {Object} job - the demo job record
+     * @param {Array<Object>} phases - the phases to walk
+     * @param {number} index - which phase to enter now
+     */
+    function runJobPhases(job, phases, index) {
+        // The job may have been cancelled or deleted while a phase was running,
+        // which is a thing a user can do to every phase here except the two
+        // that are on the wire. Nothing more is owed to it then.
+        if (state.jobs.indexOf(job) === -1 || job.status === 'cancelled') {
+            if (state.queue.activityJobId === job.id) state.queue.activityJobId = null;
+            recountQueue();
+            return;
+        }
+
+        const phase = phases[index];
+        if (!phase) {
+            job.status = 'done';
+            job.finished_at = new Date().toISOString();
+            setJobActivity(job, null);
+            state.queue.activityJobId = null;
+            // Something printed, so the timing chain restarts from here: the
+            // keep-alive window, the printer's own timer and the scheduled
+            // turn-off are all measured from the last print.
+            state.relay.lastPrintAt = Date.now();
+            recountQueue();
+            return;
+        }
+
+        job.status = phase.status;
+        if (phase.status === 'printing' && !job.started_at) {
+            // "started" is when the printing began, not when the attempt that
+            // happened to work did, so a retry does not move it.
+            job.started_at = new Date().toISOString();
+        }
+        setJobActivity(job, phase.activity, phase.message);
+        state.queue.activityJobId = phase.activity ? job.id : null;
+        if (typeof phase.onEnter === 'function') phase.onEnter();
+        recountQueue();
+
+        setTimeout(() => runJobPhases(job, phases, index + 1), phase.seconds * 1000);
+    }
+
+    /**
+     * Which sequence a print takes: the cold start, or straight to the wire.
+     *
+     * Only the first print of a session takes the cold start, and that is the
+     * honest answer rather than a shortcut. The gate runs when the printer does
+     * not answer; once it has been switched on it stays on -- the keep-alive
+     * heartbeat is what holds it there -- so a second job a minute later really
+     * does go straight to printing. Replaying the boot for every print would
+     * show a printer being switched on that is already on, and would put 17 s
+     * in front of every action in a demo somebody is clicking through.
+     *
+     * The simulated mains state is what decides it, so the story can be watched
+     * again: firing turn_off by hand from Settings puts the printer back to
+     * sleep, and the next print boots it again. Switching relay power control
+     * off in the demo's own settings takes the whole sequence away, which is
+     * also what that switch does in the real app.
+     *
+     * @returns {Array<Object>} the phases for this job
+     */
+    function phasesForPrint() {
+        if (state.settings.relay_webhook_enabled && !state.relay.printerPowered) {
+            return COLD_START_PHASES;
+        }
+        return WARM_PHASES;
+    }
+
+    /**
+     * Queue a new demo job for a print request and walk it through the phases a
+     * real job goes through, so the UI sees it move on its next poll.
      *
      * @param {string} type - the queue type, as shown in the job row
      * @param {Object} body - the parsed request body
@@ -333,23 +587,19 @@
             error: null,
             params: Object.assign({ type: paramsType || type },
                                   body && typeof body === 'object' ? body : {}),
-            can_reprint: true
+            can_reprint: true,
+            activity: null,
+            activity_message: null,
+            activity_at: null
         };
         state.jobs.unshift(job);
-        state.queue.queued += 1;
+        recountQueue();
 
-        // Simulate processing: printing, then done.
-        setTimeout(() => {
-            job.status = 'printing';
-            job.started_at = new Date().toISOString();
-            state.queue.queued = Math.max(0, state.queue.queued - 1);
-            state.queue.printing = 1;
-        }, 700);
-        setTimeout(() => {
-            job.status = 'done';
-            job.finished_at = new Date().toISOString();
-            state.queue.printing = 0;
-        }, 1800);
+        const phases = phasesForPrint();
+        // A short beat before the first phase, so the job is visibly queued
+        // before anything happens to it -- exactly as a real one is while the
+        // worker picks it up.
+        setTimeout(() => runJobPhases(job, phases, 0), 400);
 
         return id;
     }
@@ -452,6 +702,14 @@
             return jsonResponse({ printers: state.settings.printers });
         }
 
+        // ----- Relay power control -----
+        if (p === '/printers/relay-power' && method === 'GET') {
+            return jsonResponse(relayPowerStatus());
+        }
+        if (p === '/printers/relay-power/send' && method === 'POST') {
+            return relayPowerSend(body && body.action);
+        }
+
         // ----- Jobs: list + queue state -----
         if (p === '/jobs' && method === 'GET') {
             // Newest first (jobs are unshifted, but sort defensively by created_at).
@@ -507,6 +765,12 @@
                 if (job && job.status === 'queued') {
                     job.status = 'cancelled';
                     job.finished_at = new Date().toISOString();
+                    // A cancelled job is not waiting for a printer any more,
+                    // whatever phase it was in when the button was pressed.
+                    setJobActivity(job, null);
+                    if (state.queue.activityJobId === job.id) {
+                        state.queue.activityJobId = null;
+                    }
                     recountQueue();
                     return jsonResponse({ cancelled: true });
                 }
@@ -613,13 +877,297 @@
 
     /**
      * Current queue control status snapshot.
+     *
+     * It carries the current job's activity as well as the counts, because the
+     * counts alone cannot tell a queue that is idle from one that is holding a
+     * job while a printer boots: both report one queued job and nothing
+     * printing. The activity is read off the job the mock has in hand rather
+     * than kept as a second copy, so this endpoint and `GET /jobs` are two
+     * views of one record and cannot contradict each other.
      */
     function queueStatus() {
+        const held = state.queue.activityJobId
+            ? state.jobs.find(j => j.id === state.queue.activityJobId)
+            : null;
+        // A job the mock still has in hand but which has already finished (it
+        // was cancelled mid-phase, most often) reports no activity, whatever is
+        // left on it: the counts below no longer count it, and an activity for
+        // it would make the two halves of this answer contradict each other.
+        const job = (held && FINISHED_STATES.indexOf(held.status) === -1) ? held : null;
+        const activity = (job && job.activity) || null;
         return {
             paused: state.queue.paused,
             queued: state.jobs.filter(j => j.status === 'queued').length,
-            printing: state.jobs.filter(j => j.status === 'printing').length
+            printing: state.jobs.filter(j => j.status === 'printing').length,
+            activity: activity,
+            activity_message: activity ? job.activity_message : null,
+            activity_at: activity ? job.activity_at : null,
+            activity_job_id: activity ? job.id : null
         };
+    }
+
+    // ===================== Relay power control =====================
+    //
+    // The status endpoint hands the UI a timing chain that is already worked
+    // out: one place decides what the timing is, and the UI only formats it.
+    // This mock therefore has to do the deriving too, or the Settings panel
+    // draws nothing -- which is what it did while this endpoint fell into the
+    // catch-all and answered {}.
+    //
+    // The arithmetic below is relay_service's, in the same order:
+    //
+    //     effective keep-alive = window - the printer's own interval
+    //                            (only while relay power control is on)
+    //     printer powers off   = effective + the printer's own interval
+    //     turn_off is sent     = window + the safety margin
+    //
+    // all measured from the last print, which the demo moves forward every time
+    // a job finishes. Every moment is reported twice, absolutely and as seconds
+    // remaining, because that is the contract the countdown is driven from: the
+    // UI corrects for clock skew once and then ticks locally.
+
+    // The safety warning, verbatim from AUTO_POWER_OFF_MISMATCH_WARNING. Copied
+    // rather than paraphrased for the reason the UI shows it verbatim: two
+    // wordings of a warning about cutting power to a running printer is one too
+    // many.
+    const RELAY_WARNING =
+        "This app cannot read or change the printer's built-in auto-power-off " +
+        'time. The value configured here is a statement about the device rather ' +
+        'than a setting on it, and nothing verifies that the two agree. Set it to ' +
+        "exactly what the printer's own menu shows. If the interval on the device " +
+        'is longer than the value configured here, the relay will cut mains power ' +
+        'while the printer is still running, which can interrupt a print mid-feed ' +
+        'and can damage the printer.';
+
+    /**
+     * Seconds from now until a moment, clamped at zero, or null when there is
+     * no moment.
+     * @param {?number} moment - unix timestamp in seconds
+     * @param {number} now - unix timestamp in seconds
+     * @returns {?number}
+     */
+    function relayUntil(moment, now) {
+        return moment === null ? null : Math.max(0, moment - now);
+    }
+
+    /**
+     * ISO-8601 UTC for a unix timestamp, or null.
+     * @param {?number} moment - unix timestamp in seconds
+     * @returns {?string}
+     */
+    function relayIso(moment) {
+        return moment === null ? null : new Date(moment * 1000).toISOString();
+    }
+
+    /**
+     * The relay power status, derived from the demo settings the same way the
+     * service derives it from the real ones.
+     */
+    function relayPowerStatus() {
+        const s = state.settings;
+        const now = Date.now() / 1000;
+
+        const enabled = !!s.relay_webhook_enabled;
+        const turnOffEnabled = !!s.relay_webhook_turn_off_enabled;
+        const hardware = Math.max(0, s.printer_auto_power_off_minutes || 0) * 60;
+        const delay = Math.max(0, s.relay_webhook_turn_off_delay_minutes || 0) * 60;
+
+        // A window exists only while keep-alive is on, timed, and non-zero.
+        // Nothing is scheduled without one, because the turn-off moment is
+        // measured from the end of a window the app is holding open.
+        const timed = s.keep_alive_mode === 'timed' &&
+            (s.keep_alive_duration_seconds || 0) > 0;
+        const window_ = (s.keep_alive_enabled && timed) ? s.keep_alive_duration_seconds : null;
+
+        const offsetApplied = enabled && timed;
+        const effective = window_ === null ? null
+            : (enabled ? Math.max(0, window_ - hardware) : window_);
+        const powerOffSeconds = effective === null ? null : effective + hardware;
+
+        let originAt = state.relay.lastPrintAt / 1000;
+        let originSource = 'print';
+        let lastPrintAt = originAt;
+
+        // The turn-off is armed by a print, so in the demo it is armed exactly
+        // when there has been one -- and only while both halves are switched on.
+        let scheduled = (enabled && turnOffEnabled && window_ !== null)
+            ? originAt + window_ + delay
+            : null;
+
+        // A window that has already run out is re-based to now and says so:
+        // "idle" means the moments below are what a print landing now would
+        // start, not what is scheduled. Only reachable in a demo left open for
+        // hours, which is precisely when a dead chain would look broken.
+        if (window_ !== null) {
+            const moments = [originAt + effective, originAt + powerOffSeconds];
+            if (scheduled !== null) moments.push(scheduled);
+            if (Math.max.apply(null, moments) <= now) {
+                originAt = now;
+                originSource = 'idle';
+                scheduled = null;
+            }
+        }
+
+        const keepAliveEndsAt = (window_ === null || effective === null)
+            ? null : originAt + effective;
+        const printerPowerOffAt = (window_ === null || powerOffSeconds === null)
+            ? null : originAt + powerOffSeconds;
+
+        // Which step the chain is waiting on. Decided here rather than left to
+        // the client, exactly as the service decides it: the question is which
+        // of these steps exists at all, and that is settings logic.
+        let nextStep = null;
+        let nextStepAt = null;
+        [['keep_alive_end', keepAliveEndsAt],
+         ['printer_power_off', printerPowerOffAt],
+         ['turn_off', scheduled]].forEach(entry => {
+            const moment = entry[1];
+            if (moment === null || moment <= now) return;
+            if (nextStepAt === null || moment < nextStepAt) {
+                nextStep = entry[0];
+                nextStepAt = moment;
+            }
+        });
+
+        return {
+            enabled: enabled,
+            turn_off_enabled: turnOffEnabled,
+            turn_on_url_configured: !!String(s.relay_webhook_turn_on_url || '').trim(),
+            turn_off_url_configured: !!String(
+                s.relay_webhook_turn_off_url || s.relay_webhook_turn_on_url || '').trim(),
+            // No environment to read a credential from on a static host, so the
+            // honest answer is "none is sent".
+            authorization_configured: false,
+            printer_auto_power_off_minutes: Math.round(hardware / 60),
+            configured_window_seconds: window_,
+            effective_keep_alive_seconds: effective,
+            hardware_offset_applied: offsetApplied,
+            printer_power_off_seconds: powerOffSeconds,
+            turn_off_delay_seconds: delay,
+
+            server_time: now,
+            origin_at: originAt,
+            origin_at_iso: relayIso(originAt),
+            origin_source: originSource,
+            seconds_since_origin: Math.max(0, now - originAt),
+            last_print_at: lastPrintAt,
+            last_print_at_iso: relayIso(lastPrintAt),
+            seconds_since_last_print: Math.max(0, now - lastPrintAt),
+            keep_alive_ends_at: keepAliveEndsAt,
+            keep_alive_ends_at_iso: relayIso(keepAliveEndsAt),
+            seconds_until_keep_alive_end: relayUntil(keepAliveEndsAt, now),
+            printer_power_off_at: printerPowerOffAt,
+            printer_power_off_at_iso: relayIso(printerPowerOffAt),
+            seconds_until_printer_power_off: relayUntil(printerPowerOffAt, now),
+            scheduled_turn_off_at: scheduled,
+            scheduled_turn_off_at_iso: relayIso(scheduled),
+            seconds_until_turn_off: relayUntil(scheduled, now),
+            next_step: nextStep,
+            next_step_at: nextStepAt,
+            next_step_at_iso: relayIso(nextStepAt),
+            seconds_until_next_step: relayUntil(nextStepAt, now),
+
+            last_action: state.relay.lastAction,
+            last_action_at: state.relay.lastActionAt,
+            last_error: state.relay.lastError,
+            last_error_at: state.relay.lastErrorAt,
+
+            warning: RELAY_WARNING,
+            warning_armed: enabled && turnOffEnabled
+        };
+    }
+
+    /**
+     * Answer a webhook fired by hand, and say plainly that nothing was sent.
+     *
+     * This is the one endpoint in the whole mock where a cheerful answer would
+     * be a lie with consequences. The catch-all used to return HTTP 200 with an
+     * empty body, out of which the UI built a green "turn_on delivered" -- a
+     * claim that a relay somewhere had switched, when there is no backend to
+     * POST from and no relay to POST to.
+     *
+     * So the report says the request was not confirmed (`success: false`), that
+     * nothing came back (`response_status: null`) and that the mains state is
+     * therefore unknown. Those three fields are what relayFireOutcome() in
+     * relay.js composes its line from, and they produce "turn_on not confirmed"
+     * in the caution colour rather than a green delivery, with the demo's own
+     * explanation behind the "What the server said" toggle.
+     *
+     * The simulated mains state does move, because that is the mock's own
+     * bookkeeping rather than a claim about a webhook: turn_off puts the demo
+     * printer back to sleep so the cold start can be watched again, and turn_on
+     * wakes it as the print path's own webhook does.
+     *
+     * @param {string} action - 'turn_on' | 'turn_off'
+     */
+    function relayPowerSend(action) {
+        const s = state.settings;
+        if (action !== 'turn_on' && action !== 'turn_off') {
+            return jsonResponse({
+                message: "Unknown relay action '" + String(action) + "'. It must be " +
+                    "'turn_on' or 'turn_off'."
+            }, 400);
+        }
+        if (!s.relay_webhook_enabled) {
+            return jsonResponse({
+                message: 'Relay power control is switched off, so nothing was sent. ' +
+                    'Switch relay_webhook_enabled on before sending a webhook by hand.'
+            }, 400);
+        }
+
+        const url = action === 'turn_off'
+            ? (String(s.relay_webhook_turn_off_url || '').trim() ||
+               String(s.relay_webhook_turn_on_url || '').trim())
+            : String(s.relay_webhook_turn_on_url || '').trim();
+        if (!url) {
+            return jsonResponse({
+                message: "No relay webhook URL is configured for '" + action +
+                    "', so nothing was sent."
+            }, 400);
+        }
+
+        const sentAt = new Date().toISOString();
+        // The exact body the real app would have POSTed. Reported for the same
+        // reason the server reports it: "what would you actually send" is the
+        // first question anyone evaluating this feature has.
+        const payload = {
+            action: action,
+            source: 'brother_ql_app',
+            printer_uri: s.printer_uri || '',
+            printer_model: s.printer_model || '',
+            timestamp: sentAt
+        };
+
+        // Carries no URL, deliberately: relay.js drops a reason that names one
+        // (the address is in the field right above the line) and would fall
+        // back to something vaguer.
+        const why = 'nothing was sent, because the demo has no backend and no relay';
+
+        state.relay.lastError = 'The ' + action + ' webhook was simulated: ' + why + '.';
+        state.relay.lastErrorAt = sentAt;
+        state.relay.printerPowered = (action === 'turn_on');
+
+        return jsonResponse({
+            success: false,
+            action: action,
+            url: url,
+            payload: payload,
+            authorization_sent: false,
+            response_status: null,
+            sent_at: sentAt,
+            mains_power: 'unknown',
+            message: 'The ' + action + ' webhook was simulated, not sent. On a real ' +
+                'install this is one POST of the body above to ' + url + ', and the ' +
+                'line here would carry the HTTP status the relay answered with. ' +
+                (action === 'turn_off'
+                    ? 'The demo printer is now treated as switched off, so the next ' +
+                      'print shows the whole switch-on sequence again.'
+                    : 'The demo printer is now treated as switched on, so the next ' +
+                      'print goes straight to the wire.'),
+            error: why,
+            schedule_changed: false,
+            scheduled_turn_off_at: relayPowerStatus().scheduled_turn_off_at
+        });
     }
 
     /**
@@ -631,6 +1179,10 @@
             if (j.status === 'queued') {
                 j.status = 'cancelled';
                 j.finished_at = new Date().toISOString();
+                setJobActivity(j, null);
+                if (state.queue.activityJobId === j.id) {
+                    state.queue.activityJobId = null;
+                }
                 n += 1;
             }
         });
