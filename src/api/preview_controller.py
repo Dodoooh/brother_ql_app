@@ -24,7 +24,7 @@ from PIL import Image, UnidentifiedImageError
 
 from src.services.printer_service import printer_service
 from src.services.settings_service import settings_service
-from src.utils.exceptions import ValidationError, PrinterError
+from src.utils.exceptions import AppError, ValidationError, PrinterError, internal_error
 from src.utils.print_settings_schema import parse_and_validate_settings
 
 logger = structlog.get_logger()
@@ -90,9 +90,17 @@ def preview_text(body: Dict[str, Any]) -> Dict[str, Any]:
     except PrinterError as e:
         logger.error("Printer error rendering text preview", error=str(e), exc_info=True)
         raise
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error rendering text preview", error=str(e), exc_info=True)
-        raise PrinterError(f"Error rendering text preview: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error rendering text preview") from e
 
 
 def preview_qrcode(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -154,9 +162,17 @@ def preview_qrcode(body: Dict[str, Any]) -> Dict[str, Any]:
     except PrinterError as e:
         logger.error("Printer error rendering QR code preview", error=str(e), exc_info=True)
         raise
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error rendering QR code preview", error=str(e), exc_info=True)
-        raise PrinterError(f"Error rendering QR code preview: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error rendering QR code preview") from e
 
 
 def preview_label(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -218,9 +234,17 @@ def preview_label(body: Dict[str, Any]) -> Dict[str, Any]:
     except PrinterError as e:
         logger.error("Printer error rendering label preview", error=str(e), exc_info=True)
         raise
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error rendering label preview", error=str(e), exc_info=True)
-        raise PrinterError(f"Error rendering label preview: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error rendering label preview") from e
 
 
 def preview_image() -> Dict[str, Any]:
@@ -277,9 +301,17 @@ def preview_image() -> Dict[str, Any]:
     except PrinterError as e:
         logger.error("Printer error rendering image preview", error=str(e), exc_info=True)
         raise
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error rendering image preview", error=str(e), exc_info=True)
-        raise PrinterError(f"Error rendering image preview: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error rendering image preview") from e
     finally:
         # The preview never needs to keep the upload around.
         _cleanup_uploaded_file(image_path)

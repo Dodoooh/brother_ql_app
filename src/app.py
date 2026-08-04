@@ -11,7 +11,7 @@ from pathlib import Path
 # Application version (surfaced by the /health liveness endpoint)
 APP_VERSION = os.environ.get("APP_VERSION", "4.0.0-dev")
 
-from src.utils.error_handlers import register_error_handlers
+from src.utils.error_handlers import build_error_body, register_error_handlers
 from src.utils.pillow_patch import apply_pillow_patch
 from src.utils.auth import auth_enabled, is_valid_api_key, API_KEY_HEADER
 from src.services.printer_service import printer_service
@@ -222,7 +222,17 @@ def register_auth(app):
 
         provided = request.headers.get(API_KEY_HEADER)
         if not is_valid_api_key(provided):
-            return jsonify({"error": "unauthorized"}), 401
+            # Answered in the same Error shape as everything else. This used to
+            # be `{"error": "unauthorized"}` -- a fifth wheel that no client
+            # could parse with the same code path as the other four responses.
+            # Naming the header is safe (it is in the published specification)
+            # and saves the caller a round of guessing; whether a key was sent
+            # at all, or was merely wrong, is deliberately not distinguished.
+            return jsonify(build_error_body(
+                "UNAUTHORIZED",
+                "A valid API key is required for this endpoint",
+                {"header": API_KEY_HEADER},
+            )), 401
 
         return None
 

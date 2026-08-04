@@ -14,10 +14,12 @@ from src.services.printer_service import printer_service
 from src.services.queue_service import print_queue
 from src.services.settings_service import settings_service
 from src.utils.exceptions import (
+    AppError,
     ValidationError,
     PrinterError,
     ImageProcessingError,
     ConfirmationRequiredError,
+    internal_error,
 )
 from src.utils.print_settings_schema import parse_and_validate_settings
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
@@ -173,6 +175,14 @@ def print_text_image() -> Dict[str, Any]:
         # HTTP 400, not 500.
         logger.warning("Validation error", error=str(e), exc_info=True)
         raise ValidationError(str(e), "settings")
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error printing text+image label", error=str(e), exc_info=True)
-        raise PrinterError(f"Error printing text+image label: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error printing text+image label") from e

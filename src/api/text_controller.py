@@ -8,7 +8,8 @@ from typing import Dict, Any
 from src.services.printer_service import printer_service
 from src.services.queue_service import print_queue
 from src.services.settings_service import settings_service
-from src.utils.exceptions import ValidationError, PrinterError, ResourceNotFoundError, ConfirmationRequiredError
+from src.utils.exceptions import (AppError, ValidationError, PrinterError, ResourceNotFoundError,
+                                  ConfirmationRequiredError, internal_error)
 from src.utils.print_guard import enforce_large_batch_confirmation, is_confirmed
 from src.utils.dry_run import is_dry_run, build_dry_run_response
 
@@ -86,6 +87,18 @@ def print_text(body: Dict[str, Any]) -> Dict[str, Any]:
         # HTTP 400, not 500.
         logger.warning("Validation error", error=str(e), exc_info=True)
         raise ValidationError(str(e), "settings")
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error printing text", error=str(e), exc_info=True)
-        raise PrinterError(f"Error printing text: {str(e)}")
+        # An unexpected failure here is a bug or a library misbehaving -- not
+        # the printer refusing a job, and not something the caller can act on.
+        # It used to be re-raised as PrinterError(f"...: {e}"), which both
+        # mislabelled it and copied the raw exception text into the response.
+        # internal_error keeps the whole story in the log and hands the client
+        # a correlation id instead.
+        raise internal_error(e, "Error printing text") from e

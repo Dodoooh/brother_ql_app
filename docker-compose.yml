@@ -3,20 +3,55 @@ services:
     image: dodoooh/brother_ql_app:dev
     container_name: brother_ql_app
     ports:
+      # Reachable from the LAN, because that is the point: Home Assistant, a
+      # phone, another host. Behind a reverse proxy on the same machine, bind it
+      # to loopback instead:
+      #   - "127.0.0.1:5000:5000"
       - "5000:5000"
     volumes:
       - ./data:/app/data
-      # Uploads are ephemeral scratch storage (render -> print -> delete, plus a
-      # TTL sweep for shared files) and intentionally not persisted. To keep them,
-      # set the UPLOAD_FOLDER env var below and mount a volume onto that path, e.g.
-      #   environment:
-      #     - UPLOAD_FOLDER=/app/uploads
-      #   volumes:
-      #     - ./uploads:/app/uploads
     restart: unless-stopped
     environment:
       - PYTHONPATH=/app
       - FLASK_ENV=production
+      # Scratch space for rendered labels, job files and shared uploads. It
+      # points into the tmpfs below so the container filesystem can stay
+      # read-only. These files are ephemeral by design -- render, print, delete,
+      # plus a TTL sweep for shares -- and the job list lives in process memory
+      # either way, so a restart loses nothing a restart did not lose before.
+      # To keep them across restarts, point this at a mounted path instead
+      # (UPLOAD_FOLDER=/app/uploads with ./uploads:/app/uploads) and give that
+      # path back its write permission.
+      - UPLOAD_FOLDER=/tmp/uploads
+      # Strongly recommended. Without it this API is unauthenticated, and it can
+      # switch mains power through the relay webhook.
+      # - API_KEY=change-me
+
+    # --- Container hardening -------------------------------------------------
+    # The image already ships application code the runtime user cannot write
+    # (see Dockerfile). This makes that structural: no permission mistake, now
+    # or later, can make /app writable.
+    read_only: true
+    # Everything the process writes at runtime lives here: gunicorn's worker
+    # heartbeat and the rendered-label scratch directory. noexec and nosuid
+    # because nothing in there is ever meant to be executed.
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    # The app opens outbound sockets and listens on 5000, which is above 1024.
+    # It needs no Linux capability at all.
+    cap_drop:
+      - ALL
+    # Neutralises the SUID binaries the base image still carries (mount, su,
+    # passwd) as an escalation path.
+    security_opt:
+      - no-new-privileges:true
+    # Measured at roughly 75 MB idle and under load. The headroom covers the
+    # largest image the app will accept before refusing it (MAX_UPLOAD_IMAGE_
+    # PIXELS, 50 megapixels by default).
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 256
+
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health',timeout=2).status==200 else 1)"]
       interval: 30s

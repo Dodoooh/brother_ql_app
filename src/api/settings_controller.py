@@ -7,7 +7,7 @@ from typing import Dict, Any
 from flask import request
 
 from src.services.settings_service import settings_service
-from src.utils.exceptions import ValidationError, ConfigurationError
+from src.utils.exceptions import AppError, ValidationError, ConfigurationError, internal_error
 
 logger = structlog.get_logger()
 
@@ -22,9 +22,17 @@ def get_settings() -> Dict[str, Any]:
         logger.info("Getting current settings")
         settings = settings_service.get_settings()
         return settings
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error getting settings", error=str(e), exc_info=True)
-        raise ConfigurationError(f"Error getting settings: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error getting settings") from e
 
 def update_settings() -> Dict[str, Any]:
     """
@@ -73,6 +81,14 @@ def update_settings() -> Dict[str, Any]:
         # Pure input/validation errors must map to HTTP 400, not 500.
         logger.warning("Settings validation failed", error=str(e), exc_info=True)
         raise ValidationError(str(e), "settings")
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error updating settings", error=str(e), exc_info=True)
-        raise ConfigurationError(f"Error updating settings: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error updating settings") from e

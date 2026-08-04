@@ -22,18 +22,6 @@ from brother_ql.conversion import convert
 from brother_ql.devicedependent import label_type_specs, right_margin_addition
 from brother_ql.backends import backend_factory, guess_backend
 
-# Import pysnmp for SNMP-based printer communication
-try:
-    from pysnmp.hlapi import (
-        SnmpEngine, CommunityData, UdpTransportTarget, 
-        ContextData, ObjectType, ObjectIdentity, getCmd
-    )
-    SNMP_AVAILABLE = True
-except ImportError:
-    SNMP_AVAILABLE = False
-    logger = structlog.get_logger()
-    logger.warning("pysnmp not available, SNMP-based keep-alive will not work")
-
 from src.config.default_settings import (
     BLEED_LIMIT_MM,
     CALIBRATION_LIMIT_MM,
@@ -5885,25 +5873,6 @@ class PrinterService:
             )
         return info
 
-    def get_printer_clock(self, printer_uri: Optional[str] = None) -> Dict[str, Any]:
-        """Read the printer's real-time clock via IPP and compare to the server.
-
-        Read-only: the Brother QL clock cannot be set programmatically (no IPP
-        Set-Printer-Attributes and no documented protocol command), so this only
-        surfaces a drift warning.
-        """
-        if printer_uri is None:
-            printer_uri = settings_service.get_settings().get("printer_uri", "")
-        if not printer_uri or guess_backend(printer_uri) != "network":
-            return {"available": False, "note": "Clock readout requires a network (tcp://) printer"}
-        ip_address = self._extract_ip_from_uri(printer_uri)
-        ipp = get_printer_attributes(ip_address, port=self._get_ipp_port())
-        if not ipp.get("reachable"):
-            return {"available": False, "note": "Printer not reachable via IPP", "error": ipp.get("error")}
-        clock = self._build_clock_info(ipp.get("current_time"))
-        clock["available"] = ipp.get("current_time") is not None
-        return clock
-
     def _ipp_ping(self, ip_address: str) -> bool:
         """Keep-alive/reachability probe via IPP Get-Printer-Attributes (TCP 631).
 
@@ -5989,64 +5958,6 @@ class PrinterService:
         
         # Handle other formats or return as is if not recognized
         return printer_uri
-    
-    # Class variable to track if we've already logged the SNMP warning
-    _snmp_warning_logged = False
-    
-    def _snmp_ping(self, ip_address: str) -> bool:
-        """
-        Send an SNMP ping to the printer.
-        
-        Args:
-            ip_address: IP address of the printer.
-            
-        Returns:
-            True if successful, False otherwise.
-        """
-        if not SNMP_AVAILABLE:
-            # Only log the warning once per application run
-            if not PrinterService._snmp_warning_logged:
-                logger.warning("SNMP not available, falling back to TCP ping")
-                PrinterService._snmp_warning_logged = True
-            return False
-            
-        try:
-            # Standard printer MIB - System Description
-            system_description_oid = '1.3.6.1.2.1.1.1.0'
-            
-            # Create an SNMP GET request
-            error_indication, error_status, error_index, var_binds = next(
-                getCmd(
-                    SnmpEngine(),
-                    CommunityData('public'),  # SNMP community string, 'public' is common default
-                    UdpTransportTarget((ip_address, 161), timeout=2.0, retries=1),
-                    ContextData(),
-                    ObjectType(ObjectIdentity(system_description_oid))
-                )
-            )
-            
-            if error_indication:
-                logger.warning("SNMP error", ip_address=ip_address, error=str(error_indication))
-                return False
-            elif error_status:
-                logger.warning("SNMP error status", 
-                              ip_address=ip_address, 
-                              error_status=error_status,
-                              error_index=error_index,
-                              var_binds=var_binds)
-                return False
-            else:
-                # Successfully received SNMP response
-                for var_bind in var_binds:
-                    logger.debug("SNMP response", 
-                                ip_address=ip_address, 
-                                oid=var_bind[0].prettyPrint(), 
-                                value=var_bind[1].prettyPrint())
-                return True
-                
-        except Exception as e:
-            logger.warning("SNMP ping failed", ip_address=ip_address, error=str(e))
-            return False
     
     def _tcp_ping(self, ip_address: str) -> bool:
         """

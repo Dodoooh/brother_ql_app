@@ -57,8 +57,6 @@ jobs:
       # The ignored advisories are structural, not oversights:
       #   flask / werkzeug -- connexion 2.14.2 requires werkzeug<2.3, which pins
       #     Flask to 2.2.5. Clearing these means migrating to connexion 3.
-      #   pyasn1 -- pysnmp 4.4.12 breaks against pyasn1>=0.5 (it dropped
-      #     pyasn1.compat.octets), so the old pin is deliberate.
       # Everything outside this list is fixable and must keep failing the build.
       - name: Dependency vulnerability scan (pip-audit)
         run: |
@@ -70,11 +68,7 @@ jobs:
             --ignore-vuln GHSA-q34m-jh98-gwm2 \
             --ignore-vuln GHSA-hgf8-39gv-g3f2 \
             --ignore-vuln GHSA-87hc-h4r5-73f7 \
-            --ignore-vuln GHSA-29vq-49wr-vm6x \
-            --ignore-vuln GHSA-jr27-m4p2-rc6r \
-            --ignore-vuln PYSEC-2026-3455 \
-            --ignore-vuln PYSEC-2026-3456 \
-            --ignore-vuln PYSEC-2026-3457
+            --ignore-vuln GHSA-29vq-49wr-vm6x
 
   build-and-push:
     runs-on: ubuntu-latest

@@ -17,7 +17,7 @@ from flask import send_file
 
 from src.services.printer_service import printer_service
 from src.services.queue_service import print_queue
-from src.utils.exceptions import ResourceNotFoundError
+from src.utils.exceptions import AppError, ResourceNotFoundError, internal_error
 
 logger = structlog.get_logger()
 
@@ -28,9 +28,17 @@ def list_jobs() -> Dict[str, Any]:
         jobs = print_queue.list_jobs()
         logger.info("Listing print jobs", count=len(jobs))
         return {"jobs": jobs}
-    except Exception as e:
-        logger.error("Error listing print jobs", error=str(e), exc_info=True)
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
         raise
+    except Exception as e:
+        # Same treatment as every other controller: the record stays whole, the
+        # response says only "internal error" plus the id that finds it.
+        raise internal_error(e, "Error listing print jobs") from e
 
 
 def get_job(job_id: str) -> Dict[str, Any]:
@@ -120,9 +128,15 @@ def clear_jobs() -> Dict[str, Any]:
         cleared = print_queue.clear_finished()
         logger.info("Cleared finished print jobs", cleared=cleared)
         return {"cleared": cleared}
-    except Exception as e:
-        logger.error("Error clearing print jobs", error=str(e), exc_info=True)
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
         raise
+    except Exception as e:
+        raise internal_error(e, "Error clearing print jobs") from e
 
 
 def delete_job(job_id: str) -> Dict[str, Any]:

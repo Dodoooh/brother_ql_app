@@ -1,39 +1,44 @@
-# 3.11 and not 3.12: pysnmp 4.4.12 builds on asyncore and packbits (a
-# brother-ql dependency) ships an sdist that uses distutils -- both removed in
-# 3.12. 3.9 is EOL and locks the image out of the current Pillow/urllib3.
+# 3.11 and not 3.12, though the reason has changed and the old note was wrong
+# twice over: it blamed pysnmp's use of asyncore (it is `imp`, in
+# pysnmp/smi/builder.py) and packbits' distutils sdist (packbits installs on
+# 3.12 today). pysnmp itself is gone now, and every remaining requirement
+# installs and imports on 3.12.
+#
+# What holds this at 3.11 is that connexion 2.14.2 pins Werkzeug to 2.2.3 and
+# Flask to 2.2.5, neither of which was ever tested against 3.12. Importing
+# cleanly is not the same as running correctly, so moving up belongs with the
+# connexion 3 migration and its own test run, not here.
+#
+# 3.9 is EOL and locks the image out of the current Pillow/urllib3.
 FROM python:3.11-slim
 
-# Set working directory
 WORKDIR /app
 
-# Set environment variables
+# UPLOAD_FOLDER is set explicitly so the app never falls back to its
+# code-relative default (/app/src/uploads). The code tree belongs to root and is
+# not writable by the runtime user (see the ownership block below), so a
+# fallback there would fail at startup rather than at the first upload.
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app
+    PYTHONPATH=/app \
+    UPLOAD_FOLDER=/app/uploads
 
-# Install system dependencies
+# Runtime system dependencies only. build-essential, libffi-dev and libssl-dev
+# are deliberately absent: every requirement resolves to a wheel on amd64 and
+# arm64, and the one sdist (packbits) is pure Python. Leaving a compiler and
+# apt in a running container is handing post-exploitation tooling to whoever
+# gets in -- and it is 437 MB of it, measured.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libffi-dev \
-    libssl-dev \
     fonts-dejavu \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy requirements file
 COPY requirements.txt .
-
-# Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Create necessary directories
-RUN mkdir -p /app/uploads /app/src/config
-
-# Create a non-root user and group
 RUN addgroup --system appgroup && adduser --system --ingroup appgroup appuser
 
-# Create necessary directories (including /app/data for volume mount point)
-RUN mkdir -p /app/uploads /app/data /app/src/config
+RUN mkdir -p /app/uploads /app/data
 
 # Copy application code. Only the files the container actually runs -- tests,
 # docs, screenshots and CI config have no business in the published image.
@@ -43,16 +48,22 @@ COPY wsgi.py ./
 # and a published image counts as one.
 COPY LICENSE ./
 
-# Set permissions and ownership
-# Give execute permissions to entrypoint, ensure appuser owns necessary dirs
 COPY docker-entrypoint.sh /app/
-RUN chmod +x /app/docker-entrypoint.sh && \
-    chown -R appuser:appgroup /app && \
-    # Ensure the volume mount points are owned by appuser
-    chown appuser:appgroup /app/data && \
-    chown appuser:appgroup /app/uploads
 
-# Switch to the non-root user
+# The application code belongs to root and is not writable by the user the app
+# runs as. Only the two data directories are.
+#
+# It used to be `chown -R appuser /app`, which meant the process could rewrite
+# its own source: a pentest against this image overwrote app.py and
+# docker-entrypoint.sh as the runtime user, turning any file-write bug in the
+# upload or share handling into code that survives a restart. There is no
+# reason for a running app to be able to edit itself.
+RUN chmod +x /app/docker-entrypoint.sh \
+ && chown -R root:root /app \
+ && chmod -R go-w /app \
+ && chown appuser:appgroup /app/data /app/uploads \
+ && chmod 750 /app/data /app/uploads
+
 USER appuser
 
 # Expose port

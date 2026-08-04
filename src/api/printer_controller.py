@@ -8,7 +8,7 @@ from typing import Dict, Any, List
 from src.services.printer_service import printer_service
 from src.services.relay_service import relay_service
 from src.services.settings_service import settings_service
-from src.utils.exceptions import ValidationError, PrinterError
+from src.utils.exceptions import AppError, ValidationError, PrinterError, internal_error
 
 logger = structlog.get_logger()
 
@@ -23,9 +23,17 @@ def get_printers() -> List[Dict[str, Any]]:
         logger.info("Getting available printers")
         printers = printer_service.get_printers()
         return printers
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error getting printers", error=str(e), exc_info=True)
-        raise PrinterError(f"Error getting printers: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error getting printers") from e
 
 def check_printer_status(body: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -82,9 +90,17 @@ def check_printer_status(body: Dict[str, Any]) -> Dict[str, Any]:
         # HTTP 400, not 500.
         logger.warning("Validation error", error=str(e), exc_info=True)
         raise ValidationError(str(e), "printer")
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error checking printer status", error=str(e), exc_info=True)
-        raise PrinterError(f"Error checking printer status: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error checking printer status") from e
 
 def get_keep_alive_status() -> Dict[str, Any]:
     """
@@ -97,9 +113,17 @@ def get_keep_alive_status() -> Dict[str, Any]:
         logger.info("Getting keep alive status")
         status = printer_service.get_keep_alive_status()
         return status
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error getting keep alive status", error=str(e), exc_info=True)
-        raise PrinterError(f"Error getting keep alive status: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error getting keep alive status") from e
 
 def get_relay_power_status() -> Dict[str, Any]:
     """
@@ -131,9 +155,17 @@ def get_relay_power_status() -> Dict[str, Any]:
     try:
         logger.info("Getting relay power status")
         return relay_service.status()
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error getting relay power status", error=str(e), exc_info=True)
-        raise PrinterError(f"Error getting relay power status: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error getting relay power status") from e
 
 def send_relay_power_webhook(body: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -190,9 +222,17 @@ def send_relay_power_webhook(body: Dict[str, Any]) -> Dict[str, Any]:
         # validator does. Those are bad requests, not server faults.
         logger.warning("Refusing to send a relay webhook", error=str(e))
         raise ValidationError(str(e), "relay_power")
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error sending relay webhook", error=str(e), exc_info=True)
-        raise PrinterError(f"Error sending relay webhook: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error sending relay webhook") from e
 
 def update_keep_alive(body: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -258,6 +298,14 @@ def update_keep_alive(body: Dict[str, Any]) -> Dict[str, Any]:
         # HTTP 400, not 500.
         logger.warning("Validation error", error=str(e), exc_info=True)
         raise ValidationError(str(e), "keep_alive")
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error updating keep alive", error=str(e), exc_info=True)
-        raise PrinterError(f"Error updating keep alive: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error updating keep alive") from e

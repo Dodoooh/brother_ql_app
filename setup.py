@@ -14,8 +14,6 @@ setup(
         # Printer communication
         "brother-ql-inventree==1.3",
         "Pillow==12.3.0",
-        "pysnmp==4.4.12",
-        "pyasn1==0.4.8",
         "qrcode==7.4.2",
         "pypdfium2==4.30.0",
         # Logging

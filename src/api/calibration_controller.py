@@ -24,7 +24,7 @@ from src.services.printer_service import printer_service
 from src.services.queue_service import print_queue
 from src.services.settings_service import settings_service
 from src.utils.dry_run import is_dry_run, build_dry_run_response
-from src.utils.exceptions import ValidationError, PrinterError
+from src.utils.exceptions import AppError, ValidationError, PrinterError, internal_error
 
 logger = structlog.get_logger()
 
@@ -195,9 +195,17 @@ def test_print_calibration(body: Dict[str, Any]) -> Dict[str, Any]:
         # HTTP 400, not 500.
         logger.warning("Validation error for calibration test print", error=str(e))
         raise ValidationError(str(e), "settings")
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error printing calibration target", error=str(e), exc_info=True)
-        raise PrinterError(f"Error printing calibration target: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error printing calibration target") from e
 
 
 def preview_calibration(body: Dict[str, Any]) -> Union[Dict[str, Any], Response]:
@@ -231,6 +239,14 @@ def preview_calibration(body: Dict[str, Any]) -> Union[Dict[str, Any], Response]
     except ValueError as e:
         logger.warning("Validation error rendering calibration preview", error=str(e))
         raise ValidationError(str(e), "settings")
+    except AppError as e:
+        # Our own errors already say the right thing to the caller (see
+        # utils/exceptions.py) and must not be recast as internal. Logged
+        # with the stack because the clause below no longer does it for them.
+        logger.warning("Request failed with a reported error", error=str(e),
+                       error_type=e.__class__.__name__, exc_info=True)
+        raise
     except Exception as e:
-        logger.error("Error rendering calibration preview", error=str(e), exc_info=True)
-        raise PrinterError(f"Error rendering calibration preview: {str(e)}")
+        # Unexpected failure: recorded in full by internal_error, answered
+        # generically so no library or filesystem detail reaches the client.
+        raise internal_error(e, "Error rendering calibration preview") from e
