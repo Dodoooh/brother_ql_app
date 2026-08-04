@@ -32,38 +32,16 @@ is_default_settings() {
     fi
 }
 
-# Function to create default settings.json in the data directory
-create_default_settings_json() {
-    echo "Creating default settings.json in $DATA_DIR..."
-    cat > "$SETTINGS_FILE" << 'EOF'
-{
-    "printer_uri": "tcp://192.168.1.100",
-    "printer_model": "QL-800",
-    "label_size": "62",
-    "font_size": 50,
-    "alignment": "left",
-    "rotate": 0,
-    "threshold": 70.0,
-    "dither": false,
-    "compress": false,
-    "red": false,
-    "keep_alive_enabled": false,
-    "keep_alive_interval": 60,
-    "printers": [
-        {
-            "id": "default",
-            "name": "Default Printer",
-            "printer_uri": "tcp://192.168.1.100",
-            "printer_model": "QL-800",
-            "label_size": "62"
-        }
-    ]
-}
-EOF
-    # Set permissions appropriate for the container user
-    chmod 666 "$SETTINGS_FILE"
-    echo "Created $SETTINGS_FILE with permissions 666"
-}
+# No default settings.json is written here on purpose. The application creates
+# its own defaults in memory when the file is absent: settings_service._load_
+# settings() returns a deep copy of DEFAULT_SETTINGS when the file does not
+# exist, and the first PUT /settings persists a real file. A hand-maintained
+# copy of the defaults in this shell script only drifts from DEFAULT_SETTINGS
+# (it did -- it was missing every setting added since) while changing nothing at
+# runtime, because _load_settings overlays the file onto DEFAULT_SETTINGS and
+# fills in whatever the file omits. So the single source of truth stays in
+# src/config/default_settings.py and the first start with an empty data
+# directory just runs on the in-memory defaults.
 
 # --- Settings Initialization Logic ---
 
@@ -77,9 +55,10 @@ if [ ! -f "$SETTINGS_FILE" ]; then
         chmod 666 "$SETTINGS_FILE"
         echo "Restored settings from backup."
     else
-        # No settings file and no backup, create default settings
-        echo "$SETTINGS_FILE not found and no backup exists. Creating default settings."
-        create_default_settings_json
+        # No settings file and no backup: leave it absent. The application runs
+        # on its in-memory DEFAULT_SETTINGS until the first PUT /settings writes
+        # a real file (see the note above create_default_settings removal).
+        echo "$SETTINGS_FILE not found and no backup exists. The app will run on in-memory defaults."
     fi
 else
     # Settings file exists, check if it contains default settings
@@ -132,19 +111,41 @@ if [ "$FLASK_ENV" = "development" ]; then
 fi
 
 # Production: gunicorn.
-#   --workers 1  : the keep-alive feature uses a single-process singleton
-#                  (printer_service) that owns a background thread. Multiple
-#                  workers would each start their own keep-alive thread and
-#                  corrupt the singleton state, so we MUST stay at one worker.
-#   --threads 4  : in-process threads handle concurrent requests; they share the
-#                  same singleton, so no extra keep-alive threads are created.
-#   no --preload : create_app() (and thus init_keep_alive) must run inside the
-#                  worker process, otherwise the keep-alive thread would be
-#                  started before the fork and would die.
-echo "Starting application with gunicorn (workers=1, threads=4)"
+#   --workers 1  : the keep-alive feature, the print-queue worker and the relay
+#                  power scheduler are single-process singletons (printer_service,
+#                  queue_service, relay_service) that each own a background
+#                  thread. A second worker starts a second copy of every one of
+#                  them: verified with --workers 2 the log shows two "Print queue
+#                  worker started" and two "Relay power scheduler started" lines,
+#                  the relay webhook fires twice, and GET /jobs alternates between
+#                  the two workers' private in-memory job lists. --workers 1 is a
+#                  correctness condition, not a convenience.
+#   --threads 8  : in-process threads handle concurrent requests; they share the
+#                  same singletons, so no extra background threads are created.
+#                  What --timeout does NOT do here: with the gthread worker the
+#                  arbiter heartbeat comes from the worker's accept loop, not the
+#                  request thread, so a request stuck in CPU-bound C code (Pillow)
+#                  never trips --timeout -- it just holds its thread until it
+#                  finishes. More threads only widen the margin against a burst
+#                  of heavy previews; they are not a cure. The cure is upstream:
+#                  every render path is bounded (MAX_UPLOAD_IMAGE_PIXELS caps the
+#                  decode, MAX_PDF_PAGES caps the rasterise) and the compose
+#                  mem_limit turns an over-large job into an OOM that gunicorn
+#                  recovers from by rebooting the worker -- measured: four
+#                  abandoned heavy previews and a 1.2M-char text each left the
+#                  service responding, none wedged it. Switching to a sync worker
+#                  would make --timeout fire, but with one worker that caps the
+#                  app at one request at a time, and a single ~4 s render then
+#                  blocks the UI's own polling for its full duration (measured);
+#                  a bad trade for a wedge the bounds above already prevent.
+#   no --preload : create_app() (and thus init_keep_alive, the queue worker and
+#                  the relay scheduler) must run inside the worker process,
+#                  otherwise those threads would be started before the fork and
+#                  would not survive it.
+echo "Starting application with gunicorn (workers=1, threads=8)"
 exec gunicorn \
     --workers 1 \
-    --threads 4 \
+    --threads 8 \
     --bind 0.0.0.0:5000 \
     --timeout 60 \
     --access-logfile - \
