@@ -24,7 +24,7 @@ Usage, from the repository root, using the application image so the app's own
 dependencies are present:
 
     docker run --rm -v "$PWD":/app:ro -e PYTHONPATH=/app \
-        brother_ql_app:local python /app/tools/boot_timeline.py
+        brother_ql_app:local python /app/tools/boot_timeline.py --host 192.168.1.100
 
 There is no ping binary in that image, so the ICMP row is reported as
 unavailable. The three signals the gate actually uses are unaffected.
@@ -129,9 +129,15 @@ class Signal:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--host", default="192.168.1.100")
-    ap.add_argument("--model", default="QL-820NWB")
+    ap = argparse.ArgumentParser(
+        description="Watch a printer come up from mains-off and report what "
+                    "answered when.")
+    # Required, with no default. A measuring tool that starts talking to an
+    # address nobody named is a tool that measures somebody else's printer.
+    ap.add_argument("--host", required=True,
+                    help="the printer's address, e.g. 192.168.1.100")
+    ap.add_argument("--model", default="QL-820NWB",
+                    help="printer model, as the app names it (default: %(default)s)")
     ap.add_argument("--minutes", type=float, default=5.0)
     ap.add_argument("--countdown", type=int, default=5,
                     help="seconds to count down before t=0; 0 to start at once")

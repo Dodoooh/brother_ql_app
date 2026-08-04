@@ -114,16 +114,32 @@ def _status_code_name(status: int) -> str:
     return _STATUS_ERROR_CODES.get(status, f"HTTP_{status}")
 
 
+# How much of a message is worth sending. A schema violation quotes the value
+# that broke the rule, and for a maxLength on a text field that value is the
+# whole payload: refusing 10000 characters used to answer with 10000 characters.
+# The part that identifies the problem sits at the front, so the tail is cut.
+_MAX_MESSAGE_CHARS = 400
+_TRUNCATION_MARK = "... [truncated]"
+
+
+def _shorten(value: str) -> str:
+    """Cap a message so a rejected payload is not echoed back in full."""
+    if len(value) <= _MAX_MESSAGE_CHARS:
+        return value
+    keep = _MAX_MESSAGE_CHARS - len(_TRUNCATION_MARK)
+    return value[:keep].rstrip() + _TRUNCATION_MARK
+
+
 def _scrub(value: Any) -> Any:
     """
-    Remove absolute server paths from a message on its way out.
+    Remove absolute server paths from a message on its way out, and cap length.
 
     Only strings are touched; anything else is returned as-is so numeric and
     boolean details (``copies``, ``threshold``) keep their type.
     """
     if not isinstance(value, str):
         return value
-    return _SERVER_PATH_RE.sub(_REDACTED_PATH, value)
+    return _shorten(_SERVER_PATH_RE.sub(_REDACTED_PATH, value))
 
 
 def _scrub_details(details: Any) -> Any:

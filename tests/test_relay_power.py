@@ -432,7 +432,7 @@ def test_relay_settings_are_not_inherited_by_a_print_request(tmp_path):
 
 @pytest.mark.parametrize("url", [
     "http://192.168.1.42/relay/0?turn=on",     # the ordinary case: a LAN relay
-    "http://10.50.60.30:1880/endpoint/printer",  # Node-RED on another RFC1918 net
+    "http://10.0.0.30:1880/endpoint/printer",  # Node-RED on another RFC1918 net
     "http://172.16.4.4/on",                    # the third RFC1918 block
     "https://nodered.lan/printer/power",       # hostname, no DNS performed
     "http://shelly-relay.local/relay/0",       # mDNS name

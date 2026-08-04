@@ -381,7 +381,7 @@ def test_the_cache_is_kept_per_uri():
                side_effect=[_media_for("continuous-12mm"),
                             _media_for("continuous-62mm")]):
         first = printer_service.get_loaded_media("tcp://192.168.1.100")
-        second = printer_service.get_loaded_media("tcp://10.50.60.21")
+        second = printer_service.get_loaded_media("tcp://192.168.1.101")
 
     assert first["width_mm"] == 12.0
     assert second["width_mm"] == 62.0

@@ -747,6 +747,7 @@ paths:
                   description: The image file to place beside the text
                 text:
                   type: string
+                  maxLength: 10000
                   description: Text content to render alongside the image
                   example: "Product: Widget XYZ"
                 font_size:
@@ -2372,7 +2373,14 @@ components:
       properties:
         text:
           type: string
-          description: Text to print, can include HTML formatting (e.g., <b>Bold</b>, <br> for line break)
+          maxLength: 10000
+          description: >-
+            Text to print. `<br>` starts a new line; other tags are dropped. See
+            `text_markup` for `**bold**` and `*italic*`.
+
+            The limit is a rendering bound rather than a label one: text is laid
+            out in the request thread, and 14000 characters already take about
+            four seconds. A label with 10000 characters on it does not exist.
           example: "<b>Hello World!</b>\nThis is a test print."
           default: "Hello World!\nThis is a test print."
         settings:
@@ -2402,7 +2410,12 @@ components:
           properties:
             data:
               type: string
-              description: Data to encode in the QR code
+              maxLength: 7089
+              description: >-
+                Data to encode in the QR code. 7089 is what a version 40 symbol
+                holds in numeric mode at the lowest error correction, so nothing
+                longer fits into any QR code at all. Text and binary payloads run
+                out well before that, and the encoder says so.
               example: "https://example.com"
               default: "https://example.com"
             position:
@@ -2495,7 +2508,12 @@ components:
           properties:
             data:
               type: string
-              description: Data to encode in the QR code
+              maxLength: 7089
+              description: >-
+                Data to encode in the QR code. 7089 is what a version 40 symbol
+                holds in numeric mode at the lowest error correction, so nothing
+                longer fits into any QR code at all. Text and binary payloads run
+                out well before that, and the encoder says so.
               example: "https://example.com"
               default: "https://example.com"
             version:
