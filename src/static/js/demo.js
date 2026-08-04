@@ -1270,11 +1270,19 @@
     }
 
     function fixApiDocsLink() {
-        // The footer "API Documentation" link points at /api/v1/ui/, which does
-        // not exist on a static host. Repoint it at the project repository.
+        // The "API Documentation" link points at /api/v1/ui/, which is served by
+        // the Python backend and therefore missing on a static host.
+        //
+        // The published demo has a replacement: the Pages workflow renders the
+        // specification into /api/ with Redoc, so the link goes there. Anywhere
+        // else -- a local ?demo run against these files -- that folder does not
+        // exist, and the repository beats a 404.
+        const onPages = location.hostname.endsWith('github.io');
+        const href = onPages ? 'api/' : 'https://github.com/Dodoooh/brother_ql_app';
+        const title = onPages ? 'API reference' : 'Project on GitHub';
         document.querySelectorAll('a[href="/api/v1/ui/"]').forEach(a => {
-            a.setAttribute('href', 'https://github.com/Dodoooh/brother_ql_app');
-            a.setAttribute('title', 'Project on GitHub');
+            a.setAttribute('href', href);
+            a.setAttribute('title', title);
         });
     }
 

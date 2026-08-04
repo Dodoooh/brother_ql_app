@@ -209,3 +209,6 @@ data/
 .planning/
 .planning/**
 **/.planning/
+
+# Built into the Pages artifact by the workflow, never committed.
+src/static/api/

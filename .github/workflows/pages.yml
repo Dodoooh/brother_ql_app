@@ -106,6 +106,46 @@ jobs:
           print(f"Analytics added to the artifact: site {site} at {url}")
           PY
 
+      # The API reference, rendered into the artifact.
+      #
+      # The app serves a Swagger UI at /api/v1/ui/, but that needs the Python
+      # backend, and a static host has none. Redoc renders the same
+      # specification entirely in the browser, so the published demo can carry
+      # the reference beside the interface. It is read-only, which is the right
+      # shape here: Swagger UI's "Execute" button would fire requests at a
+      # backend that does not exist and answer every one of them with a failure.
+      #
+      # Built here rather than committed: src/static ships inside the Docker
+      # image, and an installation that already has the real Swagger UI has no
+      # use for a second copy of the docs.
+      - name: Render the API reference for the demo
+        run: |
+          set -euo pipefail
+          mkdir -p src/static/api
+          cp src/api/openapi.yaml src/static/api/openapi.yaml
+          curl -fsSL --retry 3 \
+            -o src/static/api/redoc.standalone.js \
+            "https://cdn.redoc.ly/redoc/v2.5.0/bundles/redoc.standalone.js"
+          cat > src/static/api/index.html <<'HTML'
+          <!doctype html>
+          <html lang="en">
+          <head>
+          <meta charset="utf-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>Brother QL Printer App - API reference</title>
+          <style>body { margin: 0; }</style>
+          </head>
+          <body>
+          <redoc spec-url="openapi.yaml" hide-download-button></redoc>
+          <script src="redoc.standalone.js"></script>
+          </body>
+          </html>
+          HTML
+          # Indentation from the heredoc above has to go, or the browser gets a
+          # page whose <!doctype> is not at the start.
+          sed -i 's/^          //' src/static/api/index.html
+          echo "API reference built: $(du -sh src/static/api | cut -f1)"
+
       - name: Upload static UI artifact
         uses: actions/upload-pages-artifact@v3
         with:
