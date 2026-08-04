@@ -36,11 +36,17 @@ out all three without waiting forever. It does that in three phases, per
 2. **It probes** for up to the attempt's window, at a short pause between
    probes. A ceiling, not a fixed delay: a printer that appears early is used
    early.
-3. **It settles.** The first answer is not the finish line. The printer has to
-   go on reporting itself ready over ``PRINTER_READY_SETTLE_SECONDS``, or -- if
-   it will not say, because IPP is not answering, or says something is in the
-   way -- to go on answering over the longer
-   ``PRINTER_ANSWERING_SETTLE_SECONDS``.
+3. **It tries.** The first answer is not the finish line -- this printer's IPP
+   port goes away again about eight seconds after it first answers, while the
+   network stack underneath it never falters. Rather than wait out that window,
+   the job is *attempted* through it: the printer stating it is ready releases
+   the job, and ``PRINT_ATTEMPT_DELAYS_SECONDS`` gives it three tries over 45 s,
+   because a raster the printer accepted is the only proof that it was up. A
+   printer that answers but will not say whether it is ready (no IPP), or says
+   something is in the way, has no such statement to release on and must instead
+   go on answering for ``PRINTER_ANSWERING_SETTLE_SECONDS``; probing tightens to
+   ``PRINTER_SETTLE_PROBE_PAUSE_SECONDS`` there, because a gap the probes step
+   over is a gap that settle cannot act on.
 
 Readiness is preferred over liveness wherever the app has it.
 ``PrinterService.check_printer_status`` reports ``state`` over IPP, and the gate
@@ -197,27 +203,44 @@ logger = structlog.get_logger()
 # meaningful slice of any budget below.
 # --------------------------------------------------------------------------- #
 
+# What a cold start actually looks like, because every number below is set
+# against it. Measured with ``tools/boot_timeline.py`` on the QL-820NWB this was
+# built against, counting from mains-on:
+#
+#     15.7 s   first answer of any kind (ICMP and tcp/631 together)
+#     17.1 s   tcp/9100 accepts
+#     23.4 s   tcp/631 STOPS accepting
+#     24.8 s   tcp/631 accepts again (a 1.4 s hole)
+#     34.9 s   everything has held for 10 s
+#
+# The hole is the finding. ICMP and tcp/9100 never faltered, so nothing dropped
+# off the network: the IPP server rebinds its port partway through the boot,
+# which takes out exactly the service the gate reads readiness from, roughly
+# eight seconds after it first answers. "It answered" is therefore not a fact
+# the gate can act on -- but neither is "it went quiet", and that is what the
+# print attempt schedule below is for rather than a longer wait.
+
 # How long to wait after a turn_on webhook before looking at the printer AT ALL.
 #
-# Mains-on to Wi-Fi-associated is about 20 s on the QL-820NWB this was built
-# against -- measured by watching the device, not guessed -- and nothing can
-# answer before that. Probing into that window is not merely useless: at 3.5 s
-# per unanswered probe it spends the budget answering a question already known.
-# So the gate does not look at all until the printer has had time to boot.
+# Nothing on this printer answers before 15.7 s (above), and probing into that
+# window is not merely useless: at 3.5 s per unanswered probe it spends the
+# budget answering a question already known. So the gate does not look at all
+# until the printer has had time to boot.
 #
-# 20 s is the floor of what is normal rather than the whole story: it is the
-# moment the radio associates, and the IPP server starts listening some time
-# after that. That is why the settle below is measured from the printer's first
-# answer and not from here.
+# 20 s keeps a margin over the measured 15.7 s, and costs nothing to hold: the
+# first answer is a long way from readiness anyway. It is the floor of what is
+# normal rather than the whole story, which is why everything after it is
+# measured from the printer's first answer and not from here.
 TURN_ON_BLIND_WAIT_SECONDS = 20.0
 
 # How long to keep probing after the blind wait, per turn_on attempt.
 #
 # The previous 45 s + 30 s was demonstrably too small: a printer that had mains
-# power for the whole attempt never answered inside it. Mains-on to
-# IPP-answering is the boot, plus the association, plus the IPP server starting,
-# and only the first of those has ever been measured. 120 s is six times the
-# measured association time and leaves room for the two unmeasured parts.
+# power for the whole attempt never answered inside it. A healthy cold start is
+# settled at 35 s, so 120 s is more than three times the measured figure -- kept
+# wide deliberately, because the measurement is one unit on one network, and the
+# cost of being wrong the other way is a job that fails while the printer it was
+# meant for is still on its way up.
 TURN_ON_FIRST_WAIT_SECONDS = 120.0
 
 # How long to keep probing after the SECOND turn_on webhook. Shorter, because
@@ -234,7 +257,7 @@ TURN_ON_FIRST_WAIT_SECONDS = 120.0
 # failure, and the queue says what it is doing throughout.
 TURN_ON_SECOND_WAIT_SECONDS = 60.0
 
-# The pause between two probes once probing has started.
+# The pause between two probes while nothing has answered yet.
 #
 # The probe itself costs 3.5 s while nothing answers and about 0.1 s once
 # something does, so the real cadence is roughly 5.5 s through the empty part of
@@ -248,28 +271,58 @@ TURN_ON_SECOND_WAIT_SECONDS = 60.0
 # no interval at all.
 PRINTER_PROBE_PAUSE_SECONDS = 2.0
 
-# How long the printer has to keep reporting itself READY before a job is handed
-# over.
+# The pause between two probes once the printer has started answering, i.e.
+# during the settle.
 #
-# The gate used to hand the job over on the first successful probe. "It answered
-# once" and "it is up" are different claims about a device that is in the middle
-# of booting, and the difference is what a user sees as a job that fails while a
-# reprint moments later works. So readiness has to hold: at a 2 s pause this is
-# four or five consecutive readings agreeing, not one.
+# Shorter than the pause above, because the settle is not waiting for the
+# printer to appear, it is watching for it to disappear again -- and the gap it
+# has to catch is 1.4 s wide (see the boot timeline above). Sampling every 2 s
+# can step straight over a hole that size and never see it, which would make a
+# settle of any length agree that a printer that vanished mid-boot was steady.
 #
-# 8 s is paid once per cold start, on top of a wait that is already tens of
-# seconds, so it is cheap where it is spent. A printer that was already up when
-# the job arrived pays none of it -- the settle guards the boot window, and
-# there is no boot window in that case.
-PRINTER_READY_SETTLE_SECONDS = 8.0
+# A probe against a printer that answers costs about 0.09 s, so the finer
+# cadence is cheap exactly where it is spent. Applied as a lower bound on the
+# ordinary pause rather than a replacement for it, so shortening one for a test
+# shortens both.
+PRINTER_SETTLE_PROBE_PAUSE_SECONDS = 1.0
 
-# The same, for a printer that answers but will not say whether it is ready.
+# When to try printing, once the printer has stated that it is ready. One entry
+# per attempt, each the pause *before* that attempt, so the job is tried three
+# times over 45 s and the failure that survives all three is the printer's own.
+#
+# The gate used to hold the job for a fixed settle instead, on the reasoning that
+# a printer which has just answered may not mean it. The boot timeline says the
+# reasoning is right -- the IPP port disappears again 7.7 s in -- but the remedy
+# was wrong: waiting out the worst case makes every good cold start pay for the
+# bad one, and no amount of waiting proves the printer will accept a raster.
+# Trying does. So the attempt itself is the readiness test, and the schedule is
+# what covers the hole:
+#
+#     +5 s    past the first ready, clear of nothing in particular -- a short
+#             grace so the common case is not fired at the instant of a reading
+#     +20 s   past a failed attempt, which is the whole flickering phase: every
+#             signal had settled 19.2 s after the first answer
+#     +20 s   the same again, because the second attempt can land in the tail of
+#             a printer that is slower than the one this was measured on
+#
+# A printer that was already up when the job arrived gets none of this: it is
+# printed to once, immediately, and a failure is its own. The schedule guards
+# the window after *this app* switched a printer on, and there is no such window
+# in that case.
+PRINT_ATTEMPT_DELAYS_SECONDS = (5.0, 20.0, 20.0)
+
+# How long a printer that answers but will not say whether it is ready has to go
+# on answering before the attempts start.
 #
 # Not every printer serves IPP: with it disabled, or not yet listening, the app
 # has only a TCP connect on port 9100, and a socket accepting a connection is a
-# claim about the network stack rather than about the print engine. Time is then
-# the only evidence available, so more of it is required -- 20 s of continuous
-# answering, against 8 s for a device that states its own readiness.
+# claim about the network stack rather than about the print engine. There is no
+# readiness to release on, so time is the only evidence available and this is the
+# one place a wait survives -- 20 s of continuous answering before the schedule
+# above begins.
+#
+# 20 s was a judgement call and the boot timeline endorsed it: every signal on a
+# real cold start had settled 19.2 s after the first of them answered.
 #
 # This rule also catches a printer that comes up reporting a blocking condition
 # (media-empty is the common one, and Brother firmware reports it transiently
@@ -470,7 +523,8 @@ class RelayPowerService:
         self.turn_on_waits = (TURN_ON_FIRST_WAIT_SECONDS, TURN_ON_SECOND_WAIT_SECONDS)
         self.blind_wait = TURN_ON_BLIND_WAIT_SECONDS
         self.probe_pause = PRINTER_PROBE_PAUSE_SECONDS
-        self.ready_settle = PRINTER_READY_SETTLE_SECONDS
+        self.settle_probe_pause = PRINTER_SETTLE_PROBE_PAUSE_SECONDS
+        self.print_attempt_delays = tuple(PRINT_ATTEMPT_DELAYS_SECONDS)
         self.answering_settle = PRINTER_ANSWERING_SETTLE_SECONDS
         self.webhook_timeout = WEBHOOK_TIMEOUT_SECONDS
         self.tick_interval = SCHEDULER_TICK_SECONDS
@@ -1213,16 +1267,19 @@ class RelayPowerService:
            just been switched on cannot answer, and asking costs 3.5 s a time.
         2. **Probing, for up to ``seconds``.** A ceiling and not a fixed delay:
            a printer that appears after 12 s is not made to wait out the window.
-        3. **A settle.** Answering once is not being up. Readiness has to hold
-           for :attr:`ready_settle` when the printer states it, or the answering
-           itself has to hold for :attr:`answering_settle` when it will not say
-           (no IPP) or says something is in the way. The second case is longer
-           because time is then the only evidence there is.
+        3. **Release.** A printer that states it is ready releases the job on
+           that reading, without a settle: the proof that a booting printer will
+           take a raster is that it took one, and
+           :data:`PRINT_ATTEMPT_DELAYS_SECONDS` is what covers it having spoken
+           too soon. A printer that answers but will not say (no IPP) or says
+           something is in the way has no such reading to release on, so there
+           the answering itself has to hold for :attr:`answering_settle` --
+           time being the only evidence available.
 
-        A settle that starts near the deadline is allowed to finish -- failing a
-        printer for answering one probe before the end would be perverse -- but
-        only by the length of the longest settle, so a device that flickers in
-        and out cannot stretch the wait indefinitely.
+        That settle, when it applies, is allowed to finish past the deadline --
+        failing a printer for answering one probe before the end would be
+        perverse -- but only by its own length, so a device that flickers in and
+        out cannot stretch the wait indefinitely.
 
         Args:
             settings: Settings the probe reads the printer address from.
@@ -1270,9 +1327,8 @@ class RelayPowerService:
 
         started = time.monotonic()
         deadline = started + max(0.0, seconds)
-        hard_deadline = deadline + max(self.ready_settle, self.answering_settle)
+        hard_deadline = deadline + self.answering_settle
 
-        ready_since: Optional[float] = None      # stating it can print, since
         answering_since: Optional[float] = None  # answering at all, since
         reported_settle: Optional[str] = None
 
@@ -1288,45 +1344,38 @@ class RelayPowerService:
                 outcome["answered_blocking"] = blocking
 
             if state == PRINTER_STATE_READY:
-                if ready_since is None:
-                    ready_since = now
-                if answering_since is None:
-                    answering_since = now
-            elif state in (PRINTER_STATE_UNKNOWN, PRINTER_STATE_BLOCKED):
-                # It is there but is not stating that it can print. The stated
-                # readiness clock restarts; the answering clock does not, since
-                # what it is measuring did not stop.
-                ready_since = None
-                if answering_since is None:
-                    answering_since = now
-            else:
-                ready_since = None
-                answering_since = None
-
-            stated = (ready_since is not None
-                      and now - ready_since >= self.ready_settle)
-            steady = (answering_since is not None
-                      and now - answering_since >= self.answering_settle)
-            if stated or steady:
+                # The printer says it can print. That is the reading the job is
+                # released on, and the attempt schedule -- not another wait --
+                # is what covers it having said so a few seconds early.
                 outcome["ready"] = True
-                outcome["stated_ready"] = stated
-                logger.info("Printer settled and is being printed to",
-                            state=state, stated_ready=stated,
+                outcome["stated_ready"] = True
+                logger.info("Printer reports itself ready; releasing the job",
                             probes=outcome["probes"],
                             probing_seconds=round(outcome["probing_seconds"], 1))
                 return outcome
 
-            settle = None
-            if answering_since is not None:
-                settle = "ready" if ready_since is not None else "answering"
+            if state in (PRINTER_STATE_UNKNOWN, PRINTER_STATE_BLOCKED):
+                # It is there but is not stating that it can print, so there is
+                # nothing to release on and the answering itself has to hold.
+                if answering_since is None:
+                    answering_since = now
+            else:
+                answering_since = None
+
+            steady = (answering_since is not None
+                      and now - answering_since >= self.answering_settle)
+            if steady:
+                outcome["ready"] = True
+                outcome["stated_ready"] = False
+                logger.info("Printer answered steadily without stating readiness",
+                            state=state, probes=outcome["probes"],
+                            probing_seconds=round(outcome["probing_seconds"], 1))
+                return outcome
+
+            settle = "answering" if answering_since is not None else None
             if report and settle != reported_settle:
                 reported_settle = settle
-                if settle == "ready":
-                    self._report(
-                        ACTIVITY_PRINTER_SETTLING,
-                        f"The printer reports itself ready. Letting it settle "
-                        f"for {self.ready_settle:.0f}s before printing.")
-                elif settle == "answering":
+                if settle == "answering":
                     self._report(
                         ACTIVITY_PRINTER_SETTLING,
                         f"The printer is answering but has not reported itself "
@@ -1341,10 +1390,18 @@ class RelayPowerService:
                 return outcome
             if now >= deadline and answering_since is None:
                 return outcome
-            if self._sleep(self.probe_pause):
+
+            # Probe faster once something is answering. Until then the pause is
+            # padding on a probe that already costs 3.5 s; from here it decides
+            # whether a printer that drops out for a second or two is seen doing
+            # it, and a printer that drops out has not settled.
+            pause = self.probe_pause
+            if answering_since is not None:
+                pause = min(pause, self.settle_probe_pause)
+            if self._sleep(pause):
                 return outcome
 
-    def ensure_printer_powered(self) -> None:
+    def ensure_printer_powered(self) -> Tuple[float, ...]:
         """Make sure the printer is up before a job is started.
 
         This is the queue's pre-job gate. It returns quietly in the overwhelming
@@ -1353,12 +1410,11 @@ class RelayPowerService:
         enabled and configured relay, causes a webhook.
 
         A printer that answers is left alone entirely -- no webhook, no wait, no
-        settle. The settle exists to guard the window after *this app* switched
-        a printer on, and there is no such window when the device was already
-        there. That also keeps the gate out of a judgement it should not be
-        making: a printer answering with its cover open is a job that should
-        fail at the printer, with the printer's reason, rather than in something
-        named after power.
+        retries. Those guard the window after *this app* switched a printer on,
+        and there is no such window when the device was already there. That also
+        keeps the gate out of a judgement it should not be making: a printer
+        answering with its cover open is a job that should fail at the printer,
+        with the printer's reason, rather than in something named after power.
 
         The sequence for a printer that is not there is: send, wait, send again,
         wait less, then fail naming what was actually done. A *delivery* failure
@@ -1366,6 +1422,13 @@ class RelayPowerService:
         that refused the connection mostly buys a slower, vaguer error, and the
         requirement is that a webhook which did not arrive is reported rather
         than swallowed.
+
+        Returns:
+            When the printer was switched on here, the pauses before each print
+            attempt (:data:`PRINT_ATTEMPT_DELAYS_SECONDS`): the caller is being
+            told it is printing into a boot window and should try more than
+            once. An empty tuple otherwise, meaning "print once, now" -- which
+            is every job at a printer that was already up.
 
         Raises:
             RelayWebhookError: When the webhook cannot be delivered, or when the
@@ -1378,18 +1441,18 @@ class RelayPowerService:
         # being off must mean no outbound request AND no extra work at all, so
         # an install that ignores it behaves exactly as it did before.
         if not self.is_enabled(settings):
-            return
+            return ()
         url = self.turn_on_url(settings)
         if not url:
             logger.warning("Relay power control is enabled but no turn_on URL is "
                            "configured; not switching the printer on")
-            return
+            return ()
 
         state, blocking = self._probe(settings)
         if state != PRINTER_STATE_UNREACHABLE:
             logger.debug("Printer already answering; no relay turn_on needed",
                          state=state, blocking_reasons=blocking)
-            return
+            return ()
 
         logger.info("Printer not reachable; switching it on via the relay")
         waits = tuple(self.turn_on_waits)
@@ -1426,7 +1489,7 @@ class RelayPowerService:
                 # the job goes on to fail, the relay must still be scheduled to
                 # switch off instead of being left on indefinitely.
                 self.arm()
-                return
+                return tuple(self.print_attempt_delays)
 
         elapsed = time.monotonic() - started
         # Say what it saw, when it saw anything. "Never answered" and "answered

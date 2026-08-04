@@ -39,6 +39,7 @@ from src.utils.exceptions import RelayWebhookError
 from src.utils.job_activity import (
     ACTIVITY_PRINTER_SETTLING,
     ACTIVITY_PRINTING,
+    ACTIVITY_RETRYING,
     ACTIVITY_SWITCHING_ON,
     ACTIVITY_WAITING_FOR_PRINTER,
     JOB_ACTIVITIES,
@@ -230,10 +231,16 @@ def test_a_probe_that_raises_is_read_as_no_answer(tmp_path):
 # The settle
 # --------------------------------------------------------------------------- #
 
-def test_the_first_ready_probe_is_not_enough_on_its_own(tmp_path):
-    """Readiness has to hold, so a single positive reading does not release."""
+def test_a_printer_that_states_it_is_ready_releases_the_job_at_once(tmp_path):
+    """The printer's own "ready" releases; the attempts cover it speaking early.
+
+    It used to have to hold that for a fixed settle, which made every good cold
+    start pay for the bad one -- and no length of settle proves the printer will
+    accept a raster. Trying does, so the trying starts here and
+    ``PRINT_ATTEMPT_DELAYS_SECONDS`` covers a printer that spoke too soon.
+    """
     probe = _Probe(PRINTER_STATE_READY)
-    service = _service(tmp_path, probe, ready_settle=0.05, probe_pause=0.002)
+    service = _service(tmp_path, probe, probe_pause=0.05)
 
     started = time.monotonic()
     outcome = service._wait_until_ready(_settings(), 1.0)
@@ -241,8 +248,8 @@ def test_the_first_ready_probe_is_not_enough_on_its_own(tmp_path):
 
     assert outcome["ready"] is True
     assert outcome["stated_ready"] is True
-    assert elapsed >= 0.05, "released before the settle had run"
-    assert probe.calls >= 3, "the settle spanned more than one reading"
+    assert probe.calls == 1, "asked more than once about a printer that said yes"
+    assert elapsed < 0.05, "held a printer that had stated it was ready"
 
 
 def test_a_printer_that_answers_but_is_not_ready_is_not_taken_as_ready(tmp_path):
@@ -255,8 +262,7 @@ def test_a_printer_that_answers_but_is_not_ready_is_not_taken_as_ready(tmp_path)
     probe = _Probe(PRINTER_STATE_UNKNOWN, PRINTER_STATE_UNKNOWN,
                    PRINTER_STATE_UNKNOWN, PRINTER_STATE_UNKNOWN,
                    PRINTER_STATE_READY)
-    service = _service(tmp_path, probe, ready_settle=0.02, answering_settle=5.0,
-                       probe_pause=0.001)
+    service = _service(tmp_path, probe, answering_settle=5.0, probe_pause=0.001)
 
     outcome = service._wait_until_ready(_settings(), 1.0)
 
@@ -264,24 +270,64 @@ def test_a_printer_that_answers_but_is_not_ready_is_not_taken_as_ready(tmp_path)
     assert outcome["state"] == PRINTER_STATE_READY
     assert outcome["stated_ready"] is True, (
         "it was released on the printer's own readiness, not on it answering")
-    assert probe.calls > 5, (
+    assert probe.calls == 5, (
         "released during the answers-but-not-ready window; a gate that fires on "
         "the first positive probe would have released at probe 1")
 
 
-def test_readiness_that_goes_away_restarts_the_settle(tmp_path):
-    """Ready, gone, ready again: the clock starts from the second one."""
-    probe = _Probe(PRINTER_STATE_READY, PRINTER_STATE_UNREACHABLE,
-                   PRINTER_STATE_READY)
-    service = _service(tmp_path, probe, ready_settle=0.03, probe_pause=0.001)
+def test_a_cold_start_hands_back_the_attempt_schedule(tmp_path):
+    """The gate tells the queue it is printing into a boot window.
 
-    outcome = service._wait_until_ready(_settings(), 1.0)
+    It says so as data rather than by making the queue know what a relay is: a
+    list of pauses, one per attempt. An empty one means "print once, now", and
+    that is what a printer which was up all along gets.
+    """
+    cold = _Probe(PRINTER_STATE_UNREACHABLE, PRINTER_STATE_READY)
+    service = _service(tmp_path, cold, blind_wait=0.0, probe_pause=0.001)
+    service.print_attempt_delays = (5.0, 20.0, 20.0)
+
+    assert service.ensure_printer_powered() == (5.0, 20.0, 20.0)
+
+    warm = _Probe(PRINTER_STATE_READY)
+    service = _service(tmp_path, warm, probe_pause=0.001)
+    service.print_attempt_delays = (5.0, 20.0, 20.0)
+
+    assert service.ensure_printer_powered() == (), (
+        "a printer that was already up is printed to once, like it always was")
+
+
+def test_the_settle_looks_more_often_than_the_wait_that_precedes_it(tmp_path):
+    """A drop-out shorter than the pause between probes is one nobody sees.
+
+    Measured on the printer this was built against: the IPP port stops
+    accepting about eight seconds after it first answers and comes back 1.4 s
+    later, while ICMP and port 9100 never falter -- the print service rebinding,
+    not the network going away. A gate sampling every 2 s can step straight over
+    a hole that size, and a settle that never sees the hole will certify a
+    printer that disappeared in the middle of it.
+
+    So the cadence tightens the moment anything answers. That is also where it
+    is affordable: a probe costs 0.09 s against a printer that answers and 3.5 s
+    against one that does not.
+
+    Only the answering settle is left to guard: a printer that states its own
+    readiness is released on that reading, and the print attempts cover it.
+    """
+    probe = _Probe(PRINTER_STATE_UNREACHABLE, PRINTER_STATE_UNREACHABLE,
+                   PRINTER_STATE_UNKNOWN)
+    service = _service(tmp_path, probe, blind_wait=0.0, probe_pause=0.05,
+                       settle_probe_pause=0.002, answering_settle=0.05)
+
+    outcome = service._wait_until_ready(_settings(), 2.0)
 
     assert outcome["ready"] is True
-    # Probe 1 ready, probe 2 unreachable (clock cleared), probe 3 onward ready:
-    # the settle can only have been satisfied well after probe 3.
-    first_ready_again = probe.at[2]
-    assert probe.at[-1] - first_ready_again >= 0.03
+    # Probes 1 and 2 found nothing; probe 3 was the first answer, so every gap
+    # from there on is the settle's own cadence.
+    assert probe.at[1] - probe.at[0] >= 0.05, "hurried the empty part of the wait"
+    settle_gaps = [b - a for a, b in zip(probe.at[2:], probe.at[3:], strict=False)]
+    assert settle_gaps, "the settle spanned a single probe"
+    assert max(settle_gaps) < 0.05, (
+        "kept the slow cadence through the settle, where a short drop-out hides")
 
 
 def test_a_printer_that_never_states_its_readiness_is_still_printed_to(tmp_path):
@@ -501,14 +547,16 @@ def test_the_gate_names_every_phase_it_passes_through(tmp_path):
                    PRINTER_STATE_READY)
     reporter = _Reporter()
     service = _service(tmp_path, probe, reporter=reporter, blind_wait=0.01,
-                       ready_settle=0.01, probe_pause=0.001)
+                       probe_pause=0.001)
 
     service.ensure_printer_powered()
 
+    # Settling is no longer one of the gate's phases for a printer that states
+    # its readiness: it is released there and then, and the queue names the
+    # pause before the first attempt instead.
     assert reporter.activities == [
         ACTIVITY_SWITCHING_ON,
         ACTIVITY_WAITING_FOR_PRINTER,
-        ACTIVITY_PRINTER_SETTLING,
     ]
     # Every token is one the API declares, and every one carries wording.
     for activity, message in reporter.entries:
@@ -533,19 +581,26 @@ def test_the_second_attempt_says_it_is_a_second_attempt(tmp_path):
     assert "attempt 2 of 2" in switching[1]
 
 
-def test_the_settling_message_distinguishes_the_two_kinds_of_settle(tmp_path):
+def test_only_a_printer_that_will_not_state_its_readiness_is_made_to_settle(tmp_path):
+    """The one wait left, and it says which case it is.
+
+    A printer that answers without stating readiness gives nothing to release
+    on, so time is the only evidence there is and the gate spends it. The same
+    printer stating "ready" one probe later ends that immediately.
+    """
     probe = _Probe(PRINTER_STATE_UNREACHABLE, PRINTER_STATE_UNKNOWN,
-                   PRINTER_STATE_READY)
+                   PRINTER_STATE_UNKNOWN, PRINTER_STATE_READY)
     reporter = _Reporter()
     service = _service(tmp_path, probe, reporter=reporter, blind_wait=0.0,
-                       ready_settle=0.01, answering_settle=5.0, probe_pause=0.001)
+                       answering_settle=5.0, probe_pause=0.001)
 
     service.ensure_printer_powered()
 
     settling = [message for activity, message in reporter.entries
                 if activity == ACTIVITY_PRINTER_SETTLING]
-    assert any("has not reported itself ready" in message for message in settling)
-    assert any("reports itself ready" in message for message in settling)
+    assert settling, "the answering-but-silent phase went unnamed"
+    assert all("has not reported itself ready" in message for message in settling)
+    assert probe.calls == 4, "the settle outlived the printer stating it was ready"
 
 
 def test_a_reporter_that_throws_never_reaches_the_job(tmp_path):
@@ -663,6 +718,165 @@ def test_the_queue_reports_each_stage_in_turn(tmp_path):
     assert finished["activity_at"] is None
     assert queue.queue_status()["activity"] is None
     assert queue.queue_status()["activity_job_id"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Printing into a boot window
+#
+# The gate releases a job the moment the printer states it is ready, which is a
+# claim a device eight seconds into its boot is quite capable of making and then
+# withdrawing. What covers that is trying again, not waiting longer: the attempt
+# is the only test of readiness that cannot be wrong.
+# --------------------------------------------------------------------------- #
+
+def test_a_first_attempt_that_lands_in_the_boot_is_tried_again(tmp_path):
+    """Two refusals from a printer that had just been switched on, then a label."""
+    queue = _queue()
+    calls = {"n": 0}
+
+    def printing():
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("Printer is not ready")
+
+    queue.set_pre_job_gate(lambda: (0.0, 0.01, 0.01))
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "done",
+                what="the job to print")
+
+    assert calls["n"] == 3
+    job = queue.get(job_id)
+    assert job["error"] is None, "a job that printed is not carrying a failure"
+
+
+def test_only_the_last_attempt_decides_the_job(tmp_path):
+    """Three refusals is a printer saying no, and the last word is its own."""
+    queue = _queue()
+    calls = {"n": 0}
+
+    def printing():
+        calls["n"] += 1
+        raise RuntimeError(f"Printer is not ready (attempt {calls['n']})")
+
+    queue.set_pre_job_gate(lambda: (0.0, 0.01, 0.01))
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "failed",
+                what="the job to fail")
+
+    assert calls["n"] == 3, "gave up before the schedule was spent"
+    assert queue.get(job_id)["error"] == "Printer is not ready (attempt 3)"
+
+
+def test_a_printer_that_was_already_up_is_not_retried(tmp_path):
+    """Retrying there would hide a real fault behind three identical failures.
+
+    The schedule guards the window after this app switched a printer on. A job
+    at a printer that was up all along either prints or does not, exactly as
+    before, and a bad label size is not something to try three times.
+    """
+    queue = _queue()
+    calls = {"n": 0}
+
+    def printing():
+        calls["n"] += 1
+        raise RuntimeError("Unsupported label size")
+
+    queue.set_pre_job_gate(lambda: ())  # nothing was switched on
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "failed",
+                what="the job to fail")
+
+    assert calls["n"] == 1
+    assert queue.get(job_id)["error"] == "Unsupported label size"
+
+
+def test_a_gate_that_says_nothing_prints_once_as_it_always_did(tmp_path):
+    """Every gate returned None before the schedule existed."""
+    queue = _queue()
+    calls = {"n": 0}
+
+    def printing():
+        calls["n"] += 1
+
+    queue.set_pre_job_gate(lambda: None)
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "done",
+                what="the job to print")
+
+    assert calls["n"] == 1
+
+
+def test_a_job_waiting_for_its_next_attempt_is_queued_and_cancellable(tmp_path):
+    """Between attempts the job is not on the wire, and says so two ways.
+
+    It reads as ``queued`` with a ``retrying`` activity naming the failure it is
+    waiting out -- and because it is queued, it can still be cancelled, which is
+    the whole difference between a wait somebody can act on and one they cannot.
+    """
+    queue = _queue()
+    calls = {"n": 0}
+    failed_once = threading.Event()
+
+    def printing():
+        calls["n"] += 1
+        failed_once.set()
+        raise RuntimeError("Printer is not ready")
+
+    queue.set_pre_job_gate(lambda: (0.0, 2.0, 2.0))
+    job_id = queue.submit("text", "Hello", printing)
+    assert failed_once.wait(3.0)
+
+    waiting = _eventually(
+        lambda: (queue.get(job_id)["activity"] == ACTIVITY_RETRYING
+                 and queue.get(job_id)),
+        what="the job to be waiting for its next attempt")
+    assert waiting["status"] == "queued", "a job between attempts is not printing"
+    assert "Printer is not ready" in waiting["activity_message"], (
+        "the wait does not say what it is waiting out")
+    assert "Attempt 1 of 3" in waiting["activity_message"]
+
+    assert queue.cancel(job_id) is True
+    _eventually(lambda: queue.queue_status()["activity"] is None,
+                what="the worker to move on")
+    assert calls["n"] == 1, "printed at a printer nobody was waiting for any more"
+    assert queue.get(job_id)["status"] == "cancelled"
+
+
+def test_the_pause_before_the_first_attempt_says_the_printer_is_up(tmp_path):
+    """The first pause is a grace, not a failure, and is worded as one."""
+    queue = _queue()
+    printed = threading.Event()
+
+    queue.set_pre_job_gate(lambda: (2.0, 2.0, 2.0))
+    job_id = queue.submit("text", "Hello", printed.set)
+
+    settling = _eventually(
+        lambda: (queue.get(job_id)["activity"] == ACTIVITY_PRINTER_SETTLING
+                 and queue.get(job_id)),
+        what="the pause before the first attempt")
+    assert settling["status"] == "queued"
+    assert "reports itself ready" in settling["activity_message"]
+    assert not printed.is_set(), "printed before the grace had run"
+
+    queue.cancel(job_id)
+    _eventually(lambda: queue.queue_status()["activity"] is None,
+                what="the worker to move on")
+
+
+def test_a_gate_returning_nonsense_prints_once_rather_than_failing(tmp_path):
+    """The schedule is advice from a plain callable, not a contract."""
+    queue = _queue()
+    calls = {"n": 0}
+
+    def printing():
+        calls["n"] += 1
+
+    queue.set_pre_job_gate(lambda: "5, 20, 20")
+    job_id = queue.submit("text", "Hello", printing)
+    _eventually(lambda: queue.get(job_id)["status"] == "done",
+                what="the job to print")
+
+    assert calls["n"] == 1
 
 
 def test_a_gate_failure_is_described_by_the_error_not_by_a_stale_activity(tmp_path):

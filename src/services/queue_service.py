@@ -38,7 +38,12 @@ from typing import Any, Callable, Dict, List, Optional
 
 import structlog
 
-from src.utils.job_activity import ACTIVITY_PRINTING, activity_message
+from src.utils.job_activity import (
+    ACTIVITY_PRINTER_SETTLING,
+    ACTIVITY_PRINTING,
+    ACTIVITY_RETRYING,
+    activity_message,
+)
 
 logger = structlog.get_logger()
 
@@ -56,6 +61,35 @@ _DEFAULT_JOB_FILE_TTL_SECONDS = 86400
 def _now_iso() -> str:
     """Return the current UTC time as an ISO-8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _attempt_delays(value: Any) -> tuple:
+    """Read the pre-job gate's return value as a print attempt schedule.
+
+    The gate is a plain callable the queue knows nothing else about, so what it
+    hands back is treated as advice rather than as a contract: anything that is
+    not a sequence of non-negative numbers becomes an empty schedule, i.e. print
+    once, immediately. A gate that returns None -- which every gate did before
+    this existed -- lands there too.
+    """
+    if not isinstance(value, (list, tuple)):
+        return ()
+    delays = []
+    for entry in value:
+        try:
+            seconds = float(entry)
+        except (TypeError, ValueError):
+            return ()
+        delays.append(max(0.0, seconds))
+    return tuple(delays)
+
+
+def _short(text: Optional[str], limit: int = 120) -> str:
+    """A one-line, length-capped rendering of an error, for prose about it."""
+    collapsed = " ".join(str(text or "").split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[:limit - 1].rstrip() + "…"
 
 
 def _job_file_ttl_seconds() -> int:
@@ -125,11 +159,18 @@ class PrintQueueService:
 
         The gate takes no arguments and is not told which job it is holding. If
         it wants to say what it is doing it calls :meth:`report_activity`, which
-        finds the job for it -- so the gate stays a plain ``gate() -> None`` and
-        the queue stays the only thing that knows the job registry exists.
+        finds the job for it -- so the gate stays a plain callable and the queue
+        stays the only thing that knows the job registry exists.
+
+        It may hand back a print attempt schedule: a sequence of pauses, one per
+        attempt, taken before each. That is how a gate says "I have just powered
+        this printer up, so the first refusal is probably the boot and not the
+        job" without the queue learning what a relay or a printer is. Returning
+        nothing means what it always meant: print once, now.
 
         Args:
-            gate: ``gate() -> None``, or None to remove the current one.
+            gate: ``gate() -> None | Sequence[float]``, or None to remove the
+                current one.
         """
         self._pre_job_gate = gate
 
@@ -192,6 +233,10 @@ class PrintQueueService:
         return {
             "activity": activity,
             "activity_message": job.get("activity_message") if job else None,
+            # When the phase started, so a client can say how long it has been
+            # running without also fetching the job list. The header says that
+            # from every tab, and one small request is what it should cost.
+            "activity_at": job.get("activity_at") if job else None,
             # Named only while there is an activity to attribute: the id of a
             # job that is doing nothing describable is not information.
             "activity_job_id": self._current_job_id if activity else None,
@@ -553,6 +598,112 @@ class PrintQueueService:
             self._executors.pop(jid, None)
             self._files.pop(jid, None)
 
+    def _print_job(self, job_id: str, fn: Callable[[], Any],
+                   delays: tuple) -> None:
+        """Run the print, once, or on the attempt schedule the gate handed back.
+
+        ``delays`` is one pause per attempt, taken *before* that attempt, and is
+        empty for the ordinary case of a printer that was already up: print now,
+        once, and a failure is the printer's answer. A non-empty schedule means
+        the printer was switched on for this job and the first attempt is being
+        made into its boot window, where a refusal says as much about the moment
+        as about the job -- so it is tried again rather than failed.
+
+        Only the last attempt's failure is the job's failure. The earlier ones
+        are reported as an activity while the job waits, and the job stays
+        ``queued`` between attempts: it is not on the wire, and it can still be
+        cancelled, which is the difference a user acts on.
+        """
+        attempts = max(1, len(delays))
+        error: Optional[str] = None
+        for attempt in range(1, attempts + 1):
+            pause = delays[attempt - 1] if attempt <= len(delays) else 0.0
+            if pause > 0 and not self._hold_before_attempt(
+                    job_id, pause, attempt, attempts, error):
+                return  # cancelled while waiting; the worker's finally cleans up
+
+            with self._lock:
+                job = self._jobs.get(job_id)
+                # The gate and the pauses take time; the job may be gone.
+                if job is None or job["status"] == "cancelled":
+                    return
+                job["status"] = "printing"
+                # The moment the job first went on the wire, kept across
+                # retries: "started" is when the printing began, not when the
+                # attempt that happened to work did.
+                job["started_at"] = job.get("started_at") or _now_iso()
+                self._set_activity_locked(
+                    job_id, ACTIVITY_PRINTING,
+                    None if attempts == 1 else
+                    f"Printing (attempt {attempt} of {attempts}).")
+            logger.info("Print job started", job_id=job_id,
+                        attempt=attempt, attempts=attempts)
+
+            try:
+                fn()
+            except Exception as e:  # noqa: BLE001 - record any print failure
+                error = str(e)
+                logger.error("Print job failed", job_id=job_id, attempt=attempt,
+                             attempts=attempts, error=error,
+                             exc_info=attempt == attempts)
+                if attempt < attempts:
+                    continue
+                self._finish(job_id, "failed", error)
+                return
+
+            self._finish(job_id, "done", None)
+            logger.info("Print job done", job_id=job_id, attempt=attempt)
+            return
+
+    def _hold_before_attempt(self, job_id: str, seconds: float, attempt: int,
+                             attempts: int, error: Optional[str]) -> bool:
+        """Wait before a print attempt, saying why, and stop if cancelled.
+
+        Returns True when the wait ran to the end and the attempt should be
+        made, False when the job went away or was cancelled meanwhile.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None or job["status"] == "cancelled":
+                return False
+            # Back to "queued": the job is waiting, not printing, and a waiting
+            # job is one a user can still cancel.
+            job["status"] = "queued"
+            if attempt == 1:
+                self._set_activity_locked(
+                    job_id, ACTIVITY_PRINTER_SETTLING,
+                    f"The printer reports itself ready. Giving it {seconds:.0f}s "
+                    f"before printing.")
+            else:
+                because = f" ({_short(error)})" if error else ""
+                self._set_activity_locked(
+                    job_id, ACTIVITY_RETRYING,
+                    f"Attempt {attempt - 1} of {attempts} did not go through"
+                    f"{because}. Trying again in {seconds:.0f}s.")
+
+        deadline = time.monotonic() + seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return True
+            # Slices rather than one sleep, so a cancel takes effect while the
+            # job is waiting instead of a retry landing at a printer nobody is
+            # waiting for any more.
+            time.sleep(min(0.25, remaining))
+            with self._lock:
+                job = self._jobs.get(job_id)
+                if job is None or job["status"] == "cancelled":
+                    return False
+
+    def _finish(self, job_id: str, status: str, error: Optional[str]) -> None:
+        """Record a job's outcome."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is not None:
+                job["status"] = status
+                job["error"] = error
+                job["finished_at"] = _now_iso()
+
     def _run(self) -> None:
         """Worker loop: process queued jobs FIFO, one at a time."""
         while True:
@@ -578,9 +729,10 @@ class PrintQueueService:
                 # rather than as printing, and still counts as pending work,
                 # which is what stops the relay switching off underneath it.
                 gate = self._pre_job_gate
+                attempt_delays: tuple = ()
                 if gate is not None:
                     try:
-                        gate()
+                        attempt_delays = _attempt_delays(gate())
                     except Exception as e:  # noqa: BLE001 - fail this job, keep the worker
                         error = str(e)
                         logger.error("Pre-job gate failed", job_id=job_id,
@@ -600,34 +752,7 @@ class PrintQueueService:
                             self._set_activity_locked(job_id, None)
                         continue
 
-                with self._lock:
-                    job = self._jobs.get(job_id)
-                    # The gate may have taken a while; re-check the job is still
-                    # there and was not cancelled meanwhile.
-                    if job is None or job["status"] == "cancelled":
-                        continue
-                    job["status"] = "printing"
-                    job["started_at"] = _now_iso()
-                    self._set_activity_locked(job_id, ACTIVITY_PRINTING)
-                logger.info("Print job started", job_id=job_id)
-                try:
-                    fn()
-                    final_status = "done"
-                    error = None
-                except Exception as e:  # noqa: BLE001 - record any print failure
-                    final_status = "failed"
-                    error = str(e)
-                    logger.error("Print job failed", job_id=job_id, error=error,
-                                 exc_info=True)
-                finally:
-                    with self._lock:
-                        job = self._jobs.get(job_id)
-                        if job is not None:
-                            job["status"] = final_status
-                            job["error"] = error
-                            job["finished_at"] = _now_iso()
-                if final_status == "done":
-                    logger.info("Print job done", job_id=job_id)
+                self._print_job(job_id, fn, attempt_delays)
             finally:
                 # Whatever happened -- printed, failed, cancelled under us,
                 # skipped -- the job is no longer doing anything, and nothing is

@@ -1245,11 +1245,18 @@ components:
             waiting its turn, and always null once the job has finished. A
             failure while waiting is described by `error`, not by a lingering
             activity.
+
+            `retrying` belongs to a job whose print attempt failed at a printer
+            this app had just switched on: it is tried three times over 45s
+            before the failure is the job's, and it goes back to `queued`
+            between attempts — it is not on the wire, and it can still be
+            cancelled. A job at a printer that was already up is never retried.
           enum:
             - "switching_on"
             - "waiting_for_printer"
             - "printer_settling"
             - "printing"
+            - "retrying"
             - null
           example: "waiting_for_printer"
         activity_message:
@@ -1303,6 +1310,7 @@ components:
             - "waiting_for_printer"
             - "printer_settling"
             - "printing"
+            - "retrying"
             - null
           example: "waiting_for_printer"
         activity_message:
@@ -1310,6 +1318,16 @@ components:
           nullable: true
           description: The current activity in plain words, ready to display
           example: "Waiting for the printer to come up."
+        activity_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: >-
+            ISO-8601 timestamp when the current activity began (null when there
+            is none). Carried here as well as on the job so a client can show
+            how long the phase has been running without also fetching the job
+            list.
+          example: "2026-06-14T12:00:01+00:00"
         activity_job_id:
           type: string
           nullable: true

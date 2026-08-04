@@ -55,6 +55,13 @@ ACTIVITY_WAITING_FOR_PRINTER = "waiting_for_printer"
 # deliberately still not printing.
 ACTIVITY_PRINTER_SETTLING = "printer_settling"
 
+# A print attempt failed and the next one is pending. Only ever reported for a
+# printer this app has just switched on: a job printed at a device that was
+# already up either works or fails, and quietly trying again would hide a real
+# fault. Separate from the settle above because "the printer refused a raster"
+# and "the printer has not been asked yet" are different things to be told.
+ACTIVITY_RETRYING = "retrying"
+
 # The job is on the wire.
 ACTIVITY_PRINTING = "printing"
 
@@ -65,6 +72,7 @@ JOB_ACTIVITIES = (
     ACTIVITY_WAITING_FOR_PRINTER,
     ACTIVITY_PRINTER_SETTLING,
     ACTIVITY_PRINTING,
+    ACTIVITY_RETRYING,
 )
 
 # Fallback wording, used when a producer reports a token without a message.
@@ -76,6 +84,7 @@ ACTIVITY_MESSAGES = {
     ACTIVITY_PRINTER_SETTLING:
         "The printer is answering; letting it settle before printing.",
     ACTIVITY_PRINTING: "Printing.",
+    ACTIVITY_RETRYING: "The print did not go through; trying again.",
 }
 
 

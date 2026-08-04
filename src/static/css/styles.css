@@ -298,6 +298,37 @@ body {
 .pill.ka-active .dot { background: var(--green); box-shadow: 0 0 0 3px color-mix(in srgb, var(--green) 18%, transparent); }
 #navbar-keepalive.busy { opacity: .6; pointer-events: none; }
 
+/* What the queue is doing, in the header, beside the printer it is doing it to.
+   Present only while a job is actually being held or printed, so its arrival is
+   itself the signal: the row is otherwise the same four pills it always is.
+   Accented rather than red or green -- a job waiting out a boot is the app
+   working, not a fault. */
+.pill-activity {
+    border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+    background: color-mix(in srgb, var(--accent) 7%, var(--panel));
+    color: var(--accent-strong);
+    gap: 6px;
+    padding-left: 11px;
+}
+.pill-activity[hidden] { display: none; }
+.pill-activity .pill-icon { display: inline-flex; font-size: 12px; }
+.pill-activity .pill-activity-elapsed {
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+}
+.pill-activity .pill-activity-elapsed:empty { display: none; }
+/* A retry is the one phase here that is not simply progress. */
+.pill-activity.is-retrying {
+    border-color: color-mix(in srgb, var(--warn) 55%, var(--border));
+    background: color-mix(in srgb, var(--warn) 10%, var(--panel));
+    color: var(--warn);
+}
+/* On a phone the cluster has no room for prose: the icon and the clock say
+   which phase and how long, and the queue panel says the rest. */
+@media (max-width: 560px) {
+    .pill-activity #navbar-activity-label { display: none; }
+}
+
 /* Manual "ask the printer now" button, sitting with the pills it refreshes.
    Round and icon-only at every width: it has no state of its own to spell out,
    and the cluster has no room to spare on a phone. */
@@ -872,19 +903,107 @@ body.dark-mode .queue-badge { color: #06222B; }
 .queue-activity {
     position: relative;
     display: flex;
-    align-items: flex-start;
+    flex-direction: column;
     gap: 10px;
-    padding: 11px 18px 13px;
+    padding: 14px 18px 16px;
     border-bottom: 1px solid var(--border-soft);
     background: var(--accent-soft);
     overflow: hidden;
 }
 .queue-activity[hidden] { display: none; }
-.queue-activity-icon {
+
+/* The rail. Four phases, laid out edge to edge, with the connector between two
+   marks carrying the progress: a wait that names its place in a sequence reads
+   as a process rather than as a stall. */
+.queue-steps {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+.queue-step {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    min-width: 0;
+    color: var(--muted);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    white-space: nowrap;
+}
+/* The connector, drawn before every step but the first, so the rail is one line
+   through all four marks and its filled part is the distance already covered.
+   Every step after the first takes a share of the leftover width, which is what
+   lets the connectors stretch the rail across the strip instead of leaving it
+   huddled at the left. */
+.queue-step + .queue-step { flex: 1 1 auto; }
+.queue-step + .queue-step::before {
+    content: "";
+    flex: 1 1 auto;
+    min-width: 14px;
+    height: 2px;
+    margin: 0 9px;
+    border-radius: 2px;
+    background: color-mix(in srgb, var(--accent) 18%, transparent);
+}
+.queue-step + .queue-step.is-done::before,
+.queue-step + .queue-step.is-current::before {
+    background: color-mix(in srgb, var(--accent) 55%, transparent);
+}
+/* A retry has still got this far, so the rail up to it stays filled; only the
+   mark itself changes colour. */
+.queue-step + .queue-step.is-retrying::before {
+    background: color-mix(in srgb, var(--warn) 45%, transparent);
+}
+.queue-step-mark {
     flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border-radius: 50%;
+    border: 1.5px solid color-mix(in srgb, var(--accent) 22%, transparent);
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 11px;
+}
+.queue-step.is-done { color: var(--muted); }
+.queue-step.is-done .queue-step-mark {
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
     color: var(--accent-strong);
-    font-size: 14px;
-    line-height: 1.45;
+}
+.queue-step.is-current { color: var(--accent-strong); }
+.queue-step.is-current .queue-step-mark {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: var(--panel);
+    animation: queue-pulse 1.9s ease-out infinite;
+}
+/* A retry is the printing step going wrong rather than a fifth phase: same
+   place on the rail, different colour, so "it is trying again" does not read as
+   progress. */
+.queue-step.is-retrying { color: var(--warn); }
+.queue-step.is-retrying .queue-step-mark {
+    border-color: var(--warn);
+    background: var(--warn);
+    color: var(--panel);
+    animation: none;
+}
+/* Names collapse before the rail does: the marks and the current phase's own
+   name are what carry it on a narrow screen. */
+@media (max-width: 720px) {
+    .queue-step .queue-step-name { display: none; }
+    .queue-step.is-current .queue-step-name { display: inline; }
+}
+
+.queue-activity-line {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
 }
 /* The server's own sentence, shown as written. It runs to a line and a half, so
    it is prose in the sans face rather than a mono one-liner, and the measure is
@@ -962,6 +1081,7 @@ body.dark-mode .queue-badge { color: #06222B; }
 @media (prefers-reduced-motion: reduce) {
     .queue-activity-sweep { animation: none; width: 100%; opacity: .45; }
     .queue-phase-dot { animation: none; }
+    .queue-step.is-current .queue-step-mark { animation: none; }
 }
 
 .queue-list { display: flex; flex-direction: column; gap: 8px; }

@@ -265,19 +265,31 @@ def test_turn_on_waiting_constants_hang_together():
     first, second = service.turn_on_waits
     assert first > second, "the second wait is the shorter one"
 
-    # The worst case: both attempts, each preceded by the blind wait, plus one
-    # settle that started just before the last deadline.
+    # The worst case: both attempts, each preceded by the blind wait, plus a
+    # settle that started just before the last deadline, plus every print
+    # attempt and the pause before it.
     worst_case = (first + second + 2 * service.blind_wait
-                  + max(service.ready_settle, service.answering_settle))
+                  + service.answering_settle
+                  + sum(service.print_attempt_delays))
     assert worst_case <= 300, "the total wait stays a bounded, explainable number"
 
     assert service.probe_pause < second, "a quick printer must not wait out the window"
     assert service.blind_wait >= 20, (
         "the printer is left alone long enough to associate with Wi-Fi")
-    assert service.ready_settle < service.answering_settle, (
-        "a printer that will not state its readiness has to prove it with time")
-    assert service.probe_pause < service.ready_settle, (
-        "the settle has to span more than one probe or it settles nothing")
+    assert service.settle_probe_pause <= service.probe_pause, (
+        "the settle watches for the printer disappearing again, so it cannot "
+        "look less often than the wait that was only watching for it to appear")
+
+    delays = service.print_attempt_delays
+    assert len(delays) >= 2, (
+        "one attempt is the old behaviour: a printer that spoke a moment early "
+        "fails the job with nothing having been retried")
+    assert all(d > 0 for d in delays), (
+        "an attempt with no pause in front of it repeats the one before it")
+    assert delays[0] < delays[1], (
+        "the first attempt is a grace, the ones after it have a boot to outlast")
+    assert max(delays) >= service.answering_settle * 0.9, (
+        "a retry has to span the flickering phase the boot timeline measured")
 
 
 # --------------------------------------------------------------------------- #

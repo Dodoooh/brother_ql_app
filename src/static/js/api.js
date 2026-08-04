@@ -1661,11 +1661,14 @@ const JOB_STATUS_META = {
 // switch on; the `activity_message` beside it is prose that quotes the real
 // number of seconds involved, so it is displayed verbatim and never rebuilt
 // from these labels.
+// `short` is the header's wording, where there is room for a word and not for a
+// phrase; `label` is the queue's, where the phase is named in full.
 const JOB_ACTIVITY_META = {
-    switching_on:        { label: 'Switching on',        icon: 'bi-lightning-charge-fill' },
-    waiting_for_printer: { label: 'Waiting for printer', icon: 'bi-hourglass-split' },
-    printer_settling:    { label: 'Printer settling',    icon: 'bi-broadcast-pin' },
-    printing:            { label: 'Printing',            icon: 'bi-printer-fill' }
+    switching_on:        { label: 'Switching on',        short: 'Switching on', icon: 'bi-lightning-charge-fill' },
+    waiting_for_printer: { label: 'Waiting for printer', short: 'Booting',      icon: 'bi-hourglass-split' },
+    printer_settling:    { label: 'Printer settling',    short: 'Settling',     icon: 'bi-broadcast-pin' },
+    printing:            { label: 'Printing',            short: 'Printing',     icon: 'bi-printer-fill' },
+    retrying:            { label: 'Trying again',        short: 'Retrying',     icon: 'bi-arrow-repeat' }
 };
 
 /**
@@ -1896,13 +1899,32 @@ function applyQueueState(state) {
  * rewording it here would let the two drift apart. The icon is picked from the
  * `activity` token, which is the part of the contract that is stable enough to
  * branch on.
- * @param {{activity?: ?string, activity_message?: ?string, activity_job_id?: ?string}} state
+ *
+ * The header pill is fed from here too, so this runs on every queue-state poll
+ * whether or not the panel is on screen.
+ * @param {{activity?: ?string, activity_message?: ?string, activity_at?: ?string,
+ *          activity_job_id?: ?string}} state
  */
 function applyQueueActivity(state) {
     const bar = document.getElementById('queue-activity');
-    if (!bar) return;
-
     const activity = (state && state.activity) || null;
+
+    // How long the phase has been running. Both endpoints carry the moment it
+    // started -- the job list because the panel wants it per job, the queue
+    // status because the header must not have to fetch the list to say it -- so
+    // this needs no request of its own either way. It re-reads on every poll
+    // rather than ticking on a timer, so it moves at the cadence the rest of
+    // the panel already moves at.
+    const job = (activity && state.activity_job_id
+                 && jobsById[state.activity_job_id]) || null;
+    const startedAt = (job && job.activity_at) || (state && state.activity_at);
+    const elapsed = activity ? formatElapsed(startedAt) : '';
+
+    // The header pill is updated whether or not the queue panel is on screen:
+    // it is the one part of this visible from wherever the user happens to be.
+    applyHeaderActivity(activity, elapsed);
+
+    if (!bar) return;
     if (!activity) {
         bar.hidden = true;
         bar.removeAttribute('data-activity');
@@ -1910,8 +1932,7 @@ function applyQueueActivity(state) {
     }
     const meta = jobActivityMeta(activity);
 
-    const icon = bar.querySelector('.queue-activity-icon i');
-    if (icon) icon.className = `bi ${meta.icon}`;
+    applyActivitySteps(bar, activity);
 
     // The phase label is only a fallback, for a producer that reported a token
     // without a message.
@@ -1924,21 +1945,78 @@ function applyQueueActivity(state) {
         messageEl.textContent = message;
     }
 
-    // How long the phase has been running. The queue endpoint names the job the
-    // activity belongs to and the jobs endpoint carries the moment it started,
-    // and the same poll fetches both, so this needs no request of its own. It
-    // re-reads on every poll instead of ticking on a timer of its own, so it
-    // moves at the cadence the rest of the panel already moves at.
-    const job = (state.activity_job_id && jobsById[state.activity_job_id]) || null;
     const elapsedEl = document.getElementById('queue-activity-elapsed');
     if (elapsedEl) {
-        const elapsed = job ? formatElapsed(job.activity_at) : '';
         elapsedEl.textContent = elapsed;
         elapsedEl.hidden = !elapsed;
     }
 
     bar.dataset.activity = activity;
     bar.hidden = false;
+}
+
+/**
+ * Mark the rail: everything before the current phase done, the current one
+ * current, everything after it still to come.
+ *
+ * A retry has no step of its own. It is the printing step in trouble, so it
+ * lights that one in the caution colour rather than adding a fifth mark that
+ * would make going backwards look like going forwards.
+ * @param {HTMLElement} bar - the activity strip
+ * @param {string} activity - the current activity token
+ */
+function applyActivitySteps(bar, activity) {
+    const steps = bar.querySelectorAll('.queue-step');
+    if (!steps.length) return;
+    const retrying = activity === 'retrying';
+    const onStep = retrying ? 'printing' : activity;
+    const order = Array.from(steps).map(step => step.dataset.step);
+    const current = order.indexOf(onStep);
+    steps.forEach((step, index) => {
+        // An unknown token (a phase added on the server) leaves every step
+        // unmarked rather than marking the wrong one: the sentence below still
+        // says what is happening.
+        step.classList.toggle('is-done', current >= 0 && index < current);
+        step.classList.toggle('is-current', current === index && !retrying);
+        step.classList.toggle('is-retrying', current === index && retrying);
+        // The printing step borrows the retry's icon while it is retrying, so
+        // the rail says "again" in the same place the colour does.
+        if (step.dataset.step === 'printing') {
+            const mark = step.querySelector('.queue-step-mark i');
+            if (mark) {
+                mark.className = retrying
+                    ? `bi ${jobActivityMeta('retrying').icon}`
+                    : `bi ${jobActivityMeta('printing').icon}`;
+            }
+        }
+    });
+}
+
+/**
+ * Mirror the activity into the header, next to the printer status it concerns:
+ * which phase, and how long it has been in it. The sentence stays in the queue
+ * panel -- this is the glance, not the account.
+ * @param {?string} activity - the current activity token, or null
+ * @param {string} elapsed - stopwatch reading for the phase, possibly empty
+ */
+function applyHeaderActivity(activity, elapsed) {
+    const pill = document.getElementById('navbar-activity');
+    if (!pill) return;
+    if (!activity) {
+        pill.hidden = true;
+        return;
+    }
+    const meta = jobActivityMeta(activity);
+    const name = meta.short || meta.label;
+    const icon = document.getElementById('navbar-activity-icon');
+    if (icon) icon.className = `bi ${meta.icon} pill-icon`;
+    const label = document.getElementById('navbar-activity-label');
+    if (label && label.textContent !== name) label.textContent = name;
+    const elapsedEl = document.getElementById('navbar-activity-elapsed');
+    if (elapsedEl) elapsedEl.textContent = elapsed || '';
+    pill.classList.toggle('is-retrying', activity === 'retrying');
+    pill.title = `Print queue: ${meta.label}`;
+    pill.hidden = false;
 }
 
 /**

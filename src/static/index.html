@@ -120,6 +120,18 @@
                     <span class="dot"></span>
                     <span id="status-indicator">Status</span>
                 </button>
+                <!-- The queue's current phase, next to the printer it is waiting
+                     on. The queue panel says the whole sentence; this says which
+                     phase and for how long, because a job held for four minutes
+                     is a thing to notice from wherever you happen to be. Hidden
+                     unless something is actually happening, and a click goes to
+                     the queue for the rest of the story. -->
+                <button type="button" id="navbar-activity" class="pill pill-activity" hidden
+                        title="What the print queue is doing" aria-live="polite">
+                    <i class="bi bi-hourglass-split pill-icon" id="navbar-activity-icon" aria-hidden="true"></i>
+                    <span id="navbar-activity-label">Waiting</span>
+                    <span class="pill-activity-elapsed" id="navbar-activity-elapsed"></span>
+                </button>
                 <!-- Asks the printer again right now instead of waiting out the
                      30 s poll - the moment for it is a roll change. Icon only at
                      every width: the cluster is tight on a phone, and the name
@@ -573,11 +585,37 @@
                                  control bar above because that is where the queue
                                  speaks about itself, and hidden entirely unless the
                                  job in hand reports an activity: a job merely
-                                 waiting its turn must not look busy. -->
+                                 waiting its turn must not look busy.
+
+                                 The rail names the phases a cold start passes
+                                 through, so a wait of four minutes reads as a
+                                 place in a sequence rather than as one sentence
+                                 that keeps changing. It is decorative for a
+                                 screen reader, which gets the sentence below it
+                                 through the live region instead. -->
                             <div id="queue-activity" class="queue-activity" hidden>
-                                <span class="queue-activity-icon" aria-hidden="true"><i class="bi bi-hourglass-split"></i></span>
-                                <p id="queue-activity-message" class="queue-activity-message" role="status" aria-live="polite"></p>
-                                <span id="queue-activity-elapsed" class="queue-activity-elapsed" aria-hidden="true" hidden></span>
+                                <ol class="queue-steps" id="queue-steps" aria-hidden="true">
+                                    <li class="queue-step" data-step="switching_on">
+                                        <span class="queue-step-mark"><i class="bi bi-lightning-charge-fill"></i></span>
+                                        <span class="queue-step-name">Switching on</span>
+                                    </li>
+                                    <li class="queue-step" data-step="waiting_for_printer">
+                                        <span class="queue-step-mark"><i class="bi bi-hourglass-split"></i></span>
+                                        <span class="queue-step-name">Booting</span>
+                                    </li>
+                                    <li class="queue-step" data-step="printer_settling">
+                                        <span class="queue-step-mark"><i class="bi bi-broadcast-pin"></i></span>
+                                        <span class="queue-step-name">Settling</span>
+                                    </li>
+                                    <li class="queue-step" data-step="printing">
+                                        <span class="queue-step-mark"><i class="bi bi-printer-fill"></i></span>
+                                        <span class="queue-step-name">Printing</span>
+                                    </li>
+                                </ol>
+                                <div class="queue-activity-line">
+                                    <p id="queue-activity-message" class="queue-activity-message" role="status" aria-live="polite"></p>
+                                    <span id="queue-activity-elapsed" class="queue-activity-elapsed" aria-hidden="true" hidden></span>
+                                </div>
                                 <span class="queue-activity-track" aria-hidden="true"><span class="queue-activity-sweep"></span></span>
                             </div>
                             <div class="panel-body">

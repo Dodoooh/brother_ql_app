@@ -201,6 +201,17 @@ function setupEventListeners() {
         navbarRefreshButton.addEventListener('click', () => { refreshPrinterStatus(); });
     }
 
+    // The queue's phase, shown beside the printer status. It says which phase
+    // and for how long; the queue panel says the rest, so that is where a click
+    // goes rather than into a dialog that would repeat the one line.
+    const navbarActivity = document.getElementById('navbar-activity');
+    if (navbarActivity) {
+        navbarActivity.addEventListener('click', () => {
+            const queueTab = document.getElementById('queue-tab');
+            if (queueTab) queueTab.click();
+        });
+    }
+
     // Always-visible keep-alive toggle in the navbar
     const navbarKeepAlive = document.getElementById('navbar-keepalive');
     if (navbarKeepAlive && typeof toggleKeepAliveFromNavbar === 'function') {
@@ -589,6 +600,27 @@ function stopJobsPolling() {
     }
 }
 
+// Interval handle for the header's activity poll, which runs everywhere.
+let activityPollTimer = null;
+
+/**
+ * Keep the header's activity pill fresh from every tab.
+ *
+ * The queue list is only polled while its panel is open, which is the right
+ * trade for a list nobody is looking at -- but the pill exists precisely for
+ * the person who is somewhere else while a job waits out a boot. This is one
+ * small request against `/jobs/queue`, at a third of the queue panel's rate,
+ * and it stands down while that panel is doing the same work faster.
+ */
+function startActivityPolling() {
+    if (activityPollTimer !== null) return;
+    if (typeof refreshQueueState === 'function') refreshQueueState();
+    activityPollTimer = setInterval(() => {
+        if (jobsPollTimer !== null) return;  // the queue panel is already on it
+        if (typeof refreshQueueState === 'function') refreshQueueState();
+    }, 4500);
+}
+
 /**
  * Wire up the print queue: start/stop polling on Queue tab show/hide, the
  * "Clear finished" button, and per-job Cancel buttons (event delegation).
@@ -657,8 +689,9 @@ function setupQueue() {
     }
 
     // Keep the sidebar badge fresh from load on, even before the Queue tab is
-    // first opened.
+    // first opened, and the header's phase pill with it.
     if (typeof refreshJobs === 'function') refreshJobs();
+    startActivityPolling();
 }
 
 /**
