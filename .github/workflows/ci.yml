@@ -334,6 +334,101 @@ jobs:
           fi
 
   # --------------------------------------------------------------------------
+  # The Docker Hub page, which is the first thing most people see of this
+  # project and until now said nothing.
+  #
+  # main only: Docker Hub shows one page for every tag, so a description taken
+  # from dev would describe `latest` wrongly.
+  #
+  # The README cannot go up as it stands. Docker Hub renders markdown but has no
+  # repository behind it, so every relative path -- four screenshots, the licence
+  # and the changelog -- would be a broken image or a dead link, which is worse
+  # than no description at all. It also strips HTML, so the one <img> tag has to
+  # become markdown. The rewritten copy is built here and never committed, like
+  # the API reference and the analytics snippet in pages.yml.
+  # --------------------------------------------------------------------------
+  description:
+    name: Update the Docker Hub page
+    needs: [publish]
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Rewrite the README for Docker Hub
+        env:
+          REPO_URL: https://github.com/${{ github.repository }}
+          RAW_URL: https://raw.githubusercontent.com/${{ github.repository }}/main
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+
+          repo = os.environ["REPO_URL"]
+          raw = os.environ["RAW_URL"]
+          images = (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp")
+
+          with open("README.md", encoding="utf-8") as handle:
+              text = handle.read()
+
+          # Docker Hub strips HTML, and the phone screenshot is the one place
+          # this README uses a tag rather than markdown.
+          text = re.sub(r'<img\s+src="([^"]+)"\s+alt="([^"]+)"[^>]*>',
+                        lambda m: "![%s](%s)" % (m.group(2), m.group(1)), text)
+
+          def absolute(match):
+              """Every relative target, whether it is a link or an image.
+
+              Matching on `](...)` rather than the whole `[label](...)` keeps
+              nested pairs out of it: a badge wrapped in a link is two of them,
+              and a pattern that tries to read the label mis-reads one of the
+              two every time.
+              """
+              target = match.group(1)
+              if re.match(r"^(https?:|#|mailto:)", target):
+                  return match.group(0)
+              path = target.lstrip("./")
+              base = raw if path.lower().endswith(images) else repo + "/blob/main"
+              return "](%s/%s)" % (base, path)
+
+          text = re.sub(r"\]\(([^)]+)\)", absolute, text)
+
+          # A badge per line renders as a stack wherever a newline inside a
+          # paragraph counts as a break, which is most places that are not
+          # GitHub. Joined into one line they sit side by side everywhere.
+          def join_badges(block):
+              lines = block.group(0).strip("\n").split("\n")
+              return " ".join(lines) + "\n"
+
+          text = re.sub(r"(?:^\[!\[[^\n]*\n){2,}", join_badges, text, flags=re.M)
+
+          # Docker Hub gives no hint where any of this comes from.
+          badge = ("[![Source on GitHub](https://img.shields.io/badge/GitHub-"
+                   "source%%20%%26%%20issues-181717?logo=github)](%s)" % repo)
+          text = badge + "\n\n" + text
+
+          with open("DOCKERHUB.md", "w", encoding="utf-8") as handle:
+              handle.write(text)
+
+          left = re.findall(r"\]\((?!https?:|#|mailto:)([^)]+)\)", text)
+          print("Relative targets left:", left or "none")
+          if left:
+              raise SystemExit("a relative target would break on Docker Hub")
+          print("DOCKERHUB.md written, %d characters" % len(text))
+          PY
+
+      - name: Push the description
+        uses: peter-evans/dockerhub-description@v4
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          repository: ${{ secrets.DOCKER_USERNAME }}/brother_ql_app
+          short-description: "A web interface and REST API for Brother QL label printers"
+          readme-filepath: ./DOCKERHUB.md
+          enable-url-completion: false
+
+  # --------------------------------------------------------------------------
   # The tag and the GitHub release, last, once there is an image to point at.
   #
   # actions/create-release was used here until now. It has been archived since
