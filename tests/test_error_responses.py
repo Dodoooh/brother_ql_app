@@ -62,15 +62,26 @@ def flask_app():
     """
     from src.app import create_app
 
-    app = create_app().app
+    connexion_app = create_app()
+    app = connexion_app.app
     app.config["TESTING"] = True
     app.config["PROPAGATE_EXCEPTIONS"] = False
+    # The Connexion app is carried along: from version 3 it is the one that owns
+    # the routes, and the Flask app underneath answers only what is registered
+    # directly on it.
+    app.connexion_app = connexion_app
     return app
 
 
 @pytest.fixture()
 def client(flask_app):
-    return flask_app.test_client()
+    """A client that enters through the whole stack, middleware included.
+
+    Going in through ``flask_app.test_client()`` would skip Connexion's routing
+    and validation middleware, and every request to ``/api/v1`` would come back
+    404 -- a green suite testing nothing.
+    """
+    return flask_app.connexion_app.test_client()
 
 
 @pytest.fixture()
@@ -88,10 +99,14 @@ def printer_controller(flask_app):
 def assert_error_shape(response, status, code):
     """Assert the common Error shape and return the parsed body."""
     assert response.status_code == status
-    # Not application/problem+json: 404/405/413 used to come back as RFC-7807.
-    assert response.mimetype == "application/json"
+    # Not application/problem+json: 404/405/413 used to come back as RFC-7807,
+    # and from Connexion 3 the middleware answers them that way by default.
+    mimetype = getattr(response, "mimetype", None)
+    if mimetype is None:
+        mimetype = response.headers.get("content-type", "").split(";")[0]
+    assert mimetype == "application/json"
 
-    body = response.get_json()
+    body = response.json() if callable(getattr(response, "json", None)) else response.get_json()
     assert set(body) == {"code", "message", "details"}, body
     assert body["code"] == code
     assert isinstance(body["message"], str) and body["message"].strip(), \
@@ -134,10 +149,15 @@ def test_a_wrong_method_is_reported_in_the_common_shape(client):
 
 
 def test_an_oversized_upload_is_reported_in_the_common_shape(client):
-    """Past MAX_CONTENT_LENGTH (16 MB) Werkzeug aborts the request itself."""
+    """Past the 16 MB ceiling the request is refused before the body is read.
+
+    Flask's ``MAX_CONTENT_LENGTH`` used to do this. It cannot from Connexion 3:
+    the body is parsed by ASGI middleware ahead of Flask, so the limit moved to
+    a middleware of our own that refuses on the declared Content-Length.
+    """
     too_much = b"x" * (17 * 1024 * 1024)
-    response = client.post(f"{API}/image/print", data=too_much,
-                           content_type="multipart/form-data; boundary=nope")
+    response = client.post(f"{API}/image/print", content=too_much,
+                           headers={"content-type": "multipart/form-data; boundary=nope"})
 
     assert_error_shape(response, 413, "PAYLOAD_TOO_LARGE")
 
@@ -148,12 +168,12 @@ def test_a_missing_api_key_is_reported_in_the_common_shape(monkeypatch):
 
     from src.app import create_app
 
-    app = create_app().app
-    app.config["TESTING"] = True
-    app.config["PROPAGATE_EXCEPTIONS"] = False
+    connexion_app = create_app()
+    connexion_app.app.config["TESTING"] = True
+    connexion_app.app.config["PROPAGATE_EXCEPTIONS"] = False
 
-    response = app.test_client().post(f"{API}/printers/status",
-                                      json=VALID_STATUS_BODY)
+    response = connexion_app.test_client().post(f"{API}/printers/status",
+                                                json=VALID_STATUS_BODY)
 
     body = assert_error_shape(response, 401, "UNAUTHORIZED")
     assert "s3cret" not in json.dumps(body), "the expected key is never echoed"
@@ -227,8 +247,8 @@ def test_an_internal_error_does_not_repeat_itself(client, printer_controller):
         first = client.post(f"{API}/printers/status", json=VALID_STATUS_BODY)
         second = client.post(f"{API}/printers/status", json=VALID_STATUS_BODY)
 
-    assert (first.get_json()["details"]["error_id"]
-            != second.get_json()["details"]["error_id"])
+    assert (first.json()["details"]["error_id"]
+            != second.json()["details"]["error_id"])
 
 
 def test_a_server_path_never_reaches_the_client(client, printer_controller):
@@ -307,15 +327,16 @@ def test_a_5xx_keeps_its_status_but_not_its_words():
 
     from src.app import create_app
 
-    app = create_app().app
-    app.config["TESTING"] = True
-    app.config["PROPAGATE_EXCEPTIONS"] = False
+    connexion_app = create_app()
+    connexion_app.app.config["TESTING"] = True
+    connexion_app.app.config["PROPAGATE_EXCEPTIONS"] = False
 
-    @app.route("/__test__/unavailable")
     def _unavailable():
         raise ServiceUnavailable("the SNMP socket at /app/run/snmp.sock is gone")
 
-    response = app.test_client().get("/__test__/unavailable")
+    connexion_app.add_url_rule("/__test__/unavailable", "_unavailable", _unavailable)
+
+    response = connexion_app.test_client().get("/__test__/unavailable")
 
     body = assert_error_shape(response, 503, "SERVICE_UNAVAILABLE")
     assert body["message"] == "An internal error occurred"

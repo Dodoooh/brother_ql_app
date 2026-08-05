@@ -2,14 +2,14 @@ from setuptools import setup, find_packages
 
 setup(
     name="brother_ql_app",
-    version="4.0.0",
+    version="4.0.1",
     packages=find_packages(),
     include_package_data=True,
     # Kept in sync with requirements.txt (the authoritative dependency list).
     install_requires=[
         # Core
-        "Flask<2.3.0,>=2.0.0",
-        "connexion[swagger-ui]==2.14.2",
+        "connexion[flask,swagger-ui]==3.3.0",
+        "Flask==3.1.3",
         "flask-cors==6.0.5",
         # Imported directly by src/app.py, not just transitively via connexion.
         "PyYAML==6.0.3",
@@ -18,6 +18,10 @@ setup(
         "Pillow==12.3.0",
         "qrcode==7.4.2",
         "pypdfium2==4.30.0",
+        # Server. Connexion 3 is ASGI, so gunicorn serves it through uvicorn's
+        # worker class (see docker-entrypoint.sh).
+        "gunicorn==23.0.0",
+        "uvicorn==0.38.0",
         # Logging
         "structlog==23.1.0",
     ],

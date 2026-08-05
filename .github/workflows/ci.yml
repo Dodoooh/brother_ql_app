@@ -150,21 +150,13 @@ jobs:
       - name: Run tests (pytest)
         run: pytest -q
 
-      # The ignored advisories are structural, not oversights: connexion 2.14.2
-      # requires werkzeug<2.3, which pins Flask to 2.2.5. Clearing them means
-      # migrating to connexion 3. Everything outside this list is fixable and
-      # must keep failing the build.
+      # No exemptions. There used to be eight, all of them downstream of one
+      # thing: connexion 2.14.2 required werkzeug<2.3, which pinned Flask to
+      # 2.2.5 and held both there. Connexion 3 removed that pin and the
+      # advisories went with it. Anything that appears here now is fixable and
+      # must fail the build.
       - name: Dependency vulnerability scan (pip-audit)
-        run: |
-          pip-audit -r requirements.txt \
-            --ignore-vuln GHSA-68rp-wp8r-4726 \
-            --ignore-vuln PYSEC-2023-221 \
-            --ignore-vuln GHSA-2g68-c3qc-8985 \
-            --ignore-vuln GHSA-f9vj-2wh5-fj8j \
-            --ignore-vuln GHSA-q34m-jh98-gwm2 \
-            --ignore-vuln GHSA-hgf8-39gv-g3f2 \
-            --ignore-vuln GHSA-87hc-h4r5-73f7 \
-            --ignore-vuln GHSA-29vq-49wr-vm6x
+        run: pip-audit -r requirements.txt
 
   # --------------------------------------------------------------------------
   # One job per architecture, each on a runner of its own kind. No emulation:

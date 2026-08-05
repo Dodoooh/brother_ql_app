@@ -2,16 +2,23 @@ import os
 import json
 import secrets
 import connexion
+from connexion.middleware import MiddlewarePosition
 import logging
 import structlog
 from flask import request, jsonify
 from flask_cors import CORS
 
 # Application version (surfaced by the /health liveness endpoint)
-APP_VERSION = os.environ.get("APP_VERSION", "4.0.0")
+APP_VERSION = os.environ.get("APP_VERSION", "4.0.1")
 
-from src.utils.error_handlers import build_error_body, register_error_handlers
+from src.utils.error_handlers import (
+    build_error_body,
+    register_connexion_error_handlers,
+    register_error_handlers,
+)
 from src.utils.pillow_patch import apply_pillow_patch
+from src.utils.request_limits import MaxBodySizeMiddleware
+
 from src.utils.auth import auth_enabled, is_valid_api_key, API_KEY_HEADER
 from src.services.printer_service import printer_service
 from src.services.settings_service import settings_service
@@ -40,6 +47,10 @@ structlog.configure(
 # Create logger
 logger = structlog.get_logger()
 
+# Largest request body accepted, enforced twice: by Flask for anything it
+# parses itself, and by an ASGI middleware in front of Connexion, which
+# reads the API's uploads before Flask ever sees them.
+MAX_CONTENT_LENGTH = 16 * 1024 * 1024
 # Constants
 # Upload folder resolution mirrors PrinterService: prefer the UPLOAD_FOLDER env
 # var, otherwise fall back to the historical code-relative default so behaviour
@@ -87,7 +98,7 @@ def create_app():
     app.config.from_mapping(
         SECRET_KEY=secret_key,
         UPLOAD_FOLDER=UPLOAD_FOLDER,
-        MAX_CONTENT_LENGTH=16 * 1024 * 1024,  # 16 MB max upload
+        MAX_CONTENT_LENGTH=MAX_CONTENT_LENGTH,
     )
 
     # Configure CORS. We no longer expose a wildcard ('*'): when CORS_ORIGINS is
@@ -141,6 +152,26 @@ def create_app():
 
     # Register error handlers
     register_error_handlers(app)
+    # Connexion 3 validates, routes and authorises in ASGI middleware that
+    # runs before Flask, so the handlers above never see the most common
+    # error the API produces. These give that layer the same shape.
+    register_connexion_error_handlers(connexion_app)
+
+    # And the size ceiling, at the outermost edge. Flask's
+    # MAX_CONTENT_LENGTH is set above and still bounds anything Flask
+    # parses itself, but the API's uploads are read by Connexion's
+    # middleware first, so the limit has to sit in front of that.
+    # BEFORE_ROUTING, not the default position: Connexion inserts a middleware
+    # at the innermost end of its stack, which is past the point where the body
+    # has already been read. This has to be in front of that to be worth having.
+    connexion_app.add_middleware(
+        MaxBodySizeMiddleware,
+        position=MiddlewarePosition.BEFORE_ROUTING,
+        max_bytes=MAX_CONTENT_LENGTH,
+        error_body=lambda: build_error_body(
+            "PAYLOAD_TOO_LARGE",
+            f"The request body exceeds the limit of {MAX_CONTENT_LENGTH} bytes"),
+    )
 
     # Register routes
     register_routes(app)

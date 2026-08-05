@@ -4,7 +4,7 @@ info:
   description: |
     API for controlling Brother QL label printers, enabling customizable text and image printing.
     This API allows for printing formatted text and images on labels with various settings.
-  version: 4.0.0
+  version: 4.0.1
   contact:
     name: Brother QL Printer App Support
     url: https://github.com/dodoooh/brother_ql_app/issues
@@ -601,7 +601,21 @@ paths:
                 - file
       responses:
         '302':
+          # The content type is spelled out because a response declared without
+          # one is not treated as "anything": Connexion 3 validates the outgoing
+          # content type against the union of the other declared responses, all
+          # of which are JSON here, and answered this redirect with 500.
           description: Redirect to UI with staged file
+          content:
+            text/html:
+              schema:
+                type: string
+                description: A short redirect page; the Location header is what matters
+          headers:
+            Location:
+              description: The UI, with the staged file's token
+              schema:
+                type: string
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1010,6 +1024,142 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
+  # The literal paths come before /jobs/{job_id} on purpose. Connexion 3
+  # routes in document order, so a dynamic segment declared first swallows
+  # every literal below it: GET /jobs/queue was matched as job id "queue",
+  # and while Flask underneath still called the right function, the response
+  # was then validated against the Job schema and answered 500.
+  /jobs/clear:
+    post:
+      summary: Clear finished print jobs
+      description: Removes all jobs in a terminal state (done, failed, cancelled)
+      operationId: api.jobs_controller.clear_jobs
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Number of cleared jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared:
+                    type: integer
+                    description: Number of finished jobs removed from the registry
+                    example: 3
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /jobs/clear-all:
+    post:
+      summary: Clear all print jobs
+      description: >-
+        Cancels every queued job and removes all jobs from the registry, except
+        a job that is currently printing (it is kept so its result is recorded).
+      operationId: api.jobs_controller.clear_all_jobs
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Number of cleared jobs
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  cleared:
+                    type: integer
+                    description: Number of jobs removed from the registry
+                    example: 5
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /jobs/queue:
+    get:
+      summary: Get print-queue control status
+      description: Returns whether the queue is paused plus queued/printing counts
+      operationId: api.jobs_controller.get_queue_status
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Queue control status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /jobs/pause:
+    post:
+      summary: Pause the print queue
+      description: >-
+        Pauses processing. A job already printing finishes; subsequent jobs are
+        held until the queue is resumed.
+      operationId: api.jobs_controller.pause_queue
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Queue control status after pausing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /jobs/resume:
+    post:
+      summary: Resume the print queue
+      description: Resumes a previously paused queue
+      operationId: api.jobs_controller.resume_queue
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Queue control status after resuming
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/QueueStatus'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+  /jobs/stop:
+    post:
+      summary: Stop the print queue
+      description: >-
+        Emergency stop: pauses the queue and cancels every queued job. A job
+        currently printing still finishes.
+      operationId: api.jobs_controller.stop_queue
+      tags:
+        - jobs
+      responses:
+        '200':
+          description: Queue control status after stopping (with cancelled count)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/QueueStatus'
+                  - type: object
+                    properties:
+                      cancelled:
+                        type: integer
+                        description: Number of queued jobs cancelled by the stop
+                        example: 4
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
   /jobs/{job_id}:
     get:
       summary: Get a print job
@@ -1137,56 +1287,6 @@ paths:
         '500':
           $ref: '#/components/responses/InternalServerError'
 
-  /jobs/clear:
-    post:
-      summary: Clear finished print jobs
-      description: Removes all jobs in a terminal state (done, failed, cancelled)
-      operationId: api.jobs_controller.clear_jobs
-      tags:
-        - jobs
-      responses:
-        '200':
-          description: Number of cleared jobs
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  cleared:
-                    type: integer
-                    description: Number of finished jobs removed from the registry
-                    example: 3
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalServerError'
-
-  /jobs/clear-all:
-    post:
-      summary: Clear all print jobs
-      description: >-
-        Cancels every queued job and removes all jobs from the registry, except
-        a job that is currently printing (it is kept so its result is recorded).
-      operationId: api.jobs_controller.clear_all_jobs
-      tags:
-        - jobs
-      responses:
-        '200':
-          description: Number of cleared jobs
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  cleared:
-                    type: integer
-                    description: Number of jobs removed from the registry
-                    example: 5
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalServerError'
-
   /jobs/{job_id}/delete:
     post:
       summary: Delete a print job
@@ -1219,93 +1319,6 @@ paths:
           $ref: '#/components/responses/Unauthorized'
         '404':
           $ref: '#/components/responses/NotFound'
-        '500':
-          $ref: '#/components/responses/InternalServerError'
-
-  /jobs/queue:
-    get:
-      summary: Get print-queue control status
-      description: Returns whether the queue is paused plus queued/printing counts
-      operationId: api.jobs_controller.get_queue_status
-      tags:
-        - jobs
-      responses:
-        '200':
-          description: Queue control status
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/QueueStatus'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalServerError'
-
-  /jobs/pause:
-    post:
-      summary: Pause the print queue
-      description: >-
-        Pauses processing. A job already printing finishes; subsequent jobs are
-        held until the queue is resumed.
-      operationId: api.jobs_controller.pause_queue
-      tags:
-        - jobs
-      responses:
-        '200':
-          description: Queue control status after pausing
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/QueueStatus'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalServerError'
-
-  /jobs/resume:
-    post:
-      summary: Resume the print queue
-      description: Resumes a previously paused queue
-      operationId: api.jobs_controller.resume_queue
-      tags:
-        - jobs
-      responses:
-        '200':
-          description: Queue control status after resuming
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/QueueStatus'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '500':
-          $ref: '#/components/responses/InternalServerError'
-
-  /jobs/stop:
-    post:
-      summary: Stop the print queue
-      description: >-
-        Emergency stop: pauses the queue and cancels every queued job. A job
-        currently printing still finishes.
-      operationId: api.jobs_controller.stop_queue
-      tags:
-        - jobs
-      responses:
-        '200':
-          description: Queue control status after stopping (with cancelled count)
-          content:
-            application/json:
-              schema:
-                allOf:
-                  - $ref: '#/components/schemas/QueueStatus'
-                  - type: object
-                    properties:
-                      cancelled:
-                        type: integer
-                        description: Number of queued jobs cancelled by the stop
-                        example: 4
-        '401':
-          $ref: '#/components/responses/Unauthorized'
         '500':
           $ref: '#/components/responses/InternalServerError'
 

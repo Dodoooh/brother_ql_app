@@ -2,7 +2,7 @@
   "name": "Brother QL Printer App",
   "url": "https://github.com/Dodoooh/brother_ql_app",
   "description": "A modern web application to control Brother QL printers with API-first approach",
-  "version": "4.0.0",
+  "version": "4.0.1",
   "maintainer": "Dodoooh",
   "containerized": true,
   "container_registry": "docker.io/dodoooh/brother_ql_app",

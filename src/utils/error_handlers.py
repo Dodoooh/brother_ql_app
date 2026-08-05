@@ -179,6 +179,47 @@ def _app_error_body(error: AppError) -> Dict[str, Any]:
     return build_error_body(error.code, error.message, error.details)
 
 
+def problem_body(error: Any, status: int, detail: Any, title: Any,
+                 ext: Any, event: str) -> Tuple[Dict[str, Any], int]:
+    """Shape a specification-level problem into the response body.
+
+    Connexion raises these from its request validation, so they are the most
+    common 400 the API produces -- "'printer_uri' is a required property" and
+    friends. It builds them without passing a message to ``Exception``, so the
+    useful text sits in ``detail`` rather than in ``str(error)``.
+
+    This lives outside the handlers because both of them need it: under
+    Connexion 2 validation happens inside Flask, under Connexion 3 it happens
+    in ASGI middleware above it, and the client must not be able to tell.
+
+    Args:
+        error: The exception, for the log only.
+        status: HTTP status the problem carries.
+        detail: The sentence Connexion wrote about it.
+        title: Its short name, e.g. "Bad Request".
+        ext: Connexion's own place for structured extras.
+        event: Log event name, naming the layer this came from.
+
+    Returns:
+        Tuple of response body and status code.
+    """
+    status = status or 500
+
+    # A 5xx problem is an internal fault regardless of who raised it, and its
+    # detail is not ours to vouch for.
+    if status >= 500:
+        generic = internal_error(error, event, status=status, title=title)
+        return build_error_body(_status_code_name(status), generic.message,
+                                generic.details), status
+
+    message = detail or title or _status_code_name(status).replace("_", " ").capitalize()
+    # ``ext`` is already a dict; the plain string detail belongs in `message`.
+    details = ext if isinstance(ext, dict) else {}
+
+    logger.warning(event, error=str(error), detail=detail, title=title, status=status)
+    return build_error_body(_status_code_name(status), message, details), status
+
+
 def register_error_handlers(app):
     """
     Register error handlers for the application.
@@ -326,27 +367,11 @@ def register_error_handlers(app):
         Returns:
             Tuple of error response and status code.
         """
-        status = error.status or 500
-
-        # A 5xx problem is an internal fault regardless of who raised it, and
-        # its detail is not ours to vouch for. Note that we *return* the generic
-        # body rather than raising it: an exception raised inside an error
-        # handler escapes Flask's dispatch entirely and the client would get a
-        # bare, bodyless 500 from the WSGI layer.
-        if status >= 500:
-            generic = internal_error(error, "Connexion problem",
-                                     status=status, title=error.title)
-            return build_error_body(_status_code_name(status), generic.message,
-                                    generic.details), status
-
-        message = error.detail or error.title or _status_code_name(status).replace("_", " ").capitalize()
-        # ``ext`` is Connexion's own place for structured extras and is already
-        # a dict; the plain string detail belongs in `message`, not in `details`.
-        details = error.ext if isinstance(error.ext, dict) else {}
-
-        logger.warning("Connexion problem", error=str(error), detail=error.detail,
-                       title=error.title, status=status)
-        return build_error_body(_status_code_name(status), message, details), status
+        # Note that we *return* the body rather than raising: an exception
+        # raised inside an error handler escapes Flask's dispatch entirely and
+        # the client would get a bare, bodyless 500 from the WSGI layer.
+        return problem_body(error, error.status, error.detail, error.title,
+                            error.ext, "Connexion problem")
 
     @app.errorhandler(HTTPException)
     def handle_http_exception(error: HTTPException) -> Tuple[Dict[str, Any], int]:
@@ -403,3 +428,82 @@ def register_error_handlers(app):
     # never reached for any of these and the response is a problem document.
     for status_code in default_exceptions:
         app.register_error_handler(status_code, handle_http_exception)
+
+
+def register_connexion_error_handlers(connexion_app) -> None:
+    """Give the ASGI layer above Flask the same error shape.
+
+    Connexion 3 moved routing, request validation and security into ASGI
+    middleware that runs *before* the Flask application. A schema violation is
+    therefore answered without Flask ever seeing it, and the handlers registered
+    by :func:`register_error_handlers` never run for the most common error the
+    API produces.
+
+    Left alone, that layer answers RFC-7807 ``application/problem+json``::
+
+        {"type": "about:blank", "title": "Bad Request",
+         "detail": "'text' is a required property", "status": 400}
+
+    which is not the shape ``openapi.yaml`` declares at every one of its
+    operations, and not what the bundled interface reads. These handlers put it
+    back, using the same :func:`build_error_body` as everything else, so there
+    is one shape regardless of which layer produced the error.
+
+    Args:
+        connexion_app: The Connexion application, not the Flask one.
+    """
+    import json
+
+    from connexion.exceptions import ProblemException as _CxProblem
+    from connexion.lifecycle import ConnexionResponse
+    from starlette.exceptions import HTTPException as _StarletteHTTPException
+
+    def _respond(body: Dict[str, Any], status: int) -> "ConnexionResponse":
+        return ConnexionResponse(
+            status_code=status,
+            mimetype="application/json",
+            content_type="application/json",
+            body=json.dumps(body),
+        )
+
+    def _problem(request, error):  # noqa: ARG001 - the signature is Connexion's
+        body, status = problem_body(error, error.status, error.detail, error.title,
+                                    error.ext, "Connexion problem (middleware)")
+        return _respond(body, status)
+
+    def _http(request, error):  # noqa: ARG001
+        """Routing errors: an unknown path or a method the operation has not."""
+        status = getattr(error, "status_code", 500) or 500
+        if status >= 500:
+            generic = internal_error(error, "HTTP exception (middleware)", status=status)
+            return _respond(build_error_body(_status_code_name(status), generic.message,
+                                             generic.details), status)
+        logger.warning("HTTP exception (middleware)", error=str(error), code=status)
+        return _respond(build_error_body(_status_code_name(status),
+                                         getattr(error, "detail", "") or ""), status)
+
+    def _malformed_body(request, error):  # noqa: ARG001
+        """A body the parser could not read is the caller's mistake, not ours.
+
+        Form parsing moved into the middleware too, and it raises a plain
+        ``ValueError`` subclass rather than an HTTP error. Without this it falls
+        through to the catch-all below and a mangled multipart upload is
+        answered with 500 and a correlation id, as though the server had broken.
+        """
+        logger.warning("Malformed request body", error=str(error))
+        return _respond(build_error_body("VALIDATION_ERROR",
+                                         "The request body could not be parsed"), 400)
+
+    def _unhandled(request, error):  # noqa: ARG001
+        """The last line of defence, one layer further out than Flask's."""
+        generic = internal_error(error, "Unhandled exception (middleware)")
+        return _respond(_app_error_body(generic), 500)
+
+    connexion_app.add_error_handler(_CxProblem, _problem)
+    connexion_app.add_error_handler(_StarletteHTTPException, _http)
+    try:
+        from python_multipart.exceptions import FormParserError
+        connexion_app.add_error_handler(FormParserError, _malformed_body)
+    except ImportError:  # pragma: no cover - the parser ships with Connexion
+        pass
+    connexion_app.add_error_handler(Exception, _unhandled)

@@ -120,34 +120,31 @@ fi
 #                  the relay webhook fires twice, and GET /jobs alternates between
 #                  the two workers' private in-memory job lists. --workers 1 is a
 #                  correctness condition, not a convenience.
-#   --threads 8  : in-process threads handle concurrent requests; they share the
-#                  same singletons, so no extra background threads are created.
-#                  What --timeout does NOT do here: with the gthread worker the
-#                  arbiter heartbeat comes from the worker's accept loop, not the
-#                  request thread, so a request stuck in CPU-bound C code (Pillow)
-#                  never trips --timeout -- it just holds its thread until it
-#                  finishes. More threads only widen the margin against a burst
-#                  of heavy previews; they are not a cure. The cure is upstream:
+#   uvicorn      : Connexion 3 is ASGI. The operation handlers are ordinary
+#                  synchronous functions, so Connexion runs each one in the
+#                  worker's thread pool rather than on the event loop; that is
+#                  where concurrency comes from now, and it is why gunicorn's
+#                  --threads is gone rather than merely unused.
+#                  What --timeout does NOT do here: the arbiter heartbeat comes
+#                  from the event loop, not from the request, so a call stuck in
+#                  CPU-bound C code (Pillow) never trips it -- it just holds its
+#                  thread until it finishes. The cure is upstream and unchanged:
 #                  every render path is bounded (MAX_UPLOAD_IMAGE_PIXELS caps the
 #                  decode, MAX_PDF_PAGES caps the rasterise) and the compose
-#                  mem_limit turns an over-large job into an OOM that gunicorn
-#                  recovers from by rebooting the worker -- measured: four
+#                  mem_limit turns an over-large job into an OOM the worker is
+#                  restarted from -- measured under the old server: four
 #                  abandoned heavy previews and a 1.2M-char text each left the
-#                  service responding, none wedged it. Switching to a sync worker
-#                  would make --timeout fire, but with one worker that caps the
-#                  app at one request at a time, and a single ~4 s render then
-#                  blocks the UI's own polling for its full duration (measured);
-#                  a bad trade for a wedge the bounds above already prevent.
+#                  service responding, none wedged it.
 #   no --preload : create_app() (and thus init_keep_alive, the queue worker and
 #                  the relay scheduler) must run inside the worker process,
 #                  otherwise those threads would be started before the fork and
 #                  would not survive it.
-echo "Starting application with gunicorn (workers=1, threads=8)"
+echo "Starting application with gunicorn + uvicorn worker (workers=1)"
 exec gunicorn \
     --workers 1 \
-    --threads 8 \
+    --worker-class uvicorn.workers.UvicornWorker \
     --bind 0.0.0.0:5000 \
     --timeout 60 \
     --access-logfile - \
     --error-logfile - \
-    wsgi:application
+    asgi:application

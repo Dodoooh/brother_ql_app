@@ -1,8 +1,8 @@
 # Core dependencies
-# connexion 2.14.2 requires werkzeug<2.3, which in turn pins Flask to 2.2.x.
-# Both stay on those versions until the connexion 3 migration.
-Flask<2.3.0,>=2.0.0
-connexion[swagger-ui]==2.14.2
+# The `flask` extra is not optional: without it connexion 3 refuses to build a
+# Flask application at all ("Please install connexion using the 'flask' extra").
+connexion[flask,swagger-ui]==3.3.0
+Flask==3.1.3
 flask-cors==6.0.5
 # Declared explicitly although connexion already pulls it in: src/app.py imports
 # yaml directly to read openapi.yaml before handing it to connexion. Relying on
@@ -18,9 +18,12 @@ qrcode==7.4.2
 # deps) and is Apache-2.0/BSD licensed.
 pypdfium2==4.30.0
 
-# Production WSGI server. Run with --workers 1 so the keep-alive
-# singleton/thread stays in a single process (see docker-entrypoint.sh).
+# Production server. Connexion 3 is ASGI, so gunicorn runs it through uvicorn's
+# worker class; gunicorn still supplies the process supervision. Run with
+# --workers 1 so the keep-alive, queue and relay singletons stay in one process
+# (see docker-entrypoint.sh).
 gunicorn==23.0.0
+uvicorn==0.38.0
 
 # Logging and error handling
 structlog==23.1.0

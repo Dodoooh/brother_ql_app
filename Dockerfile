@@ -4,10 +4,11 @@
 # 3.12 today). pysnmp itself is gone now, and every remaining requirement
 # installs and imports on 3.12.
 #
-# What holds this at 3.11 is that connexion 2.14.2 pins Werkzeug to 2.2.3 and
-# Flask to 2.2.5, neither of which was ever tested against 3.12. Importing
-# cleanly is not the same as running correctly, so moving up belongs with the
-# connexion 3 migration and its own test run, not here.
+# What held this at 3.11 was connexion 2.14.2, which pinned Werkzeug to 2.2.3
+# and Flask to 2.2.5, neither of them tested against 3.12. That pin is gone with
+# the move to connexion 3, so 3.12 is now a question of running the suite
+# against it rather than of a dependency forbidding it. Still a change of its
+# own, not a side effect of this one.
 #
 # 3.9 is EOL and locks the image out of the current Pillow/urllib3.
 FROM python:3.11-slim
@@ -43,7 +44,7 @@ RUN mkdir -p /app/uploads /app/data
 # Copy application code. Only the files the container actually runs -- tests,
 # docs, screenshots and CI config have no business in the published image.
 COPY src/ ./src/
-COPY wsgi.py ./
+COPY asgi.py ./
 # CC BY-NC-SA 4.0 requires the licence notice to travel with the distribution,
 # and a published image counts as one.
 COPY LICENSE ./

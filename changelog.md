@@ -5,6 +5,14 @@ All notable changes to the Brother QL Printer App will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.1] - 2026-08-05
+
+### Changed
+- **Connexion 3.** The previous version pinned Werkzeug to 2.2.3 and Flask to 2.2.5, and those pins were behind all eight exemptions the dependency scan carried. The scan now runs with none and reports nothing. The API is untouched: the same 33 paths and 35 operations, the same schemas, the same error shape, and labels that render byte for byte as before. The Docker image takes the same compose file, port and environment variables.
+- **The server entrypoint is `asgi.py`, served by gunicorn through uvicorn's worker class.** Connexion 3 is ASGI, and the Flask application underneath it does not carry the API routes: on its own it answers `/health` and the static files and returns 404 for all 35 operations. This affects a deployment that starts the server by hand; the image and `python src/app.py` are unchanged, and `--workers 1` still applies.
+- **Request validation, routing and security run in middleware ahead of Flask**, and error handling and the upload limit sit there with them. A schema violation answers `{code, message, details}` as declared rather than RFC-7807, and a body over 16 MB is refused on its `Content-Length` before it is read.
+- **Two things the specification left implicit are now written down.** The literal `/jobs/...` paths are declared before `/jobs/{job_id}`, and the `302` from `POST /share` declares its content type and `Location` header. Requests and responses are unchanged; a strict reader of the document is not.
+
 ## [4.0.0] - 2026-08-05
 
 ### Breaking Changes
