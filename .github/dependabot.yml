@@ -1,8 +1,12 @@
+# Dependabot opens its pull requests against dev, not the default branch:
+# everything here reaches main by way of dev, and a bump that lands on main
+# first would have to be carried backwards.
 version: 2
 updates:
   # Python dependencies declared in requirements.txt
   - package-ecosystem: "pip"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
@@ -13,6 +17,7 @@ updates:
   # GitHub Actions used in the workflows
   - package-ecosystem: "github-actions"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
@@ -20,9 +25,10 @@ updates:
       - "dependencies"
       - "github-actions"
 
-  # Docker base image (python:3.9-slim in the Dockerfile)
+  # Docker base image (python:3.11-slim in the Dockerfile)
   - package-ecosystem: "docker"
     directory: "/"
+    target-branch: "dev"
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
