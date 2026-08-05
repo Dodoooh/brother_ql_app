@@ -120,15 +120,48 @@ jobs:
           fi
           echo "VERSION_TAG=$VERSION" >> $GITHUB_ENV
 
-      # Build Docker Image
-      - name: Build Docker Image
-        run: |
-          docker build \
-            -t ${{ secrets.DOCKER_USERNAME }}/brother_ql_app:${{ env.IMAGE_TAG }} \
-            -t ${{ secrets.DOCKER_USERNAME }}/brother_ql_app:${{ env.VERSION_TAG }} .
+      # arm64 is emulated on an amd64 runner, which is why these two steps are
+      # here at all. Nothing is compiled during the build -- every dependency
+      # arrives as a wheel -- so the emulation only has to run pip and a few
+      # shell commands.
+      - name: Set up QEMU for the arm64 build
+        uses: docker/setup-qemu-action@v3
 
-      # Push Docker Image to Docker Hub
-      - name: Push Docker Image
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Built for both architectures and published as one multi-arch tag, so
+      # `docker pull` picks the right one by itself.
+      #
+      # arm64 is not a nice-to-have here: this app runs next to the printer, and
+      # that machine is usually a Raspberry Pi or a NAS. Until now those had no
+      # image at all.
+      - name: Build and push the image for amd64 and arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          provenance: false
+          tags: |
+            ${{ secrets.DOCKER_USERNAME }}/brother_ql_app:${{ env.IMAGE_TAG }}
+            ${{ secrets.DOCKER_USERNAME }}/brother_ql_app:${{ env.VERSION_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # A tag that exists but serves the wrong architecture is worse than one
+      # that is missing, so the manifest is read back rather than assumed.
+      - name: Check both architectures are in the published tag
         run: |
-          docker push ${{ secrets.DOCKER_USERNAME }}/brother_ql_app:${{ env.IMAGE_TAG }}
-          docker push ${{ secrets.DOCKER_USERNAME }}/brother_ql_app:${{ env.VERSION_TAG }}
+          set -euo pipefail
+          for tag in "${{ env.IMAGE_TAG }}" "${{ env.VERSION_TAG }}"; do
+            image="${{ secrets.DOCKER_USERNAME }}/brother_ql_app:$tag"
+            archs=$(docker buildx imagetools inspect "$image" --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')
+            echo "$image -> $archs"
+            for want in linux/amd64 linux/arm64; do
+              case "$archs" in
+                *"$want"*) ;;
+                *) echo "missing $want in $image" >&2; exit 1 ;;
+              esac
+            done
+          done
