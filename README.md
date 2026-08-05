@@ -61,6 +61,12 @@ The interface is then at `http://<host>:5000` and the API documentation at
 `http://<host>:5000/api/v1/ui/`. Set your printer address under Settings or with
 `PUT /api/v1/settings`.
 
+The image is published for `linux/amd64` and `linux/arm64`, which covers a
+64-bit Raspberry Pi, a NAS and an ordinary server. There is no 32-bit build:
+Pillow ships no armv7 wheel, so it would have to be compiled, and this image
+deliberately carries no compiler. On a 32-bit system, build it yourself with
+`docker build`.
+
 The API is open to whoever can reach the port. That matches what it drives: a
 label printer accepts a raster on port 9100 from anyone on the same network, with
 or without this app in front of it. Give it a network you trust, or a reverse
