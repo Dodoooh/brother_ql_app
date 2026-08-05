@@ -9,7 +9,7 @@ setup(
     install_requires=[
         # Core
         "Flask<2.3.0,>=2.0.0",
-        "connexion[swagger-ui]==2.14.2",
+        "connexion[swagger-ui]==3.3.0",
         "flask-cors==6.0.5",
         # Imported directly by src/app.py, not just transitively via connexion.
         "PyYAML==6.0.3",
