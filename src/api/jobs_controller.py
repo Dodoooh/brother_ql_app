@@ -88,6 +88,22 @@ def reprint_job(job_id: str) -> Dict[str, Any]:
     return {"job_id": new_id}
 
 
+# The content types this endpoint may answer with. It serves whatever was
+# uploaded -- an image or a PDF -- and naming the type lets a browser show it
+# instead of downloading it blindly. The list is duplicated in openapi.yaml as
+# the declared 200 content, and the two have to agree: Connexion validates the
+# outgoing type against the document.
+SERVABLE_JOB_FILE_TYPES = frozenset({
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/bmp",
+    "image/webp",
+    "image/tiff",
+    "application/pdf",
+})
+
+
 def get_job_file(job_id: str):
     """Serve the persisted image/pdf file backing a job.
 
@@ -117,8 +133,13 @@ def get_job_file(job_id: str):
             resource_id=job_id,
         )
 
-    mimetype = mimetypes.guess_type(real_path)[0] or "application/octet-stream"
-    logger.info("Serving job file", job_id=job_id, mimetype=mimetype)
+    # Only the types the specification declares for this response. Anything
+    # else is served as a download rather than named: the response validator
+    # checks the outgoing content type against the document, so a type that is
+    # not in it turns a working download into a 500.
+    guessed = mimetypes.guess_type(real_path)[0]
+    mimetype = guessed if guessed in SERVABLE_JOB_FILE_TYPES else "application/octet-stream"
+    logger.info("Serving job file", job_id=job_id, mimetype=mimetype, guessed=guessed)
     return send_file(real_path, mimetype=mimetype)
 
 

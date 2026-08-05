@@ -4,7 +4,7 @@ info:
   description: |
     API for controlling Brother QL label printers, enabling customizable text and image printing.
     This API allows for printing formatted text and images on labels with various settings.
-  version: 4.0.2
+  version: 4.0.3
   contact:
     name: Brother QL Printer App Support
     url: https://github.com/dodoooh/brother_ql_app/issues
@@ -311,6 +311,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PreviewResponse'
+            # The same preview as raw bytes, for a client that asks with
+            # Accept: image/png (the X-Label-Width-Px / X-Label-Height-Px
+            # headers come with it). Declared because the response validator
+            # checks the outgoing content type against this document.
+            image/png:
+              schema:
+                type: string
+                format: binary
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -424,6 +432,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PreviewResponse'
+            # The same preview as raw bytes, for a client that asks with
+            # Accept: image/png (the X-Label-Width-Px / X-Label-Height-Px
+            # headers come with it). Declared because the response validator
+            # checks the outgoing content type against this document.
+            image/png:
+              schema:
+                type: string
+                format: binary
         '400':
           description: >-
             Invalid request parameters, or an image larger than the server's
@@ -639,9 +655,16 @@ paths:
             type: string
       responses:
         '200':
+          # A shared PDF is served as application/pdf, anything else as a
+          # download. Both are declared because the response validator checks
+          # the outgoing type against this document.
           description: The staged file
           content:
             application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
               schema:
                 type: string
                 format: binary
@@ -702,6 +725,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PreviewResponse'
+            # The same preview as raw bytes, for a client that asks with
+            # Accept: image/png (the X-Label-Width-Px / X-Label-Height-Px
+            # headers come with it). Declared because the response validator
+            # checks the outgoing content type against this document.
+            image/png:
+              schema:
+                type: string
+                format: binary
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -855,6 +886,14 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PreviewResponse'
+            # The same preview as raw bytes, for a client that asks with
+            # Accept: image/png (the X-Label-Width-Px / X-Label-Height-Px
+            # headers come with it). Declared because the response validator
+            # checks the outgoing content type against this document.
+            image/png:
+              schema:
+                type: string
+                format: binary
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -948,6 +987,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PreviewResponse'
+            # This preview can be asked for as raw bytes too, like the others:
+            # calibration_controller shares preview_controller's helper.
+            image/png:
+              schema:
+                type: string
+                format: binary
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -1274,9 +1319,42 @@ paths:
             type: string
       responses:
         '200':
+          # Every type the endpoint may answer with, not just the fallback. It
+          # serves the file that was uploaded and names its type so a browser
+          # can show it rather than download it blindly; a type missing here is
+          # rejected by response validation and the download becomes a 500.
+          # Kept in step with SERVABLE_JOB_FILE_TYPES in jobs_controller.py.
           description: The persisted job file
           content:
             application/octet-stream:
+              schema:
+                type: string
+                format: binary
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/gif:
+              schema:
+                type: string
+                format: binary
+            image/bmp:
+              schema:
+                type: string
+                format: binary
+            image/webp:
+              schema:
+                type: string
+                format: binary
+            image/tiff:
               schema:
                 type: string
                 format: binary

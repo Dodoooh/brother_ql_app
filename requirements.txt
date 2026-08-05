@@ -23,7 +23,7 @@ pypdfium2==5.12.1
 # --workers 1 so the keep-alive, queue and relay singletons stay in one process
 # (see docker-entrypoint.sh).
 gunicorn==26.0.0
-uvicorn==0.38.0
+uvicorn==0.52.1
 
 # Logging and error handling
-structlog==23.1.0
+structlog==26.1.0

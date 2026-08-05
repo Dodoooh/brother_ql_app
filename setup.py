@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="brother_ql_app",
-    version="4.0.2",
+    version="4.0.3",
     packages=find_packages(),
     include_package_data=True,
     # Kept in sync with requirements.txt (the authoritative dependency list).
@@ -21,9 +21,9 @@ setup(
         # Server. Connexion 3 is ASGI, so gunicorn serves it through uvicorn's
         # worker class (see docker-entrypoint.sh).
         "gunicorn==26.0.0",
-        "uvicorn==0.38.0",
+        "uvicorn==0.52.1",
         # Logging
-        "structlog==23.1.0",
+        "structlog==26.1.0",
     ],
     python_requires=">=3.11",
 )

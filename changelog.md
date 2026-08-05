@@ -5,6 +5,18 @@ All notable changes to the Brother QL Printer App will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.3] - 2026-08-05
+
+### Fixed
+- **Downloading a job's file answered 500.** `GET /jobs/{job_id}/file` serves the upload it was given, as `image/png` or `application/pdf`, while the specification declared only `application/octet-stream` for that response. Every job that came from an upload was affected; text jobs carry no file and answer 404, which is unchanged.
+- **Asking a preview for raw bytes answered 500.** With `Accept: image/png`, `/text/preview`, `/qrcode/preview`, `/label/preview`, `/image/preview` and `/calibration/preview` return the PNG itself instead of a data URL, and that type was not declared either.
+- **Retrieving a shared PDF answered 500.** `GET /share/{token}` serves a PDF as `application/pdf`; only `application/octet-stream` was declared.
+
+All three date from 4.0.1, where Connexion 3 began validating responses against the specification and these three had never matched it. Every response now declares each type it can carry, and each handler names the type it returns rather than leaving the choice to be inferred.
+
+### Changed
+- **Dependencies.** `uvicorn` 0.38.0 to 0.52.1, `structlog` 23.1.0 to 26.1.0, and the action that writes the Docker Hub page to v5. `uvicorn` is the one that could have hurt: the worker class gunicorn runs it through has been deprecated elsewhere, and it is still there. The log format is unchanged.
+
 ## [4.0.2] - 2026-08-05
 
 ### Changed

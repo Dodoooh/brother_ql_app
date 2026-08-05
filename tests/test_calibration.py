@@ -34,6 +34,8 @@ import math
 import os
 import threading
 
+import json
+
 import pytest
 
 from src.config.default_settings import (
@@ -1900,9 +1902,18 @@ def test_a_dry_run_neither_prints_nor_queues(controller, sent):
 
 
 def test_the_preview_endpoint_returns_a_data_url(controller):
+    """The preview names its content type rather than returning a bare dict.
+
+    Both branches have to: the operation declares JSON and image/png, and with
+    two content types on it Connexion no longer picks one on the handler's
+    behalf -- a bare dict leaves it unable to tell which was meant, and it
+    answers 500 rather than guessing.
+    """
     response = controller.preview_calibration({"label_size": "d24"})
 
-    assert response["image"].startswith("data:image/png;base64,")
+    assert response.mimetype == "application/json"
+    body = json.loads(response.get_data(as_text=True))
+    assert body["image"].startswith("data:image/png;base64,")
 
 
 def test_the_preview_endpoint_rejects_an_unknown_offset_field(controller):

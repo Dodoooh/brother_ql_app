@@ -63,7 +63,12 @@ def _preview_response(data_url: str) -> Union[Dict[str, Any], Response]:
         except Exception:  # noqa: BLE001 - headers are best-effort metadata
             pass
         return Response(png, mimetype="image/png", headers=headers)
-    return {"image": data_url}
+
+    # The JSON branch names its type as well. Declaring two content types on
+    # the operation means Connexion no longer picks one on our behalf, and a
+    # bare dict leaves it unable to tell which of the two was meant -- which it
+    # answers with a 500 rather than a guess.
+    return Response(json.dumps({"image": data_url}), mimetype="application/json")
 
 
 def preview_text(body: Dict[str, Any]) -> Dict[str, Any]:
