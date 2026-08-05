@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="brother_ql_app",
-    version="4.0.1",
+    version="4.0.2",
     packages=find_packages(),
     include_package_data=True,
     # Kept in sync with requirements.txt (the authoritative dependency list).
@@ -16,11 +16,11 @@ setup(
         # Printer communication
         "brother-ql-inventree==1.3",
         "Pillow==12.3.0",
-        "qrcode==7.4.2",
-        "pypdfium2==4.30.0",
+        "qrcode==8.2",
+        "pypdfium2==5.12.1",
         # Server. Connexion 3 is ASGI, so gunicorn serves it through uvicorn's
         # worker class (see docker-entrypoint.sh).
-        "gunicorn==23.0.0",
+        "gunicorn==26.0.0",
         "uvicorn==0.38.0",
         # Logging
         "structlog==23.1.0",

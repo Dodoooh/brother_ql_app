@@ -5,6 +5,11 @@ All notable changes to the Brother QL Printer App will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.2] - 2026-08-05
+
+### Changed
+- **Dependencies.** `qrcode` 7.4.2 to 8.2, `pypdfium2` 4.30.0 to 5.12.1, `gunicorn` 23.0.0 to 26.0.0, and the four GitHub Actions the pipeline uses. Both library majors touch a render path, so both were checked against the previous version before the bump: the same QR code and the same PDF page come out byte for byte identical, and so do the six reference labels. `pypdfium2` dropped `V_PYPDFIUM2`, which this app never read.
+
 ## [4.0.1] - 2026-08-05
 
 ### Changed
