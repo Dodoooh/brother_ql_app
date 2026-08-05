@@ -1,3 +1,13 @@
+# One pipeline, one graph on the run page: read the version, check the code,
+# build each architecture, assemble the tag, cut the release. Every stage names
+# what it waits for, so nothing can happen out of order.
+#
+# It used to be two workflows. `release.yml` hung off the same `push` event as
+# this one and knew nothing about it, so the tag and the GitHub release were
+# created while the tests were still running -- measured on 4.0.0-rc.2, the
+# release existed four minutes and 47 seconds before the image it names. A
+# failing test would have left a release pointing at nothing.
+
 name: CI/CD Pipeline
 
 on:
@@ -12,28 +22,109 @@ on:
       - main
       - dev
 
-jobs:
-  # Run lint, tests and a dependency vulnerability scan before building the
-  # image.
-  #
-  # NOTE on blocking behaviour:
-  #   - ruff is intentionally still non-blocking (|| true) because the codebase
-  #     is not yet lint-clean. To make it block the build later, simply drop the
-  #     `|| true` from that step.
-  #   - pytest IS blocking: a failing test must stop the build.
-  #   - pip-audit IS blocking (no `|| true`): a known vulnerability in the
-  #     pinned/installed requirements must fail the pipeline and stop the build.
-  test:
-    runs-on: ubuntu-latest
+# Two pushes in quick succession would otherwise race, and the older one could
+# be the last to publish. Pull requests cancel: only the newest matters.
+concurrency:
+  group: pipeline-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+permissions:
+  contents: read
+
+jobs:
+  # --------------------------------------------------------------------------
+  # The version, read once and handed to everyone who needs it.
+  #
+  # It used to be parsed twice, here and in release.yml, with two copies of the
+  # same regex kept in step by hand.
+  # --------------------------------------------------------------------------
+  version:
+    name: Read the version
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.read.outputs.version }}
+      moving_tag: ${{ steps.read.outputs.moving_tag }}
+      prerelease: ${{ steps.read.outputs.prerelease }}
+      releasable: ${{ steps.read.outputs.releasable }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
+
+      - name: Read the version from the changelog
+        id: read
+        run: |
+          set -euo pipefail
+
+          # The first "## [x.y.z]" heading, with an optional pre-release suffix
+          # (-dev, -rc.1). Anything above it, such as "## [Unreleased]", is
+          # skipped because it does not match.
+          ver_re='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'
+          version=$(grep -m1 -oE "## \[${ver_re}\]" changelog.md | grep -oE "${ver_re}" || true)
+          if [ -z "$version" ]; then
+            echo "No version heading found in changelog.md" >&2
+            exit 1
+          fi
+
+          # The moving tag follows the branch; the version tag never moves.
+          case "${GITHUB_REF}" in
+            refs/heads/main) moving_tag=latest ;;
+            refs/heads/dev)  moving_tag=dev ;;
+            *)               moving_tag= ;;
+          esac
+
+          # A suffix means a pre-release. Stable versions belong to main: without
+          # this, bumping the changelog to a final version and pushing it to dev
+          # would put the tag on a dev commit, and the merge to main would then
+          # find the tag taken and publish nothing.
+          case "$version" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+          releasable=true
+          if [ "${GITHUB_REF}" = "refs/heads/dev" ] && [ "$prerelease" = "false" ]; then
+            releasable=false
+          fi
+
+          {
+            echo "version=$version"
+            echo "moving_tag=$moving_tag"
+            echo "prerelease=$prerelease"
+            echo "releasable=$releasable"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Version"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| From the changelog | \`$version\` |"
+            echo "| Moving tag | \`${moving_tag:-none}\` |"
+            echo "| Pre-release | $prerelease |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # --------------------------------------------------------------------------
+  # Lint, tests and a dependency scan. Everything downstream waits for this.
+  #
+  # What blocks and what does not:
+  #   - ruff is deliberately non-blocking (`|| true`): the codebase is not lint
+  #     clean yet. Drop the `|| true` to enforce it.
+  #   - pytest blocks. A failing test must stop the build.
+  #   - pip-audit blocks. A known vulnerability in the pinned requirements must
+  #     stop the build.
+  # --------------------------------------------------------------------------
+  test:
+    name: Lint, tests, dependency scan
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
 
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
 
       # The same font family the runtime image installs (see Dockerfile). Every
       # rendering test looks for a real TrueType face and quietly skips itself
@@ -51,24 +142,16 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements-dev.txt
 
-      # Non-blocking for now (codebase not yet lint-clean) — remove `|| true`
-      # to enforce.
-      - name: Lint (ruff)
+      - name: Lint (ruff, not blocking yet)
         run: ruff check . || true
 
-      # BLOCKING: a failing test fails the job and, via `needs: test`, stops the
-      # image from being built and pushed.
       - name: Run tests (pytest)
         run: pytest -q
 
-      # BLOCKING: audit the pinned requirements. A vulnerability finding fails
-      # this step, fails the `test` job, and (via `needs: test`) prevents the
-      # Docker image from being built and pushed.
-      #
-      # The ignored advisories are structural, not oversights:
-      #   flask / werkzeug -- connexion 2.14.2 requires werkzeug<2.3, which pins
-      #     Flask to 2.2.5. Clearing these means migrating to connexion 3.
-      # Everything outside this list is fixable and must keep failing the build.
+      # The ignored advisories are structural, not oversights: connexion 2.14.2
+      # requires werkzeug<2.3, which pins Flask to 2.2.5. Clearing them means
+      # migrating to connexion 3. Everything outside this list is fixable and
+      # must keep failing the build.
       - name: Dependency vulnerability scan (pip-audit)
         run: |
           pip-audit -r requirements.txt \
@@ -81,87 +164,236 @@ jobs:
             --ignore-vuln GHSA-87hc-h4r5-73f7 \
             --ignore-vuln GHSA-29vq-49wr-vm6x
 
-  build-and-push:
-    runs-on: ubuntu-latest
-    needs: test
-    # Push events only. A pull request has no branch ref to derive a tag from,
-    # and its Docker Hub credentials are not available anyway -- pull requests
-    # are meant to be verified by the `test` job, not to publish anything.
+  # --------------------------------------------------------------------------
+  # One job per architecture, each on a runner of its own kind. No emulation:
+  # this repository is public, so GitHub's arm64 runners cost nothing, and the
+  # arm64 `pip install` drops from 108 seconds under QEMU to native speed.
+  #
+  # Neither job tags anything. Each pushes its layers and reports back a digest,
+  # and only the next job turns those into a tag -- so a tag can never exist
+  # with one architecture missing.
+  # --------------------------------------------------------------------------
+  image:
+    name: Build ${{ matrix.platform }}
+    needs: [version, test]
     if: github.event_name == 'push'
-
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-24.04
+            slug: amd64
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+            slug: arm64
+    env:
+      IMAGE: ${{ secrets.DOCKER_USERNAME }}/brother_ql_app
     steps:
-      # Checkout des Codes
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
-      # Log in to Docker Hub
       - name: Log in to Docker Hub
-        uses: docker/login-action@v2
+        uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      # Set Docker Tags based on the branch. Alongside the moving tag we publish
-      # an immutable one taken from the changelog, so a bug report can name the
-      # exact build it came from ("dev" moves with every push).
-      - name: Set Docker Tags
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # push-by-digest: the layers go to the registry, no tag is claimed.
+      # provenance is off because the attestation manifests it adds show up as
+      # an extra "unknown/unknown" platform, which makes the check below --
+      # "are both architectures in this tag" -- unable to answer its question.
+      # The cache scope is per platform: one shared scope has the two jobs
+      # overwrite each other's entries.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.slug }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.slug }}
+
+      - name: Hand the digest to the next job
         run: |
-          if [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
-            echo "IMAGE_TAG=latest" >> $GITHUB_ENV
-          elif [[ "${{ github.ref }}" == "refs/heads/dev" ]]; then
-            echo "IMAGE_TAG=dev" >> $GITHUB_ENV
-          fi
+          set -euo pipefail
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+          echo "${{ matrix.platform }} -> $digest" >> "$GITHUB_STEP_SUMMARY"
 
-          VER_RE='[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?'
-          VERSION=$(grep -m1 -oE "## \[${VER_RE}\]" changelog.md | grep -oE "${VER_RE}")
-          if [ -z "$VERSION" ]; then
-            echo "ERROR: Could not extract a version from changelog.md" >&2
-            exit 1
-          fi
-          echo "VERSION_TAG=$VERSION" >> $GITHUB_ENV
+      - name: Upload the digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.slug }}
+          path: /tmp/digests/*
+          retention-days: 1
+          if-no-files-found: error
 
-      # arm64 is emulated on an amd64 runner, which is why these two steps are
-      # here at all. Nothing is compiled during the build -- every dependency
-      # arrives as a wheel -- so the emulation only has to run pip and a few
-      # shell commands.
-      - name: Set up QEMU for the arm64 build
-        uses: docker/setup-qemu-action@v3
+  # --------------------------------------------------------------------------
+  # Assemble the two digests into one multi-arch tag, so `docker pull` picks the
+  # right architecture by itself.
+  #
+  # The moving tag (dev / latest) is rewritten on every push, which is its job.
+  # The version tag is written once and then left alone: it exists so a bug
+  # report can name the exact build it came from, and a tag that quietly turns
+  # into a different image cannot do that. A workflow change therefore costs no
+  # version bump.
+  # --------------------------------------------------------------------------
+  publish:
+    name: Publish the multi-arch tag
+    needs: [version, image]
+    runs-on: ubuntu-24.04
+    env:
+      IMAGE: ${{ secrets.DOCKER_USERNAME }}/brother_ql_app
+      VERSION: ${{ needs.version.outputs.version }}
+      MOVING_TAG: ${{ needs.version.outputs.moving_tag }}
+    steps:
+      - name: Collect the digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Built for both architectures and published as one multi-arch tag, so
-      # `docker pull` picks the right one by itself.
-      #
-      # arm64 is not a nice-to-have here: this app runs next to the printer, and
-      # that machine is usually a Raspberry Pi or a NAS. Until now those had no
-      # image at all.
-      - name: Build and push the image for amd64 and arm64
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          provenance: false
-          tags: |
-            ${{ secrets.DOCKER_USERNAME }}/brother_ql_app:${{ env.IMAGE_TAG }}
-            ${{ secrets.DOCKER_USERNAME }}/brother_ql_app:${{ env.VERSION_TAG }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # A tag that exists but serves the wrong architecture is worse than one
-      # that is missing, so the manifest is read back rather than assumed.
-      - name: Check both architectures are in the published tag
+      - name: Decide which tags to write
+        id: tags
         run: |
           set -euo pipefail
-          for tag in "${{ env.IMAGE_TAG }}" "${{ env.VERSION_TAG }}"; do
-            image="${{ secrets.DOCKER_USERNAME }}/brother_ql_app:$tag"
-            archs=$(docker buildx imagetools inspect "$image" --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')
-            echo "$image -> $archs"
+          tags=""
+          [ -n "$MOVING_TAG" ] && tags="$tags -t $IMAGE:$MOVING_TAG"
+
+          if docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then
+            echo "::notice::$IMAGE:$VERSION already exists and is left untouched."
+            echo "version_written=false" >> "$GITHUB_OUTPUT"
+          else
+            tags="$tags -t $IMAGE:$VERSION"
+            echo "version_written=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ -z "$tags" ]; then
+            echo "Nothing to tag on this ref." >&2
+            exit 1
+          fi
+          echo "args=$tags" >> "$GITHUB_OUTPUT"
+
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create ${{ steps.tags.outputs.args }} \
+            $(printf "$IMAGE@sha256:%s " *)
+
+      # A tag that exists but serves the wrong architecture is worse than one
+      # that is missing: the first looks like it worked. So the published
+      # manifest is read back rather than assumed.
+      - name: Check both architectures are in the published tags
+        run: |
+          set -euo pipefail
+          tags="$MOVING_TAG"
+          [ "${{ steps.tags.outputs.version_written }}" = "true" ] && tags="$tags $VERSION"
+
+          {
+            echo "### Published"
+            echo ""
+            echo "| Tag | Architectures |"
+            echo "|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          for tag in $tags; do
+            archs=$(docker buildx imagetools inspect "$IMAGE:$tag" \
+              --format '{{range .Manifest.Manifests}}{{.Platform.OS}}/{{.Platform.Architecture}} {{end}}')
+            echo "$IMAGE:$tag -> $archs"
+            echo "| \`$tag\` | $archs |" >> "$GITHUB_STEP_SUMMARY"
             for want in linux/amd64 linux/arm64; do
               case "$archs" in
                 *"$want"*) ;;
-                *) echo "missing $want in $image" >&2; exit 1 ;;
+                *) echo "::error::$want missing from $IMAGE:$tag"; exit 1 ;;
               esac
             done
           done
+
+          if [ "${{ steps.tags.outputs.version_written }}" != "true" ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "\`$VERSION\` already existed and was left as it was." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  # --------------------------------------------------------------------------
+  # The tag and the GitHub release, last, once there is an image to point at.
+  #
+  # actions/create-release was used here until now. It has been archived since
+  # 2021 and is replaced by the gh CLI, which the runner already has.
+  # --------------------------------------------------------------------------
+  release:
+    name: Tag and release
+    needs: [version, publish]
+    if: needs.version.outputs.releasable == 'true' && needs.version.outputs.moving_tag != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.version.outputs.version }}
+      PRERELEASE: ${{ needs.version.outputs.prerelease }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Skip if the tag is already taken
+        id: check
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "::notice::Tag $VERSION already exists; nothing to release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The body of this version's own changelog section, keyed off the resolved
+      # version so any other heading above it is skipped safely.
+      - name: Take the release notes from the changelog
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          awk -v ver="$VERSION" '
+            index($0, "## [" ver "]") == 1 { f = 1; next }
+            f && /^## \[/ { exit }
+            f { print }
+          ' changelog.md > /tmp/notes.md
+          if [ ! -s /tmp/notes.md ]; then
+            echo "No changelog section for $VERSION" >&2
+            exit 1
+          fi
+
+      - name: Create the tag and the release
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          set -euo pipefail
+          flags=""
+          [ "$PRERELEASE" = "true" ] && flags="--prerelease"
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "Release $VERSION" \
+            --notes-file /tmp/notes.md \
+            $flags
+          echo "### Released" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "\`$VERSION\` (pre-release: $PRERELEASE)" >> "$GITHUB_STEP_SUMMARY"
