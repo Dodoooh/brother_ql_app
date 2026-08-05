@@ -202,7 +202,7 @@ def test_an_unexpected_exception_says_nothing_about_itself(client, printer_contr
     record in the log.
     """
     boom = RuntimeError(
-        "Timeout in /app/src/services/printer_service.py while calling pysnmp")
+        "Timeout in /app/src/services/printer_service.py while calling brother_ql")
     with patch.object(printer_controller.printer_service, "check_printer_status",
                       side_effect=boom):
         response = client.post(f"{API}/printers/status", json=VALID_STATUS_BODY)
@@ -211,7 +211,7 @@ def test_an_unexpected_exception_says_nothing_about_itself(client, printer_contr
     assert body["message"] == "An internal error occurred"
 
     serialized = json.dumps(body)
-    assert "pysnmp" not in serialized
+    assert "brother_ql" not in serialized
     assert "printer_service.py" not in serialized
     assert "/app/" not in serialized
     assert "Traceback" not in serialized

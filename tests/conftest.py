@@ -3,10 +3,10 @@ Shared pytest configuration and lightweight dependency stubs.
 
 The application code imports a handful of heavy / hardware-oriented third-party
 packages at *module import time* (``structlog``, ``brother_ql``, ``PIL``,
-``qrcode``, ``pysnmp``, ``flask``/``werkzeug``). In the CI/Docker image all of
-those are installed and the real packages are used. To keep the unit tests robust and runnable even in
-a bare environment, this conftest installs *minimal* stand-in modules for any of
-them that happen to be missing.
+``qrcode``, ``flask``/``werkzeug``). In the CI/Docker image all of those are
+installed and the real packages are used. To keep the unit tests robust and
+runnable even in a bare environment, this conftest installs *minimal* stand-in
+modules for any of them that happen to be missing.
 
 Important properties of these stubs:
 
