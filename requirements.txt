@@ -16,7 +16,7 @@ Pillow==12.3.0
 qrcode==7.4.2
 # PDF rendering. pypdfium2 bundles the PDFium binary in its wheel (no system
 # deps) and is Apache-2.0/BSD licensed.
-pypdfium2==4.30.0
+pypdfium2==5.12.1
 
 # Production server. Connexion 3 is ASGI, so gunicorn runs it through uvicorn's
 # worker class; gunicorn still supplies the process supervision. Run with
