@@ -26,4 +26,4 @@ gunicorn==26.0.0
 uvicorn==0.38.0
 
 # Logging and error handling
-structlog==23.1.0
+structlog==26.1.0

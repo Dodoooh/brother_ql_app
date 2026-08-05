@@ -23,7 +23,7 @@ setup(
         "gunicorn==26.0.0",
         "uvicorn==0.38.0",
         # Logging
-        "structlog==23.1.0",
+        "structlog==26.1.0",
     ],
     python_requires=">=3.11",
 )
