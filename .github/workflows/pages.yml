@@ -15,6 +15,10 @@ on:
     paths:
       - "src/static/**"
       - ".github/workflows/pages.yml"
+      # The published API reference is rendered from the specification, so a
+      # change to it alone has to redeploy too, or the reference goes stale
+      # while the interface beside it is current.
+      - "src/api/openapi.yaml"
 
 # Allow the workflow to publish to Pages and mint the deployment id token.
 permissions:
@@ -126,6 +130,19 @@ jobs:
           curl -fsSL --retry 3 \
             -o src/static/api/redoc.standalone.js \
             "https://cdn.redoc.ly/redoc/v2.5.0/bundles/redoc.standalone.js"
+          # Redoc's own badge is an <img> pointing back at its CDN, so every
+          # visitor to the reference would announce themselves there. The badge
+          # stays -- the attribution is earned -- but it is served from beside
+          # the page, like every other asset this project ships.
+          curl -fsSL --retry 3 \
+            -o src/static/api/logo-mini.svg \
+            "https://cdn.redoc.ly/redoc/logo-mini.svg"
+          sed -i 's|https://cdn\.redoc\.ly/redoc/logo-mini\.svg|logo-mini.svg|' \
+            src/static/api/redoc.standalone.js
+          if grep -q 'cdn\.redoc\.ly/redoc/logo-mini' src/static/api/redoc.standalone.js; then
+            echo "the badge still points at the CDN; the bundle must have changed" >&2
+            exit 1
+          fi
           cat > src/static/api/index.html <<'HTML'
           <!doctype html>
           <html lang="en">
