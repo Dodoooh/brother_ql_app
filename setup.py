@@ -8,7 +8,7 @@ setup(
     # Kept in sync with requirements.txt (the authoritative dependency list).
     install_requires=[
         # Core
-        "Flask<2.3.0,>=2.0.0",
+        "Flask>=2.0.0,<3.2.0",
         "connexion[swagger-ui]==2.14.2",
         "flask-cors==6.0.5",
         # Imported directly by src/app.py, not just transitively via connexion.
