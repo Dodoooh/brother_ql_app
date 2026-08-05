@@ -41,6 +41,7 @@ jobs:
   version:
     name: Read the version
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     outputs:
       version: ${{ steps.read.outputs.version }}
       moving_tag: ${{ steps.read.outputs.moving_tag }}
@@ -115,6 +116,7 @@ jobs:
   test:
     name: Lint, tests, dependency scan
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -178,6 +180,9 @@ jobs:
     needs: [version, test]
     if: github.event_name == 'push'
     runs-on: ${{ matrix.runner }}
+    # Without this a runner label that is not available queues for GitHub's
+    # default six hours instead of saying so. Both builds take minutes.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -250,6 +255,7 @@ jobs:
     name: Publish the multi-arch tag
     needs: [version, image]
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     env:
       IMAGE: ${{ secrets.DOCKER_USERNAME }}/brother_ql_app
       VERSION: ${{ needs.version.outputs.version }}
@@ -352,6 +358,7 @@ jobs:
     needs: [publish]
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -437,6 +444,7 @@ jobs:
   release:
     name: Tag and release
     needs: [version, publish]
+    timeout-minutes: 10
     if: needs.version.outputs.releasable == 'true' && needs.version.outputs.moving_tag != ''
     runs-on: ubuntu-24.04
     permissions:
