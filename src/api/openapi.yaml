@@ -4,7 +4,7 @@ info:
   description: |
     API for controlling Brother QL label printers, enabling customizable text and image printing.
     This API allows for printing formatted text and images on labels with various settings.
-  version: 4.0.0-rc.1
+  version: 4.0.0-rc.2
   contact:
     name: Brother QL Printer App Support
     url: https://github.com/dodoooh/brother_ql_app/issues

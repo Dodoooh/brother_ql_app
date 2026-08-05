@@ -5,6 +5,11 @@ All notable changes to the Brother QL Printer App will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [4.0.0-rc.2] - 2026-08-05
+
+### Changed
+- **The Docker image is now published for arm64 as well as amd64.** Until now the build ran on an amd64 runner and produced an amd64 image, which is the wrong shape for what this app is: it sits next to the printer, and that machine is usually a Raspberry Pi or a NAS. On one of those, `docker pull` either failed outright or landed a binary that could not run. Both architectures now go out under the same tag as a single multi-arch manifest, so `docker pull` picks the right one without anybody choosing. Nothing is compiled during the build -- every dependency arrives as a wheel -- so the emulated half costs build time and nothing else. The workflow reads the published manifest back afterwards and fails if either architecture is missing, because a tag that exists and serves the wrong binary is worse than one that is absent.
+
 ## [4.0.0-rc.1] - 2026-08-05
 
 ### Breaking Changes

@@ -8,7 +8,7 @@ from flask import request, jsonify
 from flask_cors import CORS
 
 # Application version (surfaced by the /health liveness endpoint)
-APP_VERSION = os.environ.get("APP_VERSION", "4.0.0-rc.1")
+APP_VERSION = os.environ.get("APP_VERSION", "4.0.0-rc.2")
 
 from src.utils.error_handlers import build_error_body, register_error_handlers
 from src.utils.pillow_patch import apply_pillow_patch
