@@ -203,9 +203,9 @@ the combinations somebody has held in their hand.
 
 | Printer | Media | Tested by | Date | Version |
 |---|---|---|---|---|
-| QL-820NWB | 62 mm continuous (`62`) | Dodoooh | 2026-08-04 | 4.0.0-dev |
-| QL-820NWB | 12 mm continuous (`12`) | Dodoooh | 2026-08-04 | 4.0.0-dev |
-| QL-820NWB | 24 mm round die-cut (`d24`) | Dodoooh | 2026-08-04 | 4.0.0-dev |
+| QL-820NWB | 62 mm continuous (`62`) | Dodoooh | 2026-08-04 | 4.0.0-rc.1 |
+| QL-820NWB | 12 mm continuous (`12`) | Dodoooh | 2026-08-04 | 4.0.0-rc.1 |
+| QL-820NWB | 24 mm round die-cut (`d24`) | Dodoooh | 2026-08-04 | 4.0.0-rc.1 |
 
 If you print on something that is not in the table, a line here is welcome:
 printer, media, and whether anything needed calibration.

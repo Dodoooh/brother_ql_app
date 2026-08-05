@@ -5,7 +5,7 @@ All notable changes to the Brother QL Printer App will be documented in this fil
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [4.0.0-dev] - 2026-08-05
+## [4.0.0-rc.1] - 2026-08-05
 
 ### Breaking Changes
 - **Printing is now asynchronous (print queue).** The print endpoints (`/text/print`, `/image/print`, `/qrcode/print`, `/label/text-qrcode`, `/label/text-image`, `/pdf/print`) now enqueue the job and return **immediately**. The response shape is unchanged (`{ "success": true, "job_id": "...", "message": "..." }`), but its meaning changed:
