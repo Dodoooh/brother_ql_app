@@ -198,7 +198,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       # push-by-digest: the layers go to the registry, no tag is claimed.
       # provenance is off because the attestation manifests it adds show up as
@@ -267,7 +267,7 @@ jobs:
           password: ${{ secrets.DOCKER_PASSWORD }}
 
       - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Decide which tags to write
         id: tags
