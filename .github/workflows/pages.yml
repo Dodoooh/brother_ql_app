@@ -164,7 +164,7 @@ jobs:
           echo "API reference built: $(du -sh src/static/api | cut -f1)"
 
       - name: Upload static UI artifact
-        uses: actions/upload-pages-artifact@v3
+        uses: actions/upload-pages-artifact@v5
         with:
           path: src/static
 
