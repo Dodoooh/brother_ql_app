@@ -43,7 +43,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Configure Pages
-        uses: actions/configure-pages@v5
+        uses: actions/configure-pages@v6
 
       # Web analytics for the published demo, added to the artifact and never to
       # the repository.
