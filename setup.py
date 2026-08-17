@@ -21,7 +21,7 @@ setup(
         # Server. Connexion 3 is ASGI, so gunicorn serves it through uvicorn's
         # worker class (see docker-entrypoint.sh).
         "gunicorn==26.0.0",
-        "uvicorn==0.52.1",
+        "uvicorn==0.52.3",
         # Logging
         "structlog==26.1.0",
     ],
