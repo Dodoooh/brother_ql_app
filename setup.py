@@ -17,7 +17,7 @@ setup(
         "brother-ql-inventree==1.3",
         "Pillow==12.3.0",
         "qrcode==8.2",
-        "pypdfium2==5.12.1",
+        "pypdfium2==5.13.0",
         # Server. Connexion 3 is ASGI, so gunicorn serves it through uvicorn's
         # worker class (see docker-entrypoint.sh).
         "gunicorn==26.0.0",
