@@ -15,7 +15,7 @@ setup(
         "PyYAML==6.0.3",
         # Printer communication
         "brother-ql-inventree==1.3",
-        "Pillow==12.3.0",
+        "Pillow==13.0.0",
         "qrcode==8.2",
         "pypdfium2==5.12.1",
         # Server. Connexion 3 is ASGI, so gunicorn serves it through uvicorn's
