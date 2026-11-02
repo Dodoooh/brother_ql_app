@@ -11,7 +11,7 @@
 # own, not a side effect of this one.
 #
 # 3.9 is EOL and locks the image out of the current Pillow/urllib3.
-FROM python:3.11-slim
+FROM python:3.15-slim
 
 WORKDIR /app
 
