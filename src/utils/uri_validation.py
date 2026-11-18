@@ -99,11 +99,15 @@ def validate_printer_uri(uri: str) -> None:
     raises :class:`ValueError` with a clear message otherwise.
 
     Rules:
-      * Only ``tcp://`` and ``usb://`` schemes are allowed.
+      * Allow ``tcp://``, ``usb://``, and the exact path ``file:///dev/usb/lp0``.
       * For ``tcp://`` the host is extracted and, *if it is an IP address*,
         checked against a small blocklist (link-local/metadata, loopback,
         unspecified). Private/LAN IPs and plain hostnames are allowed.
     """
+    # The local container maps this one Linux USB printer device.
+    if uri == "file:///dev/usb/lp0":
+        return
+
     # --- Basic shape checks -------------------------------------------------
     if uri is None or not isinstance(uri, str) or not uri.strip():
         _reject("URI must be a non-empty string.")
